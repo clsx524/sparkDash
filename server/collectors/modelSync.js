@@ -26,7 +26,21 @@ function shQuote(value) {
   return "'" + String(value).replace(/'/g, "'\\''") + "'";
 }
 
-function joinRemotePath(dir, subfolder) {
+/**
+ * Like shQuote, but a leading "~" or "~/" is left unquoted so the remote
+ * shell still expands it to that user's home directory — a value wholly
+ * inside single quotes never undergoes tilde expansion, which would
+ * otherwise turn the default "~/.cache/huggingface" model folder into a
+ * literal directory named "~" on the target.
+ */
+export function shQuotePath(value) {
+  const str = String(value);
+  if (str === "~") return "~";
+  if (str.startsWith("~/")) return "~/" + shQuote(str.slice(2));
+  return shQuote(str);
+}
+
+export function joinRemotePath(dir, subfolder) {
   return `${String(dir).replace(/\/+$/, "")}/${String(subfolder).replace(/^\/+/, "")}`;
 }
 
@@ -43,6 +57,23 @@ export async function syncModelToSpark(modelRegistry, sparkRegistry, model, targ
   if (!registryHost) throw new Error("No Model Registry host configured");
   const registryConfig = modelRegistry.getRegistryConfig();
   if (!registryConfig.directory) throw new Error("No Model Registry directory configured");
+  // The Model Registry host already holds the canonical files at
+  // registryConfig.directory — "syncing" a model onto itself is a no-op by
+  // definition. Skip the modelFolder requirement, route selection, and
+  // rsync entirely; just confirm what's already there is still intact.
+  if (targetSpark.id === registryHost.id) {
+    const destDir = joinRemotePath(registryConfig.directory, model.subfolder);
+    if (Array.isArray(model.manifest) && model.manifest.length > 0) {
+      const mismatches = await modelRegistry.verifyFilesOnHost(targetSpark, destDir, model.manifest);
+      if (mismatches.length > 0) {
+        throw new Error(
+          `Checksum verification failed on Model Registry host ${targetSpark.id} for ${mismatches.length} file(s): ` +
+            `${mismatches.slice(0, 5).join(", ")}${mismatches.length > 5 ? ", …" : ""}`
+        );
+      }
+    }
+    return { destDir };
+  }
   if (!targetSpark.modelFolder) {
     throw new Error(`${targetSpark.id} has no model folder configured (Edit host → Model folder)`);
   }
@@ -84,10 +115,10 @@ export async function syncModelToSpark(modelRegistry, sparkRegistry, model, targ
   }
 
   const rsyncCmd =
-    `mkdir -p ${shQuote(destDir)} && ` +
+    `mkdir -p ${shQuotePath(destDir)} && ` +
     `rsync -a -e ${shQuote(rsyncSsh)} ` +
     `${shQuote(`${registryHost.ssh.user}@${registryAddr}:${sourceDir}/`)} ` +
-    `${shQuote(destDir + "/")}`;
+    `${shQuotePath(destDir + "/")}`;
 
   await sshExecDirect(targetSpark, rsyncCmd, {
     timeoutMs: options.timeoutMs || DEFAULT_SYNC_TIMEOUT_MS,

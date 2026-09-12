@@ -36,6 +36,20 @@ function shQuote(value) {
   return "'" + String(value).replace(/'/g, "'\\''") + "'";
 }
 
+/**
+ * Like shQuote, but a leading "~" or "~/" is left unquoted so the remote
+ * shell still expands it to that user's home directory — needed because
+ * the default model folder ("~/.cache/huggingface") and any operator-typed
+ * registry directory may start with a tilde, and single-quoting it whole
+ * would turn that into a literal directory named "~" instead.
+ */
+export function shQuotePath(value) {
+  const str = String(value);
+  if (str === "~") return "~";
+  if (str.startsWith("~/")) return "~/" + shQuote(str.slice(2));
+  return shQuote(str);
+}
+
 /** Join a registry directory + model subfolder without doubling slashes. */
 function joinRemotePath(dir, subfolder) {
   return `${String(dir).replace(/\/+$/, "")}/${String(subfolder).replace(/^\/+/, "")}`;
@@ -253,7 +267,7 @@ export class ModelRegistry {
     try {
       out = await sshExecDirect(
         host,
-        `cd ${shQuote(dir)} && sha256sum -- ${fileArgs} 2>&1`,
+        `cd ${shQuotePath(dir)} && sha256sum -- ${fileArgs} 2>&1`,
         { timeoutMs: VERIFY_TIMEOUT_MS, noBatch: true }
       );
     } catch (err) {
@@ -287,7 +301,7 @@ export class ModelRegistry {
       const includeArg = model.includePattern ? ` --include ${shQuote(model.includePattern)}` : "";
       await sshExecDirect(
         host,
-        `hf download ${shQuote(model.repo)} --revision ${shQuote(model.revision)}${includeArg} --local-dir ${shQuote(dir)}`,
+        `hf download ${shQuote(model.repo)} --revision ${shQuote(model.revision)}${includeArg} --local-dir ${shQuotePath(dir)}`,
         { timeoutMs: MODEL_DOWNLOAD_TIMEOUT_MS, noBatch: true }
       );
 
@@ -319,7 +333,7 @@ export class ModelRegistry {
       if (!this._registryConfig.directory) throw new Error("No Model Registry directory configured");
 
       const dir = joinRemotePath(this._registryConfig.directory, model.subfolder);
-      await sshExecDirect(host, `rm -rf -- ${shQuote(dir)}`, { timeoutMs: DELETE_TIMEOUT_MS, noBatch: true });
+      await sshExecDirect(host, `rm -rf -- ${shQuotePath(dir)}`, { timeoutMs: DELETE_TIMEOUT_MS, noBatch: true });
       this._updateModel(modelId, { manifest: null, verifiedAt: null });
       this._setJob(modelId, { phase: "done", message: "Deleted" });
     } catch (err) {
