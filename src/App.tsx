@@ -11,7 +11,8 @@ import { OverviewPage } from "./components/OverviewPage/OverviewPage";
 import { ShowcasePage } from "./components/ShowcasePage/ShowcasePage";
 import { ThemeSwitch } from "./components/ThemeSwitch";
 import { SettingsDialog } from "./components/SettingsDialog";
-import { GearIcon, BoltIcon } from "./components/ui/icons";
+import { RecipesDialog } from "./components/RecipesDialog";
+import { GearIcon, EagleIcon, GridIcon } from "./components/ui/icons";
 import { ConnectionBanner } from "./components/ui/ConnectionBanner";
 import { ErrorBanner } from "./components/ui/ErrorBanner";
 import { OVERVIEW_ID } from "./constants";
@@ -130,6 +131,7 @@ function DashboardApp() {
     setActiveId,
     activeSpark,
     connected,
+    recipeSwitch,
     lastValidSnapshotAt,
     snapshotError,
     refreshInterval,
@@ -139,6 +141,7 @@ function DashboardApp() {
   const [showAdd, setShowAdd] = useState(false);
   const [editId, setEditId] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
+  const [showRecipes, setShowRecipes] = useState(false);
   const [settings, setSettings] = useState<Settings | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   /** Used when WS is down so add/delete still updates the tab bar */
@@ -302,8 +305,12 @@ function DashboardApp() {
     [displaySparks, hiddenWorkerIds]
   );
 
+  // Horizontal breathing room is kept; the vertical half is halved. Outer page padding is the
+  // cheapest height on the screen — at compact density it costs the overview most of a panel
+  // row while showing nothing. The bottom is trimmed furthest because the overview's last row
+  // is a set of buttons, which already carry their own visual padding.
   return (
-    <div className="min-h-screen p-0 text-text sm:p-8">
+    <div className="min-h-screen p-0 text-text sm:px-8 sm:pb-2 sm:pt-4">
       <div className="dashboard-shell">
         <header className="flex flex-wrap items-center gap-3" style={{ marginBottom: "var(--density-header-gap)" }}>
           <button
@@ -311,9 +318,9 @@ function DashboardApp() {
             onClick={() => navigate(OVERVIEW_ID)}
             className="logo-pill"
           >
-            <BoltIcon className="h-3.5 w-3.5 text-accent" />
+            <EagleIcon className="h-[20px] w-auto" />
             <span>
-              spark<span className="logo-pill-dash">Dash</span>
+              Spark<span className="logo-pill-dash">Dash</span>
             </span>
           </button>
           <SparkTabs
@@ -325,6 +332,15 @@ function DashboardApp() {
             onReorder={handleReorder}
           />
           <div className="ml-auto flex items-center gap-2.5">
+            <button
+              type="button"
+              onClick={() => setShowRecipes(true)}
+              className="icon-circle"
+              title="Deployment recipes"
+              aria-label="Deployment recipes"
+            >
+              <GridIcon className="h-4 w-4" />
+            </button>
             <button
               type="button"
               onClick={() => setShowSettings(true)}
@@ -406,6 +422,11 @@ function DashboardApp() {
         open={showSettings}
         onClose={() => setShowSettings(false)}
         onSaved={handleSettingsSaved}
+      />
+      <RecipesDialog
+        open={showRecipes}
+        onClose={() => setShowRecipes(false)}
+        recipeSwitch={recipeSwitch}
       />
     </div>
   );

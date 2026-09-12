@@ -6,6 +6,8 @@ import type {
   HermesUpdatesResponse,
   LlmMetrics,
   LlmDailyResponse,
+  RecipeActivateResponse,
+  RecipeListResponse,
   Settings,
   ShowcaseListResponse,
   ShowcaseSessionState,
@@ -157,6 +159,18 @@ export function updateDisabledInterfaces(
     method: "PUT",
     body: JSON.stringify({ disabledInterfaces }),
   });
+}
+
+// ─── Local SSH terminal ───────────────────────────────────
+/**
+ * Ask the local server to open a terminal for one Spark.
+ *
+ * The Spark id is the entire request — no host, user, command or option is sent, because the
+ * server derives all of them from its own registry. There is deliberately no parameter here
+ * for a caller to widen later.
+ */
+export function launchSshShell(id: string): Promise<{ success: boolean; id: string; target: string }> {
+  return apiFetch(`/api/sparks/${encodeURIComponent(id)}/ssh-shell`, { method: "POST" });
 }
 
 // ─── Manual metric refresh ────────────────────────────────
@@ -441,4 +455,15 @@ export function updateSettings(patch: Partial<Settings>): Promise<Settings> {
     method: "PUT",
     body: JSON.stringify(patch),
   });
+}
+
+// ─── Recipe registry / switching ──────────────────────────
+/** Live-inferred list of deployment recipes plus which one (if any) is running. */
+export function fetchRecipes(): Promise<RecipeListResponse> {
+  return apiFetch("/api/recipes");
+}
+
+/** Start switching the cluster to a different recipe. Returns immediately; watch `recipeSwitch` on the WS snapshot for progress. */
+export function activateRecipe(id: string): Promise<RecipeActivateResponse> {
+  return apiFetch(`/api/recipes/${encodeURIComponent(id)}/activate`, { method: "POST" });
 }

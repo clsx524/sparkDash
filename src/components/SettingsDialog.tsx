@@ -374,7 +374,7 @@ export function SettingsDialog({ open, onClose, onSaved }: SettingsDialogProps) 
 
         {/* Links */}
         <div className="mt-5 flex flex-wrap items-center gap-3 border-t border-border pt-3">
-          <span className="text-[10px] text-muted">sparkDash v{packageJson.version}</span>
+          <span className="text-[10px] text-muted">SparkDash v{packageJson.version}</span>
           <span className="text-border-strong text-[10px]">·</span>
           <a
             href="https://x.com/MiaAI_lab"

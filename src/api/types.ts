@@ -257,12 +257,46 @@ export interface NetworkInterface {
   disabled?: boolean;
 }
 
+/**
+ * One RDMA/RoCE port, read from the HCA's own sysfs counters.
+ *
+ * Deliberately separate from NetworkInterface: RDMA bypasses the kernel network stack, so
+ * these bytes and the netdev bytes measure different things and must not share a shape.
+ * A busy RoCE link shows large `txBytes` here while its netdev counters barely move.
+ */
+export interface RdmaPortMetrics {
+  /** HCA device, e.g. "rocep1s0f1". */
+  hca: string;
+  port: number;
+  /** Backing Ethernet interface, e.g. "enp1s0f1np1". null when unresolved. */
+  netdev: string | null;
+  /** IPv4 bound to the backing interface. null when unaddressed. */
+  ip: string | null;
+  /** Port state, e.g. "ACTIVE". */
+  state: string | null;
+  /** Physical state, e.g. "LinkUp". */
+  physicalState: string | null;
+  /** "Ethernet" for RoCE, "InfiniBand" for native IB. */
+  linkLayer: string | null;
+  rateGbps: number | null;
+  /** Cumulative bytes (counter words x 4). null when unreadable. */
+  txBytes: number | null;
+  rxBytes: number | null;
+  /** Live rate. null on first sample or after a counter reset — never a fabricated 0. */
+  txBytesPerSecond: number | null;
+  rxBytesPerSecond: number | null;
+  txPackets: number | null;
+  rxPackets: number | null;
+}
+
 export interface NetworkMetrics {
   primaryInterface: string | null;
   linkSpeedMbps: number | null;
   interfaces: NetworkInterface[];
   /** MAC of enP7s7 when present (same value persisted as detectedMacAddress). */
   wolMac?: string | null;
+  /** RDMA/RoCE ports. Empty on hosts without RDMA. */
+  rdma?: RdmaPortMetrics[];
 }
 
 // ─── Unified memory metrics ──────────────────────────────
@@ -293,6 +327,8 @@ export interface LlmMetrics {
   slotsTotal: number;
   generationTps: number;
   prefillTps: number;
+  /** vLLM-only: lifetime-average prefill tok/s (total tokens admitted / total TTFT-seconds). Slow-moving but immune to the windowed pairing bug `prefillTps`'s fallback can hit. */
+  prefillTpsLifetime?: number | null;
   /** Live cached-prefill tok/s when the backend splits kinds (ds4, llama.cpp, sglang). */
   cachedPrefillTps?: number | null;
   /** Live uncached/computed prefill tok/s when split is available. */
@@ -516,6 +552,62 @@ export interface SparkSnapshot {
   metrics: SparkMetrics;
 }
 
+// ─── Recipe registry / switching ──────────────────────────
+export interface RecipeNodeStatus {
+  role: string;
+  running: boolean;
+  detail: string;
+}
+
+export interface RecipeInfo {
+  id: string;
+  label: string;
+  group: string;
+  nodes: { role: string; workdir: string }[];
+  active: boolean;
+  nodeStatus: RecipeNodeStatus[];
+}
+
+export interface RecipeSwitchProgress {
+  percent: number;
+  etaSeconds: number | null;
+  /** "log": a real shard-loading percent parsed from container output.
+   * "estimate": no log signal (shards done, or this loader never prints one) — driven by
+   * elapsed time against past switches' average duration, capped below 100%. */
+  source: "log" | "estimate";
+}
+
+export interface RecipeSwitchState {
+  phase:
+    | "checking-current-state"
+    | "already-active"
+    | "stopping"
+    | "confirming-stopped"
+    | "starting"
+    | "health-checking"
+    | "done"
+    | "failed";
+  targetId: string;
+  from?: string | null;
+  error?: string;
+  /** Only present during "health-checking" — how far the cold model load has gotten. */
+  progress?: RecipeSwitchProgress;
+  updatedAt: number;
+}
+
+export interface RecipeListResponse {
+  recipes: RecipeInfo[];
+  activeId: string | null;
+  conflict: boolean;
+  conflictIds: string[];
+  switch: RecipeSwitchState | null;
+}
+
+export interface RecipeActivateResponse {
+  started: boolean;
+  targetId: string;
+}
+
 // ─── WebSocket envelope ───────────────────────────────────
 export interface WsSnapshot {
   type: "snapshot";
@@ -523,6 +615,7 @@ export interface WsSnapshot {
   generatedAt?: number;
   sparks: SparkSnapshot[];
   refreshInterval: number;
+  recipeSwitch?: RecipeSwitchState | null;
 }
 
 export interface FleetEnergy {

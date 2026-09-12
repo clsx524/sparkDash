@@ -19,6 +19,7 @@ export function useSnapshot() {
   const [snapshotError, setSnapshotError] = useState<string | null>(null);
   const [refreshInterval, setRefreshInterval] = useState<number | null>(null);
   const [activeId, setActiveId] = useState<string | null>(OVERVIEW_ID);
+  const [recipeSwitch, setRecipeSwitch] = useState<WsSnapshot["recipeSwitch"]>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   /** When false, onclose must not schedule reconnect (unmount / intentional close). */
@@ -49,6 +50,7 @@ export function useSnapshot() {
           // Feed the central history store (8b) before notifying React state.
           ingestSnapshots(msg.sparks, msg.generatedAt ?? receivedAt);
           setSparks(msg.sparks);
+          setRecipeSwitch(msg.recipeSwitch ?? null);
           setConnected(true);
           setLastValidSnapshotAt(receivedAt);
           setSnapshotGeneratedAt(
@@ -112,6 +114,7 @@ export function useSnapshot() {
     activeId,
     setActiveId,
     activeSpark,
+    recipeSwitch,
     lastValidSnapshotAt,
     snapshotGeneratedAt,
     snapshotError,
