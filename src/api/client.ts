@@ -6,6 +6,10 @@ import type {
   HermesUpdatesResponse,
   LlmMetrics,
   LlmDailyResponse,
+  ModelEntry,
+  ModelJobState,
+  ModelRegistryConfig,
+  ModelsListResponse,
   RecipeActivateResponse,
   RecipeListResponse,
   Settings,
@@ -466,4 +470,43 @@ export function fetchRecipes(): Promise<RecipeListResponse> {
 /** Start switching the cluster to a different recipe. Returns immediately; watch `recipeSwitch` on the WS snapshot for progress. */
 export function activateRecipe(id: string): Promise<RecipeActivateResponse> {
   return apiFetch(`/api/recipes/${encodeURIComponent(id)}/activate`, { method: "POST" });
+}
+
+// ─── Model Registry (generic model tracking/sync) ─────────
+export function fetchModelRegistry(): Promise<ModelRegistryConfig> {
+  return apiFetch("/api/model-registry");
+}
+
+export function updateModelRegistry(patch: ModelRegistryConfig): Promise<ModelRegistryConfig> {
+  return apiFetch("/api/model-registry", { method: "PUT", body: JSON.stringify(patch) });
+}
+
+/** Tracked models plus a live availability probe per model (never a stored flag). */
+export function fetchModels(): Promise<ModelsListResponse> {
+  return apiFetch("/api/models");
+}
+
+export function addModel(
+  input: Pick<ModelEntry, "id" | "label" | "subfolder" | "repo" | "revision" | "includePattern">
+): Promise<ModelEntry> {
+  return apiFetch("/api/models", { method: "POST", body: JSON.stringify(input) });
+}
+
+/** Remove a tracked model entry (metadata only — does not touch downloaded files). */
+export function removeModel(id: string): Promise<ModelEntry> {
+  return apiFetch(`/api/models/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+/** Delete a model's downloaded files from the registry host. Entry stays tracked. */
+export function deleteModelFiles(id: string): Promise<{ started: boolean }> {
+  return apiFetch(`/api/models/${encodeURIComponent(id)}/files`, { method: "DELETE" });
+}
+
+/** Kick off async download + checksum verification. Poll fetchModelJob for progress. */
+export function downloadModel(id: string): Promise<{ started: boolean }> {
+  return apiFetch(`/api/models/${encodeURIComponent(id)}/download`, { method: "POST" });
+}
+
+export function fetchModelJob(id: string): Promise<ModelJobState & { phase: "idle" | ModelJobState["phase"] }> {
+  return apiFetch(`/api/models/${encodeURIComponent(id)}/job`);
 }

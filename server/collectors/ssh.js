@@ -497,3 +497,37 @@ export async function comfyTest(spark, port) {
     return { ok: false, message: err.message };
   }
 }
+
+/**
+ * Write `content` to `remotePath` on `spark` over SSH (piped via stdin to a
+ * remote `cat >`) — no `scp`/`sftp` binary dependency, reuses the exact same
+ * auth/host-resolution path as every other command in this module.
+ * @param {object} spark
+ * @param {string|Buffer} content
+ * @param {string} remotePath
+ * @param {{timeoutMs?: number}} [options]
+ */
+export async function copyToSpark(spark, content, remotePath, options = {}) {
+  const timeoutMs =
+    Number.isFinite(options.timeoutMs) && options.timeoutMs > 0 ? options.timeoutMs : 30000;
+  const quoted = "'" + String(remotePath).replace(/'/g, "'\\''") + "'";
+  const { file, args, env, targetHost } = sshCommandSpec(spark, {
+    remoteArgv: [`cat > ${quoted}`],
+  });
+  return new Promise((resolve, reject) => {
+    const child = execFile(
+      file,
+      args,
+      { timeout: timeoutMs, env, maxBuffer: 10 * 1024 * 1024 },
+      (err, _stdout, stderr) => {
+        if (err) {
+          reject(new Error(`Copy to ${targetHost} failed: ${stderr?.trim() || err.message}`));
+        } else {
+          resolve();
+        }
+      }
+    );
+    child.stdin.write(content);
+    child.stdin.end();
+  });
+}

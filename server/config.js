@@ -25,6 +25,27 @@ const FLEET_ENERGY_JSON_PATH =
 const RECIPE_SWITCH_HISTORY_JSON_PATH =
   process.env.RECIPE_SWITCH_HISTORY_JSON_PATH ||
   path.join(ROOT, "config", "recipe-switch-history.json");
+/** Model Registry host + directory designation (gitignored). */
+const MODEL_REGISTRY_JSON_PATH =
+  process.env.MODEL_REGISTRY_JSON_PATH || path.join(ROOT, "config", "model-registry.json");
+/** User-tracked model list (gitignored). */
+const MODELS_JSON_PATH =
+  process.env.MODELS_JSON_PATH || path.join(ROOT, "config", "models.json");
+/** Timeout for a single `hf download` invocation over SSH — large models, hours not minutes. */
+const MODEL_DOWNLOAD_TIMEOUT_MS = parseInt(
+  process.env.MODEL_DOWNLOAD_TIMEOUT_MS || "21600000",
+  10
+);
+/** Timeout for a single model-sync (rsync pull) between two hosts. */
+const MODEL_SYNC_TIMEOUT_MS = parseInt(process.env.MODEL_SYNC_TIMEOUT_MS || "21600000", 10);
+/**
+ * Where per-recipe config generator scripts (e.g. generate-env-*.py) are
+ * mounted into this container. sparkDash has no knowledge of what's actually
+ * deployed here or where it lives on the host — that mapping is entirely an
+ * ansible/deployment-time concern (a docker volume mount). This is just the
+ * container-internal path sparkDash reads from.
+ */
+const RECIPE_CONFIG_DIR = process.env.RECIPE_CONFIG_DIR || path.join(ROOT, "recipe-configs");
 
 // ─── LLM / Comfy probe timeouts ──────────────────────────
 const LLM_PROBE_TIMEOUT_MS = 3000;
@@ -115,6 +136,11 @@ export {
   LLM_DAILY_JSON_PATH,
   FLEET_ENERGY_JSON_PATH,
   RECIPE_SWITCH_HISTORY_JSON_PATH,
+  MODEL_REGISTRY_JSON_PATH,
+  MODELS_JSON_PATH,
+  MODEL_DOWNLOAD_TIMEOUT_MS,
+  MODEL_SYNC_TIMEOUT_MS,
+  RECIPE_CONFIG_DIR,
   LLM_PROBE_TIMEOUT_MS,
   COMFY_PROBE_TIMEOUT_MS,
   TAILSCALE_PROBE_TIMEOUT_MS,

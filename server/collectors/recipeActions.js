@@ -2,26 +2,30 @@
  * recipeActions — the recipe-switching state machine.
  *
  * Mirrors comfyActions.js's precedent (a recipe-level mutation action living outside the HTTP
- * route handler), scaled up to a multi-node, multi-minute operation: stop whatever recipe is
- * currently live, confirm it actually stopped, start the target recipe's node(s), then poll
- * each node's own API until it reports healthy. Every phase transition calls `onProgress` so
- * the caller (index.js) can push it over the WebSocket immediately — this can run for many
- * minutes (cold model loads), and a caller watching a static "in progress" spinner with no
- * detail is worse than no dashboard at all.
+ * route handler), scaled up to a multi-node, multi-minute operation: sync each node's model
+ * (Model Registry pull + checksum verify) and config, stop whatever recipe is currently live,
+ * confirm it actually stopped, start the target recipe's node(s), then poll each node's own
+ * API until it reports healthy. Every phase transition calls `onProgress` so the caller
+ * (index.js) can push it over the WebSocket immediately — this can run for many minutes (cold
+ * model loads, multi-hundred-GB syncs), and a caller watching a static "in progress" spinner
+ * with no detail is worse than no dashboard at all.
  *
  * Refuses to run a second switch concurrently and refuses to proceed on a detected conflict
  * (two recipes' nodes both reporting running at once) rather than guessing which one to stop.
  */
+import fs from "fs";
+import path from "path";
 import { isAllowedTargetHost } from "../validate.js";
 import { llmProbeHost } from "./llmHost.js";
-import { sshExec } from "./ssh.js";
+import { sshExec, copyToSpark } from "./ssh.js";
+import { syncModelToSpark } from "./modelSync.js";
 import {
   probeNodeShardProgress,
   estimateNodeProgress,
   combineNodeProgress,
   RecipeSwitchHistory,
 } from "./RecipeLoadProgress.js";
-import { RECIPE_SWITCH_HISTORY_JSON_PATH } from "../config.js";
+import { RECIPE_SWITCH_HISTORY_JSON_PATH, RECIPE_CONFIG_DIR } from "../config.js";
 
 const STOP_TIMEOUT_MS = 60_000;
 // Cold model loads on these recipes are measured in minutes (DeepSeek DSpark ~9 minutes,
@@ -34,6 +38,9 @@ const STOP_CONFIRM_POLL_MS = 3_000;
 const HEALTH_TIMEOUT_MS = 15 * 60_000;
 const HEALTH_POLL_MS = 5_000;
 const HEALTH_REQUEST_TIMEOUT_MS = 5_000;
+// Model syncs can move hundreds of GB between hosts — hours, not minutes.
+const MODEL_SYNC_PHASE_TIMEOUT_MS = 6 * 60 * 60_000;
+const CONFIG_RENDER_PHASE_TIMEOUT_MS = 2 * 60_000;
 
 export class RecipeSwitchError extends Error {}
 
@@ -62,6 +69,64 @@ async function runNodeCommand(recipeRegistry, node, cmd, timeoutMs) {
   const spark = recipeRegistry._sparkForNode(node);
   if (!spark) throw new RecipeSwitchError(`no Spark configured for role ${node.role}`);
   return sshExec(spark, `cd ${node.workdir} && ${cmd}`, { timeoutMs, noBatch: true });
+}
+
+const CONFIG_SCRIPT_COPY_TIMEOUT_MS = 30_000;
+const CONFIG_SCRIPT_RUN_TIMEOUT_MS = 60_000;
+
+/**
+ * Sync every node's tied model (recipe node's optional `modelId`, referencing
+ * a Model Registry entry) onto that node's own configured model folder,
+ * verifying checksums on arrival. A node with no `modelId` is left alone —
+ * this is opt-in per node, not assumed for every recipe.
+ */
+async function syncModelsForRecipe(recipeRegistry, modelRegistry, recipe) {
+  for (const node of recipe.nodes) {
+    if (!node.modelId) continue;
+    if (!modelRegistry) {
+      throw new RecipeSwitchError(
+        `Recipe ${recipe.id} node ${node.role} references model ${node.modelId} but no Model Registry is configured`
+      );
+    }
+    const model = modelRegistry.getModel(node.modelId);
+    if (!model) {
+      throw new RecipeSwitchError(`Recipe ${recipe.id} references unknown model ${node.modelId}`);
+    }
+    const spark = recipeRegistry._sparkForNode(node);
+    if (!spark) throw new RecipeSwitchError(`no Spark configured for role ${node.role}`);
+    await syncModelToSpark(modelRegistry, recipeRegistry.sparkRegistry, model, spark);
+  }
+}
+
+/**
+ * Copy every node's tied config generator script (recipe node's optional
+ * `configScript`, a filename under the mounted RECIPE_CONFIG_DIR) to that
+ * node's workdir and run it. Mirrors what ansible's `copy` + `command:
+ * python3 generate-env-*.py` steps did — same scripts, same convention,
+ * just triggered here instead of by a playbook run. A node with no
+ * `configScript` is left alone.
+ */
+async function renderConfigsForRecipe(recipeRegistry, recipe) {
+  for (const node of recipe.nodes) {
+    if (!node.configScript) continue;
+    const spark = recipeRegistry._sparkForNode(node);
+    if (!spark) throw new RecipeSwitchError(`no Spark configured for role ${node.role}`);
+    const localPath = path.join(RECIPE_CONFIG_DIR, node.configScript);
+    let content;
+    try {
+      content = fs.readFileSync(localPath);
+    } catch (err) {
+      throw new RecipeSwitchError(
+        `Config script ${node.configScript} not found under the mounted config directory: ${err.message}`
+      );
+    }
+    const remotePath = `${node.workdir}/${node.configScript}`;
+    await copyToSpark(spark, content, remotePath, { timeoutMs: CONFIG_SCRIPT_COPY_TIMEOUT_MS });
+    await sshExec(spark, `cd ${node.workdir} && python3 ${node.configScript}`, {
+      timeoutMs: CONFIG_SCRIPT_RUN_TIMEOUT_MS,
+      noBatch: true,
+    });
+  }
 }
 
 /** Poll one recipe node's health endpoint until it responds 200 or the deadline passes. */
@@ -140,15 +205,18 @@ async function pollSwitchProgress(recipeRegistry, target, startedAt, historicalA
 let _switchInFlight = false;
 
 /**
- * Switch the cluster to `targetId`. Stops whatever recipe is currently live (if different),
- * confirms the stop, starts the target's node(s), then waits for each to report healthy.
+ * Switch the cluster to `targetId`. Syncs each target node's tied model (if any) and config
+ * (if any), stops whatever recipe is currently live (if different), confirms the stop, starts
+ * the target's node(s), then waits for each to report healthy.
  *
  * @param {import("./RecipeRegistry.js").RecipeRegistry} recipeRegistry
+ * @param {import("./ModelRegistry.js").ModelRegistry | null} modelRegistry - null is fine for
+ *   recipes whose nodes have no `modelId` tied to them
  * @param {string} targetId
  * @param {(state: object) => void} onProgress - called on every phase transition
  * @returns {Promise<{ switched: boolean, from: string | null, to: string, alreadyActive?: boolean }>}
  */
-export async function switchRecipe(recipeRegistry, targetId, onProgress) {
+export async function switchRecipe(recipeRegistry, modelRegistry, targetId, onProgress) {
   if (_switchInFlight) {
     throw new RecipeSwitchError("a recipe switch is already in progress");
   }
@@ -192,12 +260,27 @@ export async function switchRecipe(recipeRegistry, targetId, onProgress) {
       await waitForRecipeStopped(recipeRegistry, current);
     }
 
+    emit("syncing-model", { from: current?.id ?? null });
+    await withTimeout(
+      syncModelsForRecipe(recipeRegistry, modelRegistry, target),
+      MODEL_SYNC_PHASE_TIMEOUT_MS,
+      `syncing model(s) for ${target.id} timed out`
+    );
+
+    emit("rendering-config", { from: current?.id ?? null });
+    await withTimeout(
+      renderConfigsForRecipe(recipeRegistry, target),
+      CONFIG_RENDER_PHASE_TIMEOUT_MS,
+      `rendering config for ${target.id} timed out`
+    );
+
     emit("starting", { from: current?.id ?? null });
     await withTimeout(
       Promise.all(target.nodes.map((n) => runNodeCommand(recipeRegistry, n, n.startCmd, START_TIMEOUT_MS))),
       START_TIMEOUT_MS + 10_000,
       `starting ${target.id} timed out`
     );
+
 
     emit("health-checking", { from: current?.id ?? null });
     const loadStartedAt = Date.now();

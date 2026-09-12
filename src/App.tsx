@@ -12,7 +12,8 @@ import { ShowcasePage } from "./components/ShowcasePage/ShowcasePage";
 import { ThemeSwitch } from "./components/ThemeSwitch";
 import { SettingsDialog } from "./components/SettingsDialog";
 import { RecipesDialog } from "./components/RecipesDialog";
-import { GearIcon, EagleIcon, GridIcon } from "./components/ui/icons";
+import { ModelsDialog } from "./components/ModelsDialog";
+import { GearIcon, EagleIcon, GridIcon, BoxIcon } from "./components/ui/icons";
 import { ConnectionBanner } from "./components/ui/ConnectionBanner";
 import { ErrorBanner } from "./components/ui/ErrorBanner";
 import { OVERVIEW_ID } from "./constants";
@@ -142,6 +143,7 @@ function DashboardApp() {
   const [editId, setEditId] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   const [showRecipes, setShowRecipes] = useState(false);
+  const [showModels, setShowModels] = useState(false);
   const [settings, setSettings] = useState<Settings | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   /** Used when WS is down so add/delete still updates the tab bar */
@@ -343,6 +345,15 @@ function DashboardApp() {
             </button>
             <button
               type="button"
+              onClick={() => setShowModels(true)}
+              className="icon-circle"
+              title="Model Registry"
+              aria-label="Model Registry"
+            >
+              <BoxIcon className="h-4 w-4" />
+            </button>
+            <button
+              type="button"
               onClick={() => setShowSettings(true)}
               className="icon-circle"
               title="Settings"
@@ -428,6 +439,7 @@ function DashboardApp() {
         onClose={() => setShowRecipes(false)}
         recipeSwitch={recipeSwitch}
       />
+      <ModelsDialog open={showModels} onClose={() => setShowModels(false)} />
     </div>
   );
 }

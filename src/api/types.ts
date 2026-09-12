@@ -84,9 +84,64 @@ export interface SparkConfig {
   tailscaleMonitoring?: boolean;
   /** When true, storage is only updated on manual refresh, not auto-polled. */
   storagePollDisabled?: boolean;
+  /**
+   * Model Registry integration — plain user-entered value, no assumed default.
+   * Where synced model weights land on this host.
+   */
+  modelFolder?: string;
+  /** Opt-in: other hosts may tunnel through this one (SSH ProxyJump) to reach the Model Registry host. */
+  canActAsModelRelay?: boolean;
+  /** How this host reaches the Model Registry host. relayHostId only applies when mode is "relay". */
+  modelSyncRoute?: { mode: "direct" | "relay"; relayHostId?: string | null };
 }
 
 export type SparkRole = "head" | "worker" | "standalone";
+
+// ─── Model Registry ────────────────────────────────────────
+/** Which tracked host holds the canonical model files, and where. */
+export interface ModelRegistryConfig {
+  hostId: string | null;
+  directory: string;
+}
+
+export interface ModelFileManifestEntry {
+  path: string;
+  sha256: string;
+}
+
+/** One user-tracked model. Download source + verification manifest, entirely user-entered. */
+export interface ModelEntry {
+  id: string;
+  label: string;
+  subfolder: string;
+  repo: string;
+  revision: string;
+  includePattern?: string | null;
+  manifest?: ModelFileManifestEntry[] | null;
+  verifiedAt?: string | null;
+}
+
+/** Live-probed availability on the registry host — never a stored flag. */
+export interface ModelStatus {
+  id: string;
+  available: boolean;
+  sizeBytes?: number | null;
+}
+
+export interface ModelsListResponse {
+  registry: ModelRegistryConfig;
+  models: ModelEntry[];
+  statuses: Record<string, ModelStatus>;
+}
+
+export interface ModelJobState {
+  modelId: string;
+  kind: "download" | "delete";
+  phase: "running" | "verifying" | "done" | "failed";
+  message?: string;
+  error?: string;
+  updatedAt: string;
+}
 
 // ─── Hermes Agent status ───────────────────────────────
 /** Opt-in Hermes Agent update monitoring state, pushed in every snapshot. */
@@ -583,6 +638,8 @@ export interface RecipeSwitchState {
     | "already-active"
     | "stopping"
     | "confirming-stopped"
+    | "syncing-model"
+    | "rendering-config"
     | "starting"
     | "health-checking"
     | "done"

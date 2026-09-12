@@ -41,6 +41,7 @@ import { compareSemver, getLatestRelease } from "./collectors/HermesReleases.js"
 import { launchSshShell } from "./sshShell.js";
 import { sshBatchStats } from "./collectors/sshBatch.js";
 import { RecipeRegistry } from "./collectors/RecipeRegistry.js";
+import { ModelRegistry } from "./collectors/ModelRegistry.js";
 import { switchRecipe, isSwitchInFlight, RecipeSwitchError } from "./collectors/recipeActions.js";
 import { FLEET_ENERGY_JSON_PATH } from "./config.js";
 import { FleetEnergyTracker } from "./energy/FleetEnergyTracker.js";
@@ -253,6 +254,8 @@ const registry = new SparkRegistry();
 
 // ─── Recipe registry (deployment recipes, distinct from physical-node config) ──
 const recipeRegistry = new RecipeRegistry(registry);
+// ─── Model Registry (generic model tracking/sync, distinct from recipes) ──
+const modelRegistry = new ModelRegistry(registry);
 /** Latest recipe-switch progress, broadcast to every WS client and served to late joiners. */
 let recipeSwitchState = null;
 const fleetEnergyTracker = new FleetEnergyTracker({
@@ -1665,7 +1668,7 @@ app.post("/api/recipes/:id/activate", (req, res) => {
 
   res.json({ started: true, targetId: req.params.id });
 
-  switchRecipe(recipeRegistry, req.params.id, (state) => {
+  switchRecipe(recipeRegistry, modelRegistry, req.params.id, (state) => {
     recipeSwitchState = { ...state, updatedAt: Date.now() };
     forceBroadcast();
   }).catch((err) => {
@@ -1679,6 +1682,92 @@ app.post("/api/recipes/:id/activate", (req, res) => {
       console.error(`[recipes] switch to ${req.params.id} failed unexpectedly:`, err);
     }
   });
+});
+
+// ─── Model Registry (generic model tracking/sync) ─────────
+// Which tracked host holds canonical model files, and where. No default is
+// assumed — both fields are empty until the operator sets them.
+app.get("/api/model-registry", (_req, res) => {
+  res.json(modelRegistry.getRegistryConfig());
+});
+
+app.put("/api/model-registry", (req, res) => {
+  try {
+    res.json(modelRegistry.setRegistryConfig(req.body || {}));
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+/** Tracked models plus a live availability probe per model (never a stored flag). */
+app.get("/api/models", async (_req, res) => {
+  const models = modelRegistry.all();
+  const statuses = await modelRegistry.statuses();
+  res.json({ registry: modelRegistry.getRegistryConfig(), models, statuses });
+});
+
+app.post("/api/models", (req, res) => {
+  if (!allowGlobalDestructive(principalKey(req))) {
+    return rejectLimited(res, "Too many requests — try again shortly");
+  }
+  try {
+    res.status(201).json(modelRegistry.addModel(req.body || {}));
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+/** Remove a tracked model entry (metadata only — does not touch downloaded files). */
+app.delete("/api/models/:id", (req, res) => {
+  if (!allowGlobalDestructive(principalKey(req))) {
+    return rejectLimited(res, "Too many requests — try again shortly");
+  }
+  try {
+    res.json(modelRegistry.removeModel(req.params.id));
+  } catch (err) {
+    res.status(404).json({ error: err.message });
+  }
+});
+
+/** Delete a model's downloaded files from the registry host. Entry stays tracked. */
+app.delete("/api/models/:id/files", (req, res) => {
+  if (!allowGlobalDestructive(principalKey(req))) {
+    return rejectLimited(res, "Too many requests — try again shortly");
+  }
+  if (!modelRegistry.getModel(req.params.id)) {
+    return res.status(404).json({ error: "Model not tracked" });
+  }
+  res.json({ started: true });
+  modelRegistry
+    .deleteModelFiles(req.params.id)
+    .catch((err) => console.warn(`[models] delete ${req.params.id} failed: ${err.message}`));
+});
+
+/**
+ * Kick off an async download + checksum verification from Hugging Face onto
+ * the registry host. Responds immediately; poll GET /api/models/:id/job for
+ * progress, same shape as the recipe-switch WS-vs-poll split but simpler
+ * (single-model, no multi-node fan-out to broadcast).
+ */
+app.post("/api/models/:id/download", (req, res) => {
+  if (!allowGlobalDestructive(principalKey(req))) {
+    return rejectLimited(res, "Too many requests — try again shortly");
+  }
+  if (!modelRegistry.getModel(req.params.id)) {
+    return res.status(404).json({ error: "Model not tracked" });
+  }
+  const existingJob = modelRegistry.getJobState(req.params.id);
+  if (existingJob && existingJob.phase !== "done" && existingJob.phase !== "failed") {
+    return res.status(409).json({ error: "A job is already in progress for this model" });
+  }
+  res.json({ started: true });
+  modelRegistry
+    .downloadModel(req.params.id)
+    .catch((err) => console.warn(`[models] download ${req.params.id} failed: ${err.message}`));
+});
+
+app.get("/api/models/:id/job", (req, res) => {
+  res.json(modelRegistry.getJobState(req.params.id) || { modelId: req.params.id, phase: "idle" });
 });
 
 // ─── Static files (built frontend) ───────────────────────

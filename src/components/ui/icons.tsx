@@ -279,3 +279,14 @@ export function CompactIcon({ className = "" }: { className?: string }) {
     </svg>
   );
 }
+
+/** 3D package/box — used for the Model Registry (weights storage) trigger. */
+export function BoxIcon({ className = "" }: { className?: string }) {
+  return (
+    <svg {...baseProps(className)}>
+      <path d="M21 8l-9-5-9 5 9 5 9-5z" />
+      <path d="M3 8v8l9 5 9-5V8" />
+      <path d="M12 13v8" />
+    </svg>
+  );
+}

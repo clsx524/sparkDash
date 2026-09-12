@@ -629,7 +629,38 @@ export class SparkRegistry {
       disabledDevices: Array.isArray(config.disabledDevices) ? config.disabledDevices : [],
       disabledInterfaces: Array.isArray(config.disabledInterfaces) ? config.disabledInterfaces : [],
       storagePollDisabled: Boolean(config.storagePollDisabled),
+      /**
+       * Model Registry integration — entirely generic, no default assumed.
+       * Where this host stores synced model weights. Empty until the user
+       * sets it; sparkDash never guesses a path.
+       */
+      modelFolder: this._normalizeModelFolder(config.modelFolder),
+      /**
+       * Opt-in: this host can be selected as another host's SSH ProxyJump
+       * relay when that host has no direct path to the Model Registry host.
+       */
+      canActAsModelRelay: Boolean(config.canActAsModelRelay),
+      /**
+       * How this host reaches the Model Registry host for model sync:
+       * direct (default) or tunneled via another host's canActAsModelRelay.
+       * relayHostId is only meaningful when mode is "relay".
+       */
+      modelSyncRoute: this._normalizeModelSyncRoute(config.modelSyncRoute, config.id),
     };
+  }
+
+  /** Trim optional model storage folder path; empty stays empty (no assumed default). */
+  _normalizeModelFolder(value) {
+    if (typeof value !== "string") return "";
+    return value.trim();
+  }
+
+  /** Normalize the model-sync route. Unknown/missing shape falls back to direct. */
+  _normalizeModelSyncRoute(value, selfId) {
+    const mode = value?.mode === "relay" ? "relay" : "direct";
+    let relayHostId = typeof value?.relayHostId === "string" ? value.relayHostId.trim() : "";
+    if (mode !== "relay" || !relayHostId || relayHostId === selfId) relayHostId = null;
+    return { mode: relayHostId ? "relay" : "direct", relayHostId };
   }
 
   /** Normalize ComfyUI port to 1–65535 (default 8188). */
