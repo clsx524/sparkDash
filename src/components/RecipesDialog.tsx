@@ -22,7 +22,6 @@ function useEscape(onClose: () => void) {
 
 const PHASE_LABEL: Record<RecipeSwitchState["phase"], string> = {
   "checking-current-state": "Checking current state…",
-  "already-active": "Already active",
   stopping: "Stopping current recipe…",
   "confirming-stopped": "Confirming it stopped…",
   "syncing-model": "Syncing model files…",

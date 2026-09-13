@@ -651,7 +651,6 @@ export interface RecipeSwitchProgress {
 export interface RecipeSwitchState {
   phase:
     | "checking-current-state"
-    | "already-active"
     | "stopping"
     | "confirming-stopped"
     | "syncing-model"

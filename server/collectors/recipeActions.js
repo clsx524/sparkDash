@@ -206,15 +206,17 @@ let _switchInFlight = false;
 
 /**
  * Switch the cluster to `targetId`. Syncs each target node's tied model (if any) and config
- * (if any), stops whatever recipe is currently live (if different), confirms the stop, starts
- * the target's node(s), then waits for each to report healthy.
+ * (if any), always stops whatever recipe is currently live first — even when it is the same
+ * recipe as the target, so "activate" is a full kill-and-redeploy-fresh, never a same-target
+ * no-op (a stale/partially-applied config on disk must not survive a re-activate) — confirms
+ * the stop, starts the target's node(s), then waits for each to report healthy.
  *
  * @param {import("./RecipeRegistry.js").RecipeRegistry} recipeRegistry
  * @param {import("./ModelRegistry.js").ModelRegistry | null} modelRegistry - null is fine for
  *   recipes whose nodes have no `modelId` tied to them
  * @param {string} targetId
  * @param {(state: object) => void} onProgress - called on every phase transition
- * @returns {Promise<{ switched: boolean, from: string | null, to: string, alreadyActive?: boolean }>}
+ * @returns {Promise<void>}
  */
 export async function switchRecipe(recipeRegistry, modelRegistry, targetId, onProgress) {
   if (_switchInFlight) {
@@ -240,10 +242,6 @@ export async function switchRecipe(recipeRegistry, modelRegistry, targetId, onPr
       throw new RecipeSwitchError(
         `Cluster is in a conflicting state — recipes reporting running at once: ${snapshot.conflictIds.join(", ")}. Resolve manually (stop the stray one) before switching.`
       );
-    }
-    if (snapshot.activeId === targetId) {
-      emit("already-active");
-      return { switched: false, from: targetId, to: targetId, alreadyActive: true };
     }
 
     const current = snapshot.activeId ? recipeRegistry.get(snapshot.activeId) : null;
