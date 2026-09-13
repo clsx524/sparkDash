@@ -48,7 +48,8 @@
         "statusCmd": "./start.sh status",
         "runningPattern": "running",
         "containerName": "dsv41-exl3-head",
-        "llmPort": 8888
+        "llmPort": 8888,
+        "configScript": "generate-env-deepseek-v41-flash-exl3.py"
       }
     ]
   },
