@@ -9,17 +9,15 @@
  * start/stop/status commands, and health-check port. Adding a sixth recipe later means
  * editing that file, not this class.
  *
- * Two more OPTIONAL per-node fields tie a recipe into Model Registry / config-generator
- * orchestration (see recipeActions.js's syncModelsForRecipe / renderConfigsForRecipe):
+ * One more OPTIONAL per-node field ties a recipe into Model Registry orchestration (see
+ * recipeActions.js's syncModelsForRecipe):
  *   - `modelId`: id of a model tracked in ModelRegistry (config/models.json). When set,
  *     switchRecipe pulls that model onto this node's own `modelFolder` (checksum-verified)
  *     before starting it. Omit for a node that provisions its weights another way.
- *   - `configScript`: filename of a generator script under the mounted RECIPE_CONFIG_DIR
- *     (e.g. generate-env-glm53-exl3.py). When set, switchRecipe copies it to this node's
- *     `workdir` and runs `python3 <configScript>` before starting. Omit if the node's
- *     recipe needs no generated config file.
- * Neither field is assumed present — a recipe with no models/configs tracked yet works
- * exactly as before, unchanged.
+ * Not assumed present — a recipe with no model tracked yet works exactly as before,
+ * unchanged. Everything else about a node's files (.env, checked-out repo, patches) is
+ * ansible's job, applied by the relevant playbook run ahead of any activate — switchRecipe
+ * only starts/stops/health-checks whatever is already provisioned there.
  *
  * Active state is NEVER trusted from a stored flag — it is inferred live, every call, by
  * SSHing each recipe's node(s) and running that recipe's own statusCmd. A flag can drift from

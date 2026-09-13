@@ -3,7 +3,7 @@
  *
  * Mirrors comfyActions.js's precedent (a recipe-level mutation action living outside the HTTP
  * route handler), scaled up to a multi-node, multi-minute operation: sync each node's model
- * (Model Registry pull + checksum verify) and config, stop whatever recipe is currently live,
+ * (Model Registry pull + checksum verify), stop whatever recipe is currently live,
  * confirm it actually stopped, start the target recipe's node(s), then poll each node's own
  * API until it reports healthy. Every phase transition calls `onProgress` so the caller
  * (index.js) can push it over the WebSocket immediately — this can run for many minutes (cold
@@ -13,11 +13,9 @@
  * Refuses to run a second switch concurrently and refuses to proceed on a detected conflict
  * (two recipes' nodes both reporting running at once) rather than guessing which one to stop.
  */
-import fs from "fs";
-import path from "path";
 import { isAllowedTargetHost } from "../validate.js";
 import { llmProbeHost } from "./llmHost.js";
-import { sshExec, copyToSpark } from "./ssh.js";
+import { sshExec } from "./ssh.js";
 import { syncModelToSpark } from "./modelSync.js";
 import {
   probeNodeShardProgress,
@@ -25,7 +23,7 @@ import {
   combineNodeProgress,
   RecipeSwitchHistory,
 } from "./RecipeLoadProgress.js";
-import { RECIPE_SWITCH_HISTORY_JSON_PATH, RECIPE_CONFIG_DIR } from "../config.js";
+import { RECIPE_SWITCH_HISTORY_JSON_PATH } from "../config.js";
 
 const STOP_TIMEOUT_MS = 60_000;
 // Cold model loads on these recipes are measured in minutes (DeepSeek DSpark ~9 minutes,
@@ -40,7 +38,6 @@ const HEALTH_POLL_MS = 5_000;
 const HEALTH_REQUEST_TIMEOUT_MS = 5_000;
 // Model syncs can move hundreds of GB between hosts — hours, not minutes.
 const MODEL_SYNC_PHASE_TIMEOUT_MS = 6 * 60 * 60_000;
-const CONFIG_RENDER_PHASE_TIMEOUT_MS = 2 * 60_000;
 
 export class RecipeSwitchError extends Error {}
 
@@ -71,9 +68,6 @@ async function runNodeCommand(recipeRegistry, node, cmd, timeoutMs) {
   return sshExec(spark, `cd ${node.workdir} && ${cmd}`, { timeoutMs, noBatch: true });
 }
 
-const CONFIG_SCRIPT_COPY_TIMEOUT_MS = 30_000;
-const CONFIG_SCRIPT_RUN_TIMEOUT_MS = 60_000;
-
 /**
  * Sync every node's tied model (recipe node's optional `modelId`, referencing
  * a Model Registry entry) onto that node's own configured model folder,
@@ -95,37 +89,6 @@ async function syncModelsForRecipe(recipeRegistry, modelRegistry, recipe) {
     const spark = recipeRegistry._sparkForNode(node);
     if (!spark) throw new RecipeSwitchError(`no Spark configured for role ${node.role}`);
     await syncModelToSpark(modelRegistry, recipeRegistry.sparkRegistry, model, spark);
-  }
-}
-
-/**
- * Copy every node's tied config generator script (recipe node's optional
- * `configScript`, a filename under the mounted RECIPE_CONFIG_DIR) to that
- * node's workdir and run it. Mirrors what ansible's `copy` + `command:
- * python3 generate-env-*.py` steps did — same scripts, same convention,
- * just triggered here instead of by a playbook run. A node with no
- * `configScript` is left alone.
- */
-async function renderConfigsForRecipe(recipeRegistry, recipe) {
-  for (const node of recipe.nodes) {
-    if (!node.configScript) continue;
-    const spark = recipeRegistry._sparkForNode(node);
-    if (!spark) throw new RecipeSwitchError(`no Spark configured for role ${node.role}`);
-    const localPath = path.join(RECIPE_CONFIG_DIR, node.configScript);
-    let content;
-    try {
-      content = fs.readFileSync(localPath);
-    } catch (err) {
-      throw new RecipeSwitchError(
-        `Config script ${node.configScript} not found under the mounted config directory: ${err.message}`
-      );
-    }
-    const remotePath = `${node.workdir}/${node.configScript}`;
-    await copyToSpark(spark, content, remotePath, { timeoutMs: CONFIG_SCRIPT_COPY_TIMEOUT_MS });
-    await sshExec(spark, `cd ${node.workdir} && python3 ${node.configScript}`, {
-      timeoutMs: CONFIG_SCRIPT_RUN_TIMEOUT_MS,
-      noBatch: true,
-    });
   }
 }
 
@@ -205,11 +168,12 @@ async function pollSwitchProgress(recipeRegistry, target, startedAt, historicalA
 let _switchInFlight = false;
 
 /**
- * Switch the cluster to `targetId`. Syncs each target node's tied model (if any) and config
- * (if any), always stops whatever recipe is currently live first — even when it is the same
- * recipe as the target, so "activate" is a full kill-and-redeploy-fresh, never a same-target
- * no-op (a stale/partially-applied config on disk must not survive a re-activate) — confirms
- * the stop, starts the target's node(s), then waits for each to report healthy.
+ * Switch the cluster to `targetId`. Syncs each target node's tied model (if any), always stops
+ * whatever recipe is currently live first — even when it is the same recipe as the target, so
+ * "activate" is a full kill-and-redeploy-fresh, never a same-target no-op — confirms the stop,
+ * starts the target's node(s), then waits for each to report healthy. Config (.env etc.) is
+ * ansible's job, applied ahead of time by the relevant playbook run — this never generates or
+ * copies config, only starts/stops the node commands already provisioned there.
  *
  * @param {import("./RecipeRegistry.js").RecipeRegistry} recipeRegistry
  * @param {import("./ModelRegistry.js").ModelRegistry | null} modelRegistry - null is fine for
@@ -263,13 +227,6 @@ export async function switchRecipe(recipeRegistry, modelRegistry, targetId, onPr
       syncModelsForRecipe(recipeRegistry, modelRegistry, target),
       MODEL_SYNC_PHASE_TIMEOUT_MS,
       `syncing model(s) for ${target.id} timed out`
-    );
-
-    emit("rendering-config", { from: current?.id ?? null });
-    await withTimeout(
-      renderConfigsForRecipe(recipeRegistry, target),
-      CONFIG_RENDER_PHASE_TIMEOUT_MS,
-      `rendering config for ${target.id} timed out`
     );
 
     emit("starting", { from: current?.id ?? null });

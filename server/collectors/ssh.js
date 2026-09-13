@@ -514,12 +514,11 @@ export async function comfyTest(spark, port) {
  * remote `cat >`) — no `scp`/`sftp` binary dependency, reuses the exact same
  * auth/host-resolution path as every other command in this module.
  *
- * `rm -f` first: some remote shells (zsh, confirmed on the DGX Sparks) run
- * even non-interactive `ssh host 'cmd'` sessions with `noclobber` active,
- * which makes a bare `cat > existing-file` fail with "file exists" — so a
- * configScript copy would succeed exactly once (destination absent) and
- * then fail forever after (destination now exists). Removing first makes
- * this correct under bash/zsh/sh alike, regardless of noclobber.
+ * `rm -f` first: some remote shells (zsh, confirmed on the DGX Sparks) run even
+ * non-interactive `ssh host 'cmd'` sessions with `noclobber` active, which makes a bare
+ * `cat > existing-file` fail with "file exists" — so a caller writing the same path twice
+ * (e.g. modelSync.js's per-shard manifest files) would succeed exactly once and fail forever
+ * after. Removing first makes this correct under bash/zsh/sh alike, regardless of noclobber.
  * @param {object} spark
  * @param {string|Buffer} content
  * @param {string} remotePath

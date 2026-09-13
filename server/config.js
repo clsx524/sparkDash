@@ -38,14 +38,6 @@ const MODEL_DOWNLOAD_TIMEOUT_MS = parseInt(
 );
 /** Timeout for a single model-sync (rsync pull) between two hosts. */
 const MODEL_SYNC_TIMEOUT_MS = parseInt(process.env.MODEL_SYNC_TIMEOUT_MS || "21600000", 10);
-/**
- * Where per-recipe config generator scripts (e.g. generate-env-*.py) are
- * mounted into this container. sparkDash has no knowledge of what's actually
- * deployed here or where it lives on the host — that mapping is entirely an
- * ansible/deployment-time concern (a docker volume mount). This is just the
- * container-internal path sparkDash reads from.
- */
-const RECIPE_CONFIG_DIR = process.env.RECIPE_CONFIG_DIR || path.join(ROOT, "recipe-configs");
 
 // ─── LLM / Comfy probe timeouts ──────────────────────────
 const LLM_PROBE_TIMEOUT_MS = 3000;
@@ -140,7 +132,6 @@ export {
   MODELS_JSON_PATH,
   MODEL_DOWNLOAD_TIMEOUT_MS,
   MODEL_SYNC_TIMEOUT_MS,
-  RECIPE_CONFIG_DIR,
   LLM_PROBE_TIMEOUT_MS,
   COMFY_PROBE_TIMEOUT_MS,
   TAILSCALE_PROBE_TIMEOUT_MS,

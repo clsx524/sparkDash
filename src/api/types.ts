@@ -654,7 +654,6 @@ export interface RecipeSwitchState {
     | "stopping"
     | "confirming-stopped"
     | "syncing-model"
-    | "rendering-config"
     | "starting"
     | "health-checking"
     | "done"

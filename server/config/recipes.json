@@ -12,8 +12,7 @@
         "statusCmd": "./status-deepseek-v4-flash-dspark.sh",
         "runningPattern": "running",
         "containerName": "deepseek-v4-flash-vllm-dspark-1",
-        "llmPort": 8888,
-        "configScript": "generate-env-dspark.py"
+        "llmPort": 8888
       }
     ]
   },
@@ -30,8 +29,7 @@
         "statusCmd": "./start.sh status",
         "runningPattern": "running",
         "containerName": "glm53-exl3-head",
-        "llmPort": 8888,
-        "configScript": "generate-env-glm53-exl3.py"
+        "llmPort": 8888
       }
     ]
   },
@@ -48,8 +46,7 @@
         "statusCmd": "./start.sh status",
         "runningPattern": "running",
         "containerName": "dsv41-exl3-head",
-        "llmPort": 8888,
-        "configScript": "generate-env-deepseek-v41-flash-exl3.py"
+        "llmPort": 8888
       }
     ]
   },
@@ -66,8 +63,7 @@
         "statusCmd": "docker inspect --format '{{.State.Status}}' vllm-fn",
         "runningPattern": "running",
         "containerName": "vllm-fn",
-        "llmPort": 8888,
-        "configScript": "generate-env-qwen38-flash-next.py"
+        "llmPort": 8888
       }
     ]
   },
@@ -94,8 +90,7 @@
         "statusCmd": "make status",
         "runningPattern": "HTTP 200",
         "containerName": "minimax-h3-fl2va",
-        "llmPort": 8000,
-        "configScript": "generate-env-minimax-h3.py"
+        "llmPort": 8000
       }
     ]
   }

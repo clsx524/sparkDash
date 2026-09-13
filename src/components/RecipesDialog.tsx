@@ -25,7 +25,6 @@ const PHASE_LABEL: Record<RecipeSwitchState["phase"], string> = {
   stopping: "Stopping current recipe…",
   "confirming-stopped": "Confirming it stopped…",
   "syncing-model": "Syncing model files…",
-  "rendering-config": "Applying config…",
   starting: "Starting target recipe…",
   "health-checking": "Waiting for health…",
   done: "Done",
