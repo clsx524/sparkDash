@@ -287,12 +287,13 @@ export function ModelsDialog({ open, onClose }: ModelsDialogProps) {
       }}
     >
       <div className="settings-panel w-full max-w-lg p-6">
-        <h2 className="mb-1 text-sm font-semibold text-text-strong">Model Registry</h2>
-        <p className="mb-4 text-[10px] text-muted">
+        <h2 className="mb-1 shrink-0 text-sm font-semibold text-text-strong">Model Registry</h2>
+        <p className="mb-4 shrink-0 text-[10px] text-muted">
           One host holds the canonical model weights. Other hosts sync from it directly or via a
           relay hop.
         </p>
 
+        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
         <div className="mb-4 space-y-2 rounded border border-border bg-surface-elevated p-3">
           <div>
             <label className="mb-1 block text-xs text-muted">Registry host</label>
@@ -580,12 +581,13 @@ export function ModelsDialog({ open, onClose }: ModelsDialogProps) {
             </button>
           </div>
         </div>
+        </div>
 
         {error && (
-          <div className="mt-3 rounded bg-danger/20 px-3 py-2 text-xs text-danger">{error}</div>
+          <div className="mt-3 shrink-0 rounded bg-danger/20 px-3 py-2 text-xs text-danger">{error}</div>
         )}
 
-        <div className="mt-5 flex justify-end gap-2">
+        <div className="mt-3 flex shrink-0 justify-end gap-2 border-t border-border pt-3">
           <button
             type="button"
             onClick={onClose}
