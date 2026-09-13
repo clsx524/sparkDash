@@ -34,6 +34,23 @@
     ]
   },
   {
+    "id": "deepseek-v41-flash-exl3",
+    "label": "DeepSeek-v4.1-Flash EXL3 (TP2)",
+    "group": "dual-text-gen",
+    "nodes": [
+      {
+        "role": "head",
+        "workdir": "~/DeepSeek-v4.1-Flash-EXL3-2x-DGX-Sparks",
+        "startCmd": "./start.sh",
+        "stopCmd": "./stop.sh",
+        "statusCmd": "./start.sh status",
+        "runningPattern": "running",
+        "containerName": "dsv41-exl3-head",
+        "llmPort": 8888
+      }
+    ]
+  },
+  {
     "id": "qwen38-flash-next",
     "label": "Qwen3.8-Flash-Next (TP2+EP+MTP3)",
     "group": "dual-text-gen",
