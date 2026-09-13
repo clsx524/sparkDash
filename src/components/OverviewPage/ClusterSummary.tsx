@@ -1,4 +1,7 @@
+import { useCallback, useState, type ReactNode } from "react";
 import type { SparkSnapshot } from "../../api/types";
+import { refreshSparkMetric } from "../../api/client";
+import { RotateIcon } from "../ui/icons";
 import {
   activeLlm,
   aggregate,
@@ -27,11 +30,14 @@ function Field({
   value,
   tone = "default",
   title,
+  action,
 }: {
   label: string;
   value: string;
   tone?: "default" | "accent" | "success" | "warning" | "danger" | "muted";
   title?: string;
+  /** Optional small control (e.g. a refresh button) rendered next to the label. */
+  action?: ReactNode;
 }) {
   const toneClass =
     tone === "accent"
@@ -47,7 +53,10 @@ function Field({
               : "text-text-strong";
   return (
     <div className="flex min-w-0 flex-col gap-0.5">
-      <span className="text-[12px] uppercase leading-none tracking-wide text-muted">{label}</span>
+      <span className="flex items-center gap-1 text-[12px] uppercase leading-none tracking-wide text-muted">
+        {label}
+        {action}
+      </span>
       <span className={`font-tabular truncate text-[15px] font-semibold leading-tight ${toneClass}`} title={title ?? value}>
         {value}
       </span>
@@ -77,6 +86,22 @@ export function ClusterSummary({
   const rdma = clusterRdmaHealth(sparks);
   const headPort = head ? clusterRdmaPort(head) : null;
   const link = clusterLinkTraffic(sparks);
+
+  const [refreshingRdma, setRefreshingRdma] = useState(false);
+  const handleRefreshRdma = useCallback(async () => {
+    setRefreshingRdma(true);
+    try {
+      // clusterRdmaHealth needs every node's own reading, not just the head's — a stale
+      // reading from either side alone still leaves the aggregate on old data. The server
+      // pushes the result over the same WebSocket broadcast as the periodic poll, so there
+      // is nothing to do with the response here.
+      await Promise.all(sparks.map((s) => refreshSparkMetric(s.id, "network")));
+    } catch (err) {
+      console.error("Failed to refresh RDMA/network:", err);
+    } finally {
+      setRefreshingRdma(false);
+    }
+  }, [sparks]);
 
   // TP size is a configured fact, not something we can currently probe. Label it that way.
   const tpSize = head && workers.length > 0 ? workers.length + 1 : null;
@@ -211,6 +236,21 @@ export function ClusterSummary({
             headPort
               ? `${headPort.hca} · ${headPort.netdev ?? "?"} · ${headPort.state ?? "?"} / ${headPort.physicalState ?? "?"} — link state only; NCCL and rank health are not probed`
               : "No RDMA device reported"
+          }
+          action={
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                void handleRefreshRdma();
+              }}
+              disabled={refreshingRdma}
+              title="Poll every node's RDMA link state now, instead of waiting for the next scheduled poll"
+              aria-label="Refresh RDMA/interconnect status"
+              className="ml-auto flex items-center rounded p-0.5 text-muted transition-colors hover:bg-surface-hover hover:text-text disabled:opacity-50"
+            >
+              <RotateIcon className={`h-2.5 w-2.5 ${refreshingRdma ? "animate-spin" : ""}`} />
+            </button>
           }
         />
         <Field
