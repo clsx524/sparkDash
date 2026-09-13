@@ -596,8 +596,14 @@ app.post("/api/sparks/:id/refresh/:domain", async (req, res) => {
     const monitor = monitors.get(req.params.id);
     if (!monitor) return res.status(404).json({ error: "Spark not found" });
     const { domain } = req.params;
-    if (domain !== "storage") {
-      return res.status(400).json({ error: "Only 'storage' domain is supported" });
+    // "storage" gets refreshDomain's own dedicated dance (collectStorage()
+    // directly, its own generation/in-flight token) — "network" needs
+    // nothing special, _pollDomain("network") already carries the same
+    // in-flight guard every regular poll cycle uses. Both are the only
+    // manual-refresh buttons that exist today (StoragePanel, RDMA
+    // Interconnect); widen this list if a third one is ever added.
+    if (domain !== "storage" && domain !== "network") {
+      return res.status(400).json({ error: "Only 'storage' or 'network' domains are supported" });
     }
     await monitor.refreshDomain(domain);
     forceBroadcast();
