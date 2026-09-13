@@ -2,16 +2,27 @@
  * ModelRegistry — a generic, fleet-agnostic model download/verification tracker.
  *
  * Deliberately knows nothing about any specific host, model, or directory layout.
- * Every value here (which host holds the canonical files, what directory, which
- * models are tracked, their download source) is entered by the operator through
- * the UI and persisted as-is — this class never assumes a default path or
- * pre-seeds a model list.
+ * Which host holds the canonical files and what directory is entered by the
+ * operator through the UI. The tracked model *list*, however, is not purely
+ * hand-typed: whenever the registry host/directory is set or changed (and on
+ * demand via rescan), reconcileWithDisk() scans the directory's first-level
+ * subfolders and auto-tracks any that aren't already tracked (matched by
+ * subfolder name) — so files already sitting there under an old convention,
+ * or added by hand outside sparkDash, show up without the operator having to
+ * retype every subfolder name. A discovered entry has no known Hugging Face
+ * repo (repo: null) since that can't be inferred from a directory name alone
+ * — download/re-verify stay unavailable for it until the operator edits it
+ * in to add one. Reconciliation only ever adds; it never removes a tracked
+ * entry just because its folder is briefly missing (a live probe already
+ * reports that — see probeStatus/statuses).
  *
  * Two files back this:
  *   - config/model-registry.json — { hostId, directory }: which tracked host
  *     (any host in SparkRegistry — Spark or otherwise) holds the canonical
  *     model files, and where.
- *   - config/models.json — the user-entered list of tracked models.
+ *   - config/models.json — the tracked model list: operator-declared entries
+ *     (via Add model, always with a repo) plus reconciled discoveries (repo
+ *     null until edited in).
  *
  * Availability is always a live SSH probe against the registry host, never a
  * stored flag, matching RecipeRegistry's philosophy: stored state can drift
@@ -195,6 +206,39 @@ export class ModelRegistry {
     return { ...model };
   }
 
+  /**
+   * Edit an existing tracked model's declared metadata — label, source repo,
+   * revision, includePattern. Does not touch id/subfolder (changing either
+   * would orphan the directory/manifest this entry already points at) or
+   * manifest/verifiedAt (those are only ever set by a real download/verify).
+   * This is how an auto-discovered entry (repo: null) gets a real source
+   * repo attached, and how a typo in an existing one gets fixed.
+   * @param {{label?: string, repo?: string, revision?: string, includePattern?: string|null}} patch
+   */
+  updateModel(id, patch) {
+    const model = this.getModel(id);
+    if (!model) throw new Error(`Model ${id} is not tracked`);
+    const next = { ...model };
+    if (patch.label !== undefined) {
+      next.label = typeof patch.label === "string" && patch.label.trim() ? patch.label.trim() : id;
+    }
+    if (patch.repo !== undefined) {
+      const repo = typeof patch.repo === "string" ? patch.repo.trim() : "";
+      next.repo = repo || null;
+    }
+    if (patch.revision !== undefined) {
+      const revision = typeof patch.revision === "string" ? patch.revision.trim() : "";
+      next.revision = revision || "main";
+    }
+    if (patch.includePattern !== undefined) {
+      const includePattern = typeof patch.includePattern === "string" ? patch.includePattern.trim() : "";
+      next.includePattern = includePattern || null;
+    }
+    this._models = this._models.map((m) => (m.id === id ? next : m));
+    this._saveModels();
+    return { ...next };
+  }
+
   /** Remove a tracked model entry (metadata only — does not touch downloaded files). */
   removeModel(id) {
     const idx = this._models.findIndex((m) => m.id === id);
@@ -220,6 +264,89 @@ export class ModelRegistry {
   _setJob(modelId, patch) {
     const prev = this._jobs.get(modelId) || {};
     this._jobs.set(modelId, { ...prev, ...patch, updatedAt: new Date().toISOString() });
+  }
+
+  // ─── Disk reconciliation (scan + auto-track new folders) ─────────────
+  /**
+   * List first-level subdirectory names already present under the registry
+   * directory on the registry host. Internal to reconcileWithDisk(); throws
+   * (does not swallow) on a real failure, same as any other
+   * operator-triggered action in this class.
+   * @returns {Promise<string[]>}
+   */
+  async listRegistryDirectories() {
+    const host = this.registryHost();
+    if (!host) throw new Error("No Model Registry host configured");
+    if (!this._registryConfig.directory) throw new Error("No Model Registry directory configured");
+    const dir = this._registryConfig.directory;
+    const out = await sshExecDirect(
+      host,
+      `find ${shQuotePath(dir)} -mindepth 1 -maxdepth 1 -type d 2>/dev/null | xargs -n1 basename 2>/dev/null | sort`,
+      { timeoutMs: PROBE_TIMEOUT_MS, noBatch: true }
+    );
+    return out ? out.split("\n").filter(Boolean) : [];
+  }
+
+  /** Sanitize a disk folder name into a valid, unique model id; null if nothing usable remains. */
+  _uniqueDiscoveredId(name) {
+    const base = String(name).trim().replace(/[^a-zA-Z0-9._-]/g, "-").slice(0, 128);
+    if (!base) return null;
+    if (!this.getModel(base)) return base;
+    for (let n = 2; n < 1000; n++) {
+      const suffix = `-${n}`;
+      const candidate = base.slice(0, 128 - suffix.length) + suffix;
+      if (!this.getModel(candidate)) return candidate;
+    }
+    return null;
+  }
+
+  /**
+   * Pure reconciliation core: given a list of on-disk subfolder names,
+   * auto-track any not already tracked (matched by subfolder name). A
+   * discovered entry has repo: null — a directory name alone doesn't tell
+   * us its Hugging Face source, so download/re-verify stay unavailable for
+   * it until the operator edits one in (updateModel). Never removes or
+   * alters an already-tracked entry; only ever adds. Separated from
+   * reconcileWithDisk so this logic is testable without SSH.
+   * @param {string[]} names
+   * @returns {{discovered: string[]}} ids of newly tracked models
+   */
+  reconcileNames(names) {
+    const trackedSubfolders = new Set(this._models.map((m) => m.subfolder));
+    const discovered = [];
+    for (const name of names) {
+      if (trackedSubfolders.has(name)) continue;
+      const id = this._uniqueDiscoveredId(name);
+      if (!id) continue; // nothing usable left after sanitizing — skip rather than guess
+      this._models = [
+        ...this._models,
+        {
+          id,
+          label: name,
+          subfolder: name,
+          repo: null,
+          revision: "main",
+          includePattern: null,
+          manifest: null,
+          verifiedAt: null,
+        },
+      ];
+      trackedSubfolders.add(name);
+      discovered.push(id);
+    }
+    if (discovered.length > 0) this._saveModels();
+    return { discovered };
+  }
+
+  /**
+   * Scan the registry directory (live SSH) and reconcile it against the
+   * tracked list — see reconcileNames for the actual matching/discovery
+   * logic.
+   * @returns {Promise<{discovered: string[]}>}
+   */
+  async reconcileWithDisk() {
+    const names = await this.listRegistryDirectories();
+    return this.reconcileNames(names);
   }
 
   // ─── Live availability probe (never a stored flag) ───────
@@ -301,6 +428,9 @@ export class ModelRegistry {
     try {
       const model = this.getModel(modelId);
       if (!model) throw new Error(`Model ${modelId} is not tracked`);
+      if (!model.repo) {
+        throw new Error(`${modelId} has no source repo set — edit it to add one before downloading`);
+      }
       const host = this.registryHost();
       if (!host) throw new Error("No Model Registry host configured");
       if (!this._registryConfig.directory) throw new Error("No Model Registry directory configured");

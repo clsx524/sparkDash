@@ -1691,9 +1691,36 @@ app.get("/api/model-registry", (_req, res) => {
   res.json(modelRegistry.getRegistryConfig());
 });
 
-app.put("/api/model-registry", (req, res) => {
+/**
+ * Setting or changing the registry host/directory immediately reconciles the
+ * tracked model list against what's actually on disk there (see
+ * ModelRegistry.reconcileWithDisk) — an operator pointing this at an
+ * existing directory shouldn't have to retype every subfolder already
+ * sitting on it. A scan failure (host unreachable, etc.) does not fail the
+ * whole request — the config is saved regardless — it's reported separately
+ * via scanError so the UI can show it without losing the save.
+ */
+app.put("/api/model-registry", async (req, res) => {
+  let config;
   try {
-    res.json(modelRegistry.setRegistryConfig(req.body || {}));
+    config = modelRegistry.setRegistryConfig(req.body || {});
+  } catch (err) {
+    return res.status(400).json({ error: err.message });
+  }
+  let discovered = [];
+  let scanError = null;
+  try {
+    ({ discovered } = await modelRegistry.reconcileWithDisk());
+  } catch (err) {
+    scanError = err.message;
+  }
+  res.json({ ...config, discovered, scanError });
+});
+
+/** Re-scan the registry directory on demand (no config change) — for files added on disk after the registry was already configured. */
+app.post("/api/model-registry/rescan", async (_req, res) => {
+  try {
+    res.json(await modelRegistry.reconcileWithDisk());
   } catch (err) {
     res.status(400).json({ error: err.message });
   }
@@ -1714,6 +1741,18 @@ app.post("/api/models", (req, res) => {
     res.status(201).json(modelRegistry.addModel(req.body || {}));
   } catch (err) {
     res.status(400).json({ error: err.message });
+  }
+});
+
+/** Edit an existing tracked model's label/repo/revision/includePattern — e.g. attaching a source repo to a disk-discovered entry. */
+app.patch("/api/models/:id", (req, res) => {
+  if (!allowGlobalDestructive(principalKey(req))) {
+    return rejectLimited(res, "Too many requests — try again shortly");
+  }
+  try {
+    res.json(modelRegistry.updateModel(req.params.id, req.body || {}));
+  } catch (err) {
+    res.status(404).json({ error: err.message });
   }
 });
 

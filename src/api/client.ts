@@ -9,6 +9,7 @@ import type {
   ModelEntry,
   ModelJobState,
   ModelRegistryConfig,
+  ModelRegistryScanResult,
   ModelsListResponse,
   RecipeActivateResponse,
   RecipeListResponse,
@@ -477,8 +478,16 @@ export function fetchModelRegistry(): Promise<ModelRegistryConfig> {
   return apiFetch("/api/model-registry");
 }
 
-export function updateModelRegistry(patch: ModelRegistryConfig): Promise<ModelRegistryConfig> {
+/** Setting/changing the host or directory immediately reconciles the tracked list against disk — see the returned discovered/scanError. */
+export function updateModelRegistry(
+  patch: ModelRegistryConfig
+): Promise<ModelRegistryConfig & ModelRegistryScanResult> {
   return apiFetch("/api/model-registry", { method: "PUT", body: JSON.stringify(patch) });
+}
+
+/** Re-scan the registry directory on demand (no config change) — for files added on disk after the registry was already configured. */
+export function rescanModelRegistry(): Promise<ModelRegistryScanResult> {
+  return apiFetch("/api/model-registry/rescan", { method: "POST" });
 }
 
 /** Tracked models plus a live availability probe per model (never a stored flag). */
@@ -487,9 +496,17 @@ export function fetchModels(): Promise<ModelsListResponse> {
 }
 
 export function addModel(
-  input: Pick<ModelEntry, "id" | "label" | "subfolder" | "repo" | "revision" | "includePattern">
+  input: Pick<ModelEntry, "id" | "label" | "subfolder" | "revision" | "includePattern"> & { repo: string }
 ): Promise<ModelEntry> {
   return apiFetch("/api/models", { method: "POST", body: JSON.stringify(input) });
+}
+
+/** Edit an existing tracked model's label/repo/revision/includePattern — e.g. attaching a source repo to a disk-discovered entry. */
+export function updateModel(
+  id: string,
+  patch: Partial<Pick<ModelEntry, "label" | "repo" | "revision" | "includePattern">>
+): Promise<ModelEntry> {
+  return apiFetch(`/api/models/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(patch) });
 }
 
 /** Remove a tracked model entry (metadata only — does not touch downloaded files). */

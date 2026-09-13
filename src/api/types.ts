@@ -104,17 +104,30 @@ export interface ModelRegistryConfig {
   directory: string;
 }
 
+/** Result of PUT /api/model-registry or POST /api/model-registry/rescan — a
+ *  directory scan reconciles the tracked list against disk every time the
+ *  registry host/directory is set or changed. */
+export interface ModelRegistryScanResult {
+  discovered: string[];
+  scanError: string | null;
+}
+
 export interface ModelFileManifestEntry {
   path: string;
   sha256: string;
 }
 
-/** One user-tracked model. Download source + verification manifest, entirely user-entered. */
+/**
+ * One tracked model. Either operator-declared (Add model, always has a
+ * repo) or disk-discovered by reconcileWithDisk (repo: null until an
+ * operator edits one in — a directory name alone doesn't reveal its
+ * Hugging Face source).
+ */
 export interface ModelEntry {
   id: string;
   label: string;
   subfolder: string;
-  repo: string;
+  repo: string | null;
   revision: string;
   includePattern?: string | null;
   manifest?: ModelFileManifestEntry[] | null;

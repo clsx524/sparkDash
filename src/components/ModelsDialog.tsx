@@ -8,9 +8,17 @@ import {
   fetchModels,
   fetchSparks,
   removeModel,
+  rescanModelRegistry,
+  updateModel,
   updateModelRegistry,
 } from "../api/client";
-import type { ModelEntry, ModelJobState, ModelsListResponse, SparkConfig } from "../api/types";
+import type {
+  ModelEntry,
+  ModelJobState,
+  ModelRegistryScanResult,
+  ModelsListResponse,
+  SparkConfig,
+} from "../api/types";
 import { useModalPresence } from "../hooks/useModalPresence";
 
 interface ModelsDialogProps {
@@ -39,6 +47,13 @@ function formatBytes(bytes: number | null | undefined): string {
   return `${bytes} B`;
 }
 
+/** Summarize a reconciliation scan result for display. */
+function describeScan(result: ModelRegistryScanResult): string {
+  if (result.scanError) return `Scan failed: ${result.scanError}`;
+  if (result.discovered.length === 0) return "Scan found no new folders.";
+  return `Discovered ${result.discovered.length} model(s) on disk: ${result.discovered.join(", ")}. Set their source repo to enable download.`;
+}
+
 const EMPTY_FORM = {
   id: "",
   label: "",
@@ -65,6 +80,14 @@ export function ModelsDialog({ open, onClose }: ModelsDialogProps) {
   const [jobs, setJobs] = useState<Record<string, ModelJobState & { phase: "idle" | ModelJobState["phase"] }>>({});
   const [confirmingId, setConfirmingId] = useState<string | null>(null);
 
+  const [scanMessage, setScanMessage] = useState<string | null>(null);
+  const [rescanning, setRescanning] = useState(false);
+
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editRepo, setEditRepo] = useState("");
+  const [editRevision, setEditRevision] = useState("");
+  const [editSaving, setEditSaving] = useState(false);
+
   useEscape(onClose);
   const { mounted, visible } = useModalPresence(open);
 
@@ -90,6 +113,8 @@ export function ModelsDialog({ open, onClose }: ModelsDialogProps) {
       setFormError(null);
       setJobs({});
       setConfirmingId(null);
+      setScanMessage(null);
+      setEditingId(null);
       return;
     }
     load();
@@ -125,15 +150,60 @@ export function ModelsDialog({ open, onClose }: ModelsDialogProps) {
   const handleSaveRegistry = async () => {
     setSavingRegistry(true);
     setError(null);
+    setScanMessage(null);
     try {
-      const registry = await updateModelRegistry({ hostId: registryHostId, directory: registryDirectory });
-      setRegistryHostId(registry.hostId);
-      setRegistryDirectory(registry.directory);
+      const result = await updateModelRegistry({ hostId: registryHostId, directory: registryDirectory });
+      setRegistryHostId(result.hostId);
+      setRegistryDirectory(result.directory);
+      setScanMessage(describeScan(result));
       load();
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setSavingRegistry(false);
+    }
+  };
+
+  /** Re-scan the registry directory without changing host/directory — for files added on disk after the registry was already configured. */
+  const handleRescan = async () => {
+    setRescanning(true);
+    setError(null);
+    setScanMessage(null);
+    try {
+      const result = await rescanModelRegistry();
+      setScanMessage(describeScan(result));
+      load();
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setRescanning(false);
+    }
+  };
+
+  const startEdit = (model: ModelEntry) => {
+    setEditingId(model.id);
+    setEditRepo(model.repo ?? "");
+    setEditRevision(model.revision || "main");
+    setError(null);
+  };
+
+  const cancelEdit = () => setEditingId(null);
+
+  const handleSaveEdit = async (model: ModelEntry) => {
+    if (!editRepo.trim()) {
+      setError("Source repo is required.");
+      return;
+    }
+    setEditSaving(true);
+    setError(null);
+    try {
+      await updateModel(model.id, { repo: editRepo.trim(), revision: editRevision.trim() || "main" });
+      setEditingId(null);
+      load();
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setEditSaving(false);
     }
   };
 
@@ -249,7 +319,16 @@ export function ModelsDialog({ open, onClose }: ModelsDialogProps) {
               className="w-full rounded border border-border bg-surface px-3 py-1.5 text-xs text-text outline-none focus:border-accent"
             />
           </div>
-          <div className="flex justify-end">
+          <div className="flex items-center justify-between gap-2">
+            <button
+              type="button"
+              onClick={handleRescan}
+              disabled={rescanning || !registryHostId || !registryDirectory}
+              title="Scan the registry directory for folders not yet tracked"
+              className="rounded border border-border bg-surface px-3 py-1.5 text-xs text-muted hover:bg-surface-hover disabled:opacity-50"
+            >
+              {rescanning ? "Scanning..." : "Rescan"}
+            </button>
             <button
               type="button"
               onClick={handleSaveRegistry}
@@ -259,6 +338,11 @@ export function ModelsDialog({ open, onClose }: ModelsDialogProps) {
               {savingRegistry ? "Saving..." : "Save"}
             </button>
           </div>
+          {scanMessage && (
+            <p className={`text-[10px] ${scanMessage.startsWith("Scan failed") ? "text-danger" : "text-muted"}`}>
+              {scanMessage}
+            </p>
+          )}
         </div>
 
         {loading && <p className="text-xs text-muted">Loading…</p>}
@@ -266,7 +350,10 @@ export function ModelsDialog({ open, onClose }: ModelsDialogProps) {
         {data && !loading && (
           <div className="space-y-2">
             {data.models.length === 0 && (
-              <p className="text-xs text-muted">No models tracked yet.</p>
+              <p className="text-xs text-muted">
+                No models tracked yet. Saving the registry above (or Rescan) auto-tracks any
+                existing folder found on disk — or add one manually below.
+              </p>
             )}
             {data.models.map((model) => {
               const status = data.statuses[model.id];
@@ -278,7 +365,13 @@ export function ModelsDialog({ open, onClose }: ModelsDialogProps) {
                     <div className="min-w-0">
                       <div className="text-xs font-medium text-text-strong">{model.label}</div>
                       <div className="mt-0.5 truncate text-[10px] text-muted">
-                        {model.repo}@{model.revision}
+                        {model.repo ? (
+                          <>
+                            {model.repo}@{model.revision}
+                          </>
+                        ) : (
+                          <span className="text-warning">Source repo not set (found on disk)</span>
+                        )}
                       </div>
                       <div className="text-[10px] text-muted">subfolder: {model.subfolder}</div>
                       <div className="mt-1 text-[10px]">
@@ -295,45 +388,108 @@ export function ModelsDialog({ open, onClose }: ModelsDialogProps) {
                         )}
                       </div>
                     </div>
-                    <div className="flex shrink-0 flex-col items-end gap-1">
-                      {status?.available ? (
+                    {editingId !== model.id && (
+                      <div className="flex shrink-0 flex-col items-end gap-1">
+                        {model.repo ? (
+                          status?.available ? (
+                            <button
+                              type="button"
+                              onClick={() => handleDeleteFiles(model)}
+                              disabled={busy}
+                              className="rounded border border-danger/40 bg-surface px-2.5 py-1 text-[10px] text-danger hover:bg-danger/10 disabled:opacity-50"
+                            >
+                              {busy && job?.kind === "delete" ? "Deleting…" : "Delete files"}
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => handleDownload(model)}
+                              disabled={busy}
+                              className="rounded bg-accent px-2.5 py-1 text-[10px] font-medium text-white hover:bg-accent-hover disabled:opacity-50"
+                            >
+                              {busy && job?.kind === "download" ? "Downloading…" : "Download"}
+                            </button>
+                          )
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => startEdit(model)}
+                            className="rounded bg-accent px-2.5 py-1 text-[10px] font-medium text-white hover:bg-accent-hover"
+                          >
+                            Set repo
+                          </button>
+                        )}
+                        {confirmingId === model.id ? (
+                          <button
+                            type="button"
+                            onClick={() => handleUntrack(model)}
+                            className="rounded border border-danger/40 bg-danger/10 px-2.5 py-1 text-[10px] text-danger hover:bg-danger/20"
+                          >
+                            Confirm untrack
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => handleUntrack(model)}
+                            className="rounded border border-border bg-surface px-2.5 py-1 text-[10px] text-muted hover:bg-surface-hover"
+                          >
+                            Untrack
+                          </button>
+                        )}
+                        {model.repo && (
+                          <button
+                            type="button"
+                            onClick={() => startEdit(model)}
+                            className="rounded border border-border bg-surface px-2.5 py-1 text-[10px] text-muted hover:bg-surface-hover"
+                          >
+                            Edit repo
+                          </button>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                  {editingId === model.id && (
+                    <div className="mt-2 space-y-2 rounded border border-border bg-surface p-2">
+                      <div>
+                        <label className="mb-1 block text-xs text-muted">Repo</label>
+                        <input
+                          type="text"
+                          value={editRepo}
+                          onChange={(e) => setEditRepo(e.target.value)}
+                          placeholder="org/repo"
+                          className="w-full rounded border border-border bg-surface-elevated px-3 py-1.5 text-xs text-text outline-none focus:border-accent"
+                        />
+                      </div>
+                      <div>
+                        <label className="mb-1 block text-xs text-muted">Revision</label>
+                        <input
+                          type="text"
+                          value={editRevision}
+                          onChange={(e) => setEditRevision(e.target.value)}
+                          placeholder="main"
+                          className="w-full rounded border border-border bg-surface-elevated px-3 py-1.5 text-xs text-text outline-none focus:border-accent"
+                        />
+                      </div>
+                      <div className="flex justify-end gap-2">
                         <button
                           type="button"
-                          onClick={() => handleDeleteFiles(model)}
-                          disabled={busy}
-                          className="rounded border border-danger/40 bg-surface px-2.5 py-1 text-[10px] text-danger hover:bg-danger/10 disabled:opacity-50"
+                          onClick={cancelEdit}
+                          disabled={editSaving}
+                          className="rounded border border-border bg-surface-elevated px-2.5 py-1 text-[10px] text-muted hover:bg-surface-hover disabled:opacity-50"
                         >
-                          {busy && job?.kind === "delete" ? "Deleting…" : "Delete files"}
+                          Cancel
                         </button>
-                      ) : (
                         <button
                           type="button"
-                          onClick={() => handleDownload(model)}
-                          disabled={busy}
+                          onClick={() => handleSaveEdit(model)}
+                          disabled={editSaving}
                           className="rounded bg-accent px-2.5 py-1 text-[10px] font-medium text-white hover:bg-accent-hover disabled:opacity-50"
                         >
-                          {busy && job?.kind === "download" ? "Downloading…" : "Download"}
+                          {editSaving ? "Saving..." : "Save"}
                         </button>
-                      )}
-                      {confirmingId === model.id ? (
-                        <button
-                          type="button"
-                          onClick={() => handleUntrack(model)}
-                          className="rounded border border-danger/40 bg-danger/10 px-2.5 py-1 text-[10px] text-danger hover:bg-danger/20"
-                        >
-                          Confirm untrack
-                        </button>
-                      ) : (
-                        <button
-                          type="button"
-                          onClick={() => handleUntrack(model)}
-                          className="rounded border border-border bg-surface px-2.5 py-1 text-[10px] text-muted hover:bg-surface-hover"
-                        >
-                          Untrack
-                        </button>
-                      )}
+                      </div>
                     </div>
-                  </div>
+                  )}
                   {job && (job.phase !== "done" || job.error) && (
                     <div
                       className={`mt-2 rounded px-2 py-1 text-[10px] ${
