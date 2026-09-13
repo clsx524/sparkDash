@@ -38,6 +38,32 @@ function useEscape(onClose: () => void) {
 
 const MODEL_ID_PATTERN = /^[a-zA-Z0-9._-]{1,128}$/;
 
+/**
+ * Parse a pasted Hugging Face repo reference into `{ org, name }`. Accepts a
+ * bare "org/repo" alias or a full https://huggingface.co/org/repo URL (with
+ * an optional /tree/<rev> or /blob/<rev>/... suffix, which is not the repo
+ * name and must be dropped). Returns null for anything that isn't
+ * recognizably "one slash-separated org/repo pair" — callers should leave
+ * the dependent fields alone rather than derive from a fragment while the
+ * operator is still mid-paste/mid-type.
+ */
+function parseRepoAlias(raw: string): { org: string; name: string } | null {
+  let s = raw.trim();
+  s = s.replace(/^https?:\/\/(www\.)?huggingface\.co\//i, "");
+  s = s.replace(/^\/+|\/+$/g, "");
+  const parts = s.split("/");
+  if (parts.length < 2 || !parts[0] || !parts[1]) return null;
+  return { org: parts[0], name: parts[1] };
+}
+
+/** org/repo -> a value usable as both `id` and `subfolder` (id's allowed charset is a superset of every character Hugging Face permits in a repo name). */
+function deriveIdFromRepo(raw: string): string | null {
+  const parsed = parseRepoAlias(raw);
+  if (!parsed) return null;
+  const candidate = parsed.name.replace(/[^a-zA-Z0-9._-]/g, "-");
+  return MODEL_ID_PATTERN.test(candidate) ? candidate : null;
+}
+
 /** Bytes → "1.2 GB" / "512 MB". Dash when unknown. */
 function formatBytes(bytes: number | null | undefined): string {
   if (typeof bytes !== "number" || !Number.isFinite(bytes) || bytes < 0) return "—";
@@ -259,12 +285,17 @@ export function ModelsDialog({ open, onClose }: ModelsDialogProps) {
       return;
     }
     setAdding(true);
+    const parsedRepo = parseRepoAlias(form.repo);
     try {
       await addModel({
         id: form.id.trim(),
         label: form.label.trim(),
         subfolder: form.subfolder.trim(),
-        repo: form.repo.trim(),
+        // Normalize a pasted https://huggingface.co/org/repo(/tree/...) URL
+        // down to "org/repo" — the backend interpolates this straight into
+        // huggingface.co/api/models/{repo}/tree/{revision}, so a raw URL
+        // would silently 404 instead of downloading.
+        repo: parsedRepo ? `${parsedRepo.org}/${parsedRepo.name}` : form.repo.trim(),
         revision: form.revision.trim(),
         includePattern: form.includePattern.trim() || null,
       });
@@ -543,8 +574,21 @@ export function ModelsDialog({ open, onClose }: ModelsDialogProps) {
             <input
               type="text"
               value={form.repo}
-              onChange={(e) => setForm((prev) => ({ ...prev, repo: e.target.value }))}
-              placeholder="org/repo"
+              onChange={(e) => {
+                const repo = e.target.value;
+                const derived = deriveIdFromRepo(repo);
+                setForm((prev) => ({
+                  ...prev,
+                  repo,
+                  // Only fill fields the operator hasn't already typed into —
+                  // never stomp a manual id/label/subfolder while they're
+                  // still refining the repo string.
+                  id: !prev.id.trim() && derived ? derived : prev.id,
+                  label: !prev.label.trim() && derived ? derived : prev.label,
+                  subfolder: !prev.subfolder.trim() && derived ? derived : prev.subfolder,
+                }));
+              }}
+              placeholder="org/repo — id, label, and subfolder auto-fill from this if left blank"
               className="w-full rounded border border-border bg-surface px-3 py-1.5 text-xs text-text outline-none focus:border-accent"
             />
           </div>
