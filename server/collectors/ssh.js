@@ -513,6 +513,13 @@ export async function comfyTest(spark, port) {
  * Write `content` to `remotePath` on `spark` over SSH (piped via stdin to a
  * remote `cat >`) — no `scp`/`sftp` binary dependency, reuses the exact same
  * auth/host-resolution path as every other command in this module.
+ *
+ * `rm -f` first: some remote shells (zsh, confirmed on the DGX Sparks) run
+ * even non-interactive `ssh host 'cmd'` sessions with `noclobber` active,
+ * which makes a bare `cat > existing-file` fail with "file exists" — so a
+ * configScript copy would succeed exactly once (destination absent) and
+ * then fail forever after (destination now exists). Removing first makes
+ * this correct under bash/zsh/sh alike, regardless of noclobber.
  * @param {object} spark
  * @param {string|Buffer} content
  * @param {string} remotePath
@@ -523,7 +530,7 @@ export async function copyToSpark(spark, content, remotePath, options = {}) {
     Number.isFinite(options.timeoutMs) && options.timeoutMs > 0 ? options.timeoutMs : 30000;
   const quoted = "'" + String(remotePath).replace(/'/g, "'\\''") + "'";
   const { file, args, env, targetHost } = sshCommandSpec(spark, {
-    remoteArgv: [`cat > ${quoted}`],
+    remoteArgv: [`rm -f ${quoted}; cat > ${quoted}`],
   });
   return new Promise((resolve, reject) => {
     const child = execFile(
