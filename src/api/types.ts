@@ -126,6 +126,9 @@ export interface ModelStatus {
   id: string;
   available: boolean;
   sizeBytes?: number | null;
+  /** Set when the probe itself failed (SSH unreachable, auth rejected, timed
+   *  out, ...) — distinct from a clean "not downloaded yet" (null). */
+  error?: string | null;
 }
 
 export interface ModelsListResponse {

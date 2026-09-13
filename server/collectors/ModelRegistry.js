@@ -223,29 +223,37 @@ export class ModelRegistry {
   }
 
   // ─── Live availability probe (never a stored flag) ───────
-  /** @returns {Promise<{id: string, available: boolean, sizeBytes: number|null}>} */
+  /** @returns {Promise<{id: string, available: boolean, sizeBytes: number|null, error: string|null}>} */
   async probeStatus(model) {
     const host = this.registryHost();
-    if (!host || !this._registryConfig.directory) {
-      return { id: model.id, available: false, sizeBytes: null };
+    if (!host) {
+      return { id: model.id, available: false, sizeBytes: null, error: "No Model Registry host configured" };
+    }
+    if (!this._registryConfig.directory) {
+      return { id: model.id, available: false, sizeBytes: null, error: "No Model Registry directory configured" };
     }
     const dir = joinRemotePath(this._registryConfig.directory, model.subfolder);
     try {
       const out = await sshExecDirect(
         host,
-        `if [ -d ${shQuote(dir)} ] && [ -n "$(ls -A ${shQuote(dir)} 2>/dev/null)" ]; then du -sb ${shQuote(dir)} | cut -f1; else echo __NONE__; fi`,
+        `if [ -d ${shQuotePath(dir)} ] && [ -n "$(ls -A ${shQuotePath(dir)} 2>/dev/null)" ]; then du -sb ${shQuotePath(dir)} | cut -f1; else echo __NONE__; fi`,
         { timeoutMs: PROBE_TIMEOUT_MS, noBatch: true }
       );
-      if (!out || out === "__NONE__") return { id: model.id, available: false, sizeBytes: null };
+      if (!out || out === "__NONE__") return { id: model.id, available: false, sizeBytes: null, error: null };
       const sizeBytes = parseInt(out, 10);
       return {
         id: model.id,
         available: Number.isFinite(sizeBytes) && sizeBytes > 0,
         sizeBytes: Number.isFinite(sizeBytes) ? sizeBytes : null,
+        error: null,
       };
-    } catch {
-      // Host unreachable, directory missing, etc. — not available, not an error surfaced here.
-      return { id: model.id, available: false, sizeBytes: null };
+    } catch (err) {
+      // A real probe failure (SSH unreachable, auth rejected, timed out, ...)
+      // is NOT the same thing as "genuinely not downloaded yet" — collapsing
+      // both into a bare `available: false` leaves an operator staring at
+      // "Not downloaded" with no way to tell a broken connection from an
+      // empty directory. Surface the underlying error instead.
+      return { id: model.id, available: false, sizeBytes: null, error: err.message };
     }
   }
 

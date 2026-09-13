@@ -286,6 +286,10 @@ export function ModelsDialog({ open, onClose }: ModelsDialogProps) {
                           <span className="text-success">
                             Available{status.sizeBytes != null ? ` (${formatBytes(status.sizeBytes)})` : ""}
                           </span>
+                        ) : status?.error ? (
+                          <span className="text-danger" title={status.error}>
+                            Probe failed: {status.error}
+                          </span>
                         ) : (
                           <span className="text-muted">Not downloaded</span>
                         )}
