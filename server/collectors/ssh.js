@@ -358,7 +358,16 @@ export async function sshExec(spark, cmd, options = {}) {
  *
  * @param {Object} spark - Spark config object
  * @param {string} cmd - Command to execute (passed as a single remote argv via bash -c)
- * @param {{ timeoutMs?: number }} [options]
+ * @param {{ timeoutMs?: number, multiplex?: boolean, extraSshArgs?: string[] }} [options]
+ *   `multiplex: false` forces a connection of its own instead of riding the
+ *   shared ControlMaster socket — required for anything run concurrently
+ *   many times against the same host (e.g. a sharded parallel transfer):
+ *   piling multiple sessions onto one multiplexed connection either
+ *   serializes their crypto through that one connection's single process or
+ *   trips the remote sshd's MaxSessions limit outright, silently defeating
+ *   the parallelism. `extraSshArgs` are inserted before the destination
+ *   (e.g. `-c aes128-gcm@openssh.com` for a fast, hardware-accelerated
+ *   cipher on a high-throughput transfer).
  * @returns {Promise<string>} - Trimmed stdout
  */
 export async function sshExecDirect(spark, cmd, options = {}) {
@@ -371,6 +380,8 @@ export async function sshExecDirect(spark, cmd, options = {}) {
 
   const { file, args, env, targetHost, multiplex } = sshCommandSpec(spark, {
     remoteArgv: [cmd],
+    multiplex: options.multiplex,
+    extraSshArgs: options.extraSshArgs,
   });
 
   const execute = (execArgs) =>
