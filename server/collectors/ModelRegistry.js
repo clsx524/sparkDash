@@ -41,6 +41,9 @@ import { sshExecDirect } from "./ssh.js";
 const PROBE_TIMEOUT_MS = 15_000;
 const VERIFY_TIMEOUT_MS = 1_800_000; // sha256sum over many large files can be slow
 const DELETE_TIMEOUT_MS = 300_000;
+// A multi-hundred-GB download can run for hours with the job's phase never changing
+// ("running" the whole time) -- without this, the UI has nothing to show moving.
+const DOWNLOAD_PROGRESS_POLL_MS = 5_000;
 
 /** Single-quote a value for safe embedding in a remote bash -c command. */
 function shQuote(value) {
@@ -430,9 +433,16 @@ export class ModelRegistry {
     const host = this.registryHost();
     if (!host) return { hasToken: false, username: null, error: "No Model Registry host configured" };
     try {
-      const out = await sshExecDirect(host, "hf auth whoami", { timeoutMs: PROBE_TIMEOUT_MS, noBatch: true });
-      const username = out.split("\n")[0].trim();
-      return { hasToken: Boolean(username), username: username || null, error: null };
+      // --format json: `hf auth whoami`'s default output is rich/ANSI-colored
+      // (ansi escape codes + a multi-line human table), meant for a terminal, not for a
+      // caller parsing the result -- json gives a stable, colorless {"user": "...", ...}.
+      const out = await sshExecDirect(host, "hf auth whoami --format json", {
+        timeoutMs: PROBE_TIMEOUT_MS,
+        noBatch: true,
+      });
+      const parsed = JSON.parse(out);
+      const username = typeof parsed.user === "string" ? parsed.user : null;
+      return { hasToken: Boolean(username), username, error: null };
     } catch (err) {
       if (/not logged in/i.test(err.message)) {
         return { hasToken: false, username: null, error: null };
@@ -534,7 +544,15 @@ export class ModelRegistry {
 
   // ─── Download (SSH to registry host, then verify) ────────
   async downloadModel(modelId) {
-    this._setJob(modelId, { kind: "download", phase: "running", message: "Downloading from Hugging Face", error: undefined });
+    this._setJob(modelId, {
+      kind: "download",
+      phase: "running",
+      message: "Downloading from Hugging Face",
+      bytesDownloaded: null,
+      bytesPerSecond: null,
+      error: undefined,
+    });
+    let progressTimer;
     try {
       const model = this.getModel(modelId);
       if (!model) throw new Error(`Model ${modelId} is not tracked`);
@@ -554,13 +572,44 @@ export class ModelRegistry {
       // if the hf_transfer extra is installed — silently ignored otherwise, never an
       // error), and --max-workers lets multiple files download concurrently. Confirmed
       // live 2026-09-13: 6.3 MB/s without either, 21.3 MB/s with both, same repo/files.
-      await sshExecDirect(
-        host,
-        `HF_HUB_ENABLE_HF_TRANSFER=1 hf download ${shQuote(model.repo)} --revision ${shQuote(model.revision)}${includeArgs} --local-dir ${shQuotePath(dir)} --max-workers 8`,
-        { timeoutMs: MODEL_DOWNLOAD_TIMEOUT_MS, noBatch: true }
-      );
+      const downloadCmd = `HF_HUB_ENABLE_HF_TRANSFER=1 hf download ${shQuote(model.repo)} --revision ${shQuote(model.revision)}${includeArgs} --local-dir ${shQuotePath(dir)} --max-workers 8`;
 
-      this._setJob(modelId, { phase: "verifying", message: "Verifying checksums against Hugging Face" });
+      // The download command above blocks (over SSH) until the whole transfer finishes —
+      // for a multi-hundred-GB fetch that's hours with the job's phase never changing.
+      // Poll the destination directory's size on the side so the UI has something moving;
+      // best-effort only (du failing here must never abort the real download in progress).
+      let lastBytes = 0;
+      let lastAt = Date.now();
+      progressTimer = setInterval(async () => {
+        try {
+          const out = await sshExecDirect(host, `du -sb ${shQuotePath(dir)} 2>/dev/null | cut -f1`, {
+            timeoutMs: PROBE_TIMEOUT_MS,
+            noBatch: true,
+          });
+          const bytes = parseInt(out, 10);
+          if (!Number.isFinite(bytes)) return;
+          const now = Date.now();
+          const elapsedSec = (now - lastAt) / 1000;
+          const bytesPerSecond = elapsedSec > 0 ? Math.max(0, (bytes - lastBytes) / elapsedSec) : null;
+          lastBytes = bytes;
+          lastAt = now;
+          this._setJob(modelId, { bytesDownloaded: bytes, bytesPerSecond });
+        } catch {
+          // transient poll failure — try again next tick, never surfaced as a job error
+        }
+      }, DOWNLOAD_PROGRESS_POLL_MS);
+
+      try {
+        await sshExecDirect(host, downloadCmd, { timeoutMs: MODEL_DOWNLOAD_TIMEOUT_MS, noBatch: true });
+      } finally {
+        clearInterval(progressTimer);
+      }
+
+      this._setJob(modelId, {
+        phase: "verifying",
+        message: "Verifying checksums against Hugging Face",
+        bytesPerSecond: null,
+      });
       const fullManifest = await fetchHfManifest(model.repo, model.revision);
       const manifest = filterManifestToIncluded(fullManifest, model.includePattern);
 

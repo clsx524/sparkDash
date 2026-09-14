@@ -8,7 +8,7 @@ import type {
   LlmDailyResponse,
   HfTokenStatus,
   ModelEntry,
-  ModelJobState,
+  ModelJobStateOrIdle,
   ModelRegistryConfig,
   ModelRegistryScanResult,
   ModelsListResponse,
@@ -535,6 +535,6 @@ export function downloadModel(id: string): Promise<{ started: boolean }> {
   return apiFetch(`/api/models/${encodeURIComponent(id)}/download`, { method: "POST" });
 }
 
-export function fetchModelJob(id: string): Promise<ModelJobState & { phase: "idle" | ModelJobState["phase"] }> {
+export function fetchModelJob(id: string): Promise<ModelJobStateOrIdle> {
   return apiFetch(`/api/models/${encodeURIComponent(id)}/job`);
 }

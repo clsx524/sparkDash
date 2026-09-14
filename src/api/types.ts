@@ -166,8 +166,20 @@ export interface ModelJobState {
   phase: "running" | "verifying" | "done" | "failed";
   message?: string;
   error?: string;
+  /** Live progress while phase is "running" — a du -sb poll on the destination directory,
+   *  since a multi-hundred-GB download's own phase never changes for hours otherwise.
+   *  null before the first poll tick and once verification starts. */
+  bytesDownloaded?: number | null;
+  bytesPerSecond?: number | null;
   updatedAt: string;
 }
+
+/** GET /api/models/:id/job's shape when no job has ever run for that model. Deliberately
+ *  `Omit<ModelJobState, "phase"> & {...}`, not a plain intersection with ModelJobState —
+ *  intersecting two differing declarations of the same property computes the intersection
+ *  of their types, which silently drops "idle" since ModelJobState's own phase field never
+ *  included it. */
+export type ModelJobStateOrIdle = Omit<ModelJobState, "phase"> & { phase: "idle" | ModelJobState["phase"] };
 
 // ─── Hermes Agent status ───────────────────────────────
 /** Opt-in Hermes Agent update monitoring state, pushed in every snapshot. */

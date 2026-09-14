@@ -17,7 +17,7 @@ import {
 import type {
   HfTokenStatus,
   ModelEntry,
-  ModelJobState,
+  ModelJobStateOrIdle,
   ModelRegistryScanResult,
   ModelsListResponse,
   SparkConfig,
@@ -76,6 +76,12 @@ function formatBytes(bytes: number | null | undefined): string {
   return `${bytes} B`;
 }
 
+/** Bytes/sec → "45.2 MB/s". Dash when unknown or not yet measurable (first poll tick). */
+function formatRate(bytesPerSecond: number | null | undefined): string {
+  if (typeof bytesPerSecond !== "number" || !Number.isFinite(bytesPerSecond) || bytesPerSecond <= 0) return "—";
+  return `${formatBytes(bytesPerSecond)}/s`;
+}
+
 /** Summarize a reconciliation scan result for display. */
 function describeScan(result: ModelRegistryScanResult): string {
   if (result.scanError) return `Scan failed: ${result.scanError}`;
@@ -111,7 +117,7 @@ export function ModelsDialog({ open, onClose }: ModelsDialogProps) {
   const [formError, setFormError] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
 
-  const [jobs, setJobs] = useState<Record<string, ModelJobState & { phase: "idle" | ModelJobState["phase"] }>>({});
+  const [jobs, setJobs] = useState<Record<string, ModelJobStateOrIdle>>({});
   const [confirmingId, setConfirmingId] = useState<string | null>(null);
 
   const [scanMessage, setScanMessage] = useState<string | null>(null);
@@ -129,12 +135,29 @@ export function ModelsDialog({ open, onClose }: ModelsDialogProps) {
     setLoading(true);
     setError(null);
     Promise.all([fetchModelRegistry(), fetchModels(), fetchSparks(), fetchHfTokenStatus()])
-      .then(([registry, models, sparks, hfToken]) => {
+      .then(async ([registry, models, sparks, hfToken]) => {
         setData(models);
         setRegistryHostId(registry.hostId);
         setRegistryDirectory(registry.directory);
         setAllSparks(sparks.sparks);
         setHfTokenStatus(hfToken);
+        // Pick up any job still running on the backend, not just ones this browser
+        // session clicked Download/Delete for itself — reopening the dialog (or a page
+        // refresh) mid-download must resume showing live progress, not go silent.
+        const jobEntries = await Promise.all(
+          models.models.map((m) =>
+            fetchModelJob(m.id)
+              .then((job): [string, ModelJobStateOrIdle] => [m.id, job])
+              .catch(() => null)
+          )
+        );
+        setJobs((prev) => {
+          const next = { ...prev };
+          for (const entry of jobEntries) {
+            if (entry && entry[1].phase !== "idle") next[entry[0]] = entry[1];
+          }
+          return next;
+        });
       })
       .catch((err: Error) => setError(err.message))
       .finally(() => setLoading(false));
@@ -595,6 +618,13 @@ export function ModelsDialog({ open, onClose }: ModelsDialogProps) {
                       {job.phase === "failed"
                         ? job.error || "Job failed."
                         : job.message || (job.phase === "verifying" ? "Verifying…" : "Working…")}
+                      {job.phase === "running" && job.bytesDownloaded != null && (
+                        <span>
+                          {" — "}
+                          {formatBytes(job.bytesDownloaded)}
+                          {job.bytesPerSecond ? ` (${formatRate(job.bytesPerSecond)})` : ""}
+                        </span>
+                      )}
                     </div>
                   )}
                 </div>
