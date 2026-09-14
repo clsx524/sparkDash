@@ -108,26 +108,32 @@ async function clearStaleContainers(recipeRegistry) {
 }
 
 /**
- * Sync every node's tied model (recipe node's optional `modelId`, referencing
- * a Model Registry entry) onto that node's own configured model folder,
- * verifying checksums on arrival. A node with no `modelId` is left alone —
- * this is opt-in per node, not assumed for every recipe.
+ * Sync every node's tied models (recipe node's optional `modelIds` array, each referencing
+ * a Model Registry entry) onto that node's own configured model folder, verifying checksums
+ * on arrival. A node with no `modelIds` (or an empty one) is left alone — this is opt-in per
+ * node, not assumed for every recipe. Synced sequentially, not in parallel, per model — two
+ * large concurrent transfers to the same node would split one link's bandwidth across both
+ * rather than actually finishing either sooner, and needlessly doubles concurrent SSH
+ * connections against modelSync's own MaxStartups-conscious shard count.
  */
-async function syncModelsForRecipe(recipeRegistry, modelRegistry, recipe) {
+export async function syncModelsForRecipe(recipeRegistry, modelRegistry, recipe) {
   for (const node of recipe.nodes) {
-    if (!node.modelId) continue;
+    const modelIds = Array.isArray(node.modelIds) ? node.modelIds : [];
+    if (modelIds.length === 0) continue;
     if (!modelRegistry) {
       throw new RecipeSwitchError(
-        `Recipe ${recipe.id} node ${node.role} references model ${node.modelId} but no Model Registry is configured`
+        `Recipe ${recipe.id} node ${node.role} references model(s) ${modelIds.join(", ")} but no Model Registry is configured`
       );
-    }
-    const model = modelRegistry.getModel(node.modelId);
-    if (!model) {
-      throw new RecipeSwitchError(`Recipe ${recipe.id} references unknown model ${node.modelId}`);
     }
     const spark = recipeRegistry._sparkForNode(node);
     if (!spark) throw new RecipeSwitchError(`no Spark configured for role ${node.role}`);
-    await syncModelToSpark(modelRegistry, recipeRegistry.sparkRegistry, model, spark);
+    for (const modelId of modelIds) {
+      const model = modelRegistry.getModel(modelId);
+      if (!model) {
+        throw new RecipeSwitchError(`Recipe ${recipe.id} references unknown model ${modelId}`);
+      }
+      await syncModelToSpark(modelRegistry, recipeRegistry.sparkRegistry, model, spark);
+    }
   }
 }
 

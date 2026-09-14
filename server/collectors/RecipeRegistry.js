@@ -14,9 +14,11 @@
  *
  * One more OPTIONAL per-node field ties a recipe into Model Registry orchestration (see
  * recipeActions.js's syncModelsForRecipe):
- *   - `modelId`: id of a model tracked in ModelRegistry (config/models.json). When set,
- *     switchRecipe pulls that model onto this node's own `modelFolder` (checksum-verified)
- *     before starting it. Omit for a node that provisions its weights another way.
+ *   - `modelIds`: array of ids tracked in ModelRegistry (config/models.json). When set,
+ *     switchRecipe pulls each one onto this node's own `modelFolder` (checksum-verified,
+ *     one at a time) before starting it. A node needing more than one tracked model (e.g.
+ *     a weight tree plus a separately-sourced component) lists more than one id — omit
+ *     entirely for a node that provisions its weights another way.
  * Not assumed present — a recipe with no model tracked yet works exactly as before,
  * unchanged. Everything else about a node's files (.env, checked-out repo, patches) is
  * ansible's job, applied by the relevant playbook run ahead of any activate — switchRecipe
