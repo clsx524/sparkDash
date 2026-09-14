@@ -69,13 +69,35 @@ async function runNodeCommand(recipeRegistry, node, cmd, timeoutMs) {
 }
 
 const CLEAR_CONTAINERS_TIMEOUT_MS = 30_000;
-/** Containers that persist across every recipe switch — never touched by the sweep below. */
-const PERSISTENT_CONTAINER_NAMES = ["portainer_agent"];
+/** Containers that persist across every recipe switch — never touched by the sweep below.
+ *  portainer_agent is the fleet's own persistent infrastructure. The rest are kernel-nfsd
+ *  exporters (DSpark, deepseek-v41-flash-exl3, and any future recipe using the same
+ *  "share weights over NFSv4 instead of copying them onto the worker" pattern) — every one
+ *  of those recipes' own start scripts already prefers reusing a live exporter over
+ *  rebuilding it (nfs_ensure_server()'s nfs_live_container() check), specifically because a
+ *  privileged --network host container holding kernel-level NFS state (rpc.nfsd,
+ *  /proc/fs/nfsd) can take Docker's kill well past its wait timeout even though it does
+ *  genuinely exit — confirmed live 2026-09-14: every deepseek-v41-flash-exl3 retry hit
+ *  "could not kill container: tried to kill container, but did not receive an exit event"
+ *  because this sweep force-killed dsv41-exl3-nfs on every single attempt, throwing away
+ *  the reuse path's entire point and re-triggering the same slow teardown each time. Only
+ *  one kernel nfsd can ever be live host-wide regardless of which named container started
+ *  it ("a second nfsd will not start" — see nfs-share.sh), so leaving a stray one running
+ *  across a recipe switch can never itself conflict with whatever starts next. */
+const PERSISTENT_CONTAINER_NAMES = [
+  "portainer_agent",
+  "vllm-fn-nfs",
+  "glm53-nfs",
+  "dsv41-nfs",
+  "dsv41-exl3-nfs",
+  "dspark-nfs",
+];
 
 /**
  * Force-stop and remove every running container on every head/worker Spark except the
- * fleet's own persistent infrastructure (portainer_agent) — regardless of name, image, or
- * whether probeRecipe's live detection currently believes anything is active there.
+ * fleet's own persistent infrastructure (PERSISTENT_CONTAINER_NAMES above) —
+ * regardless of name, image, or whether probeRecipe's live detection currently believes
+ * anything is active there.
  *
  * Exists because that detection can be wrong (a runningPattern that doesn't match a
  * recipe's real status text, a crashed sparkDash losing track, a container started by
