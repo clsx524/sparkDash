@@ -501,9 +501,14 @@ export class ModelRegistry {
       const includeArgs = splitIncludePatterns(model.includePattern)
         .map((pattern) => ` --include ${shQuote(pattern)}`)
         .join("");
+      // Same acceleration this fleet's recipe download.sh scripts always set by hand:
+      // HF_HUB_ENABLE_HF_TRANSFER opts into the Rust transfer backend (only takes effect
+      // if the hf_transfer extra is installed — silently ignored otherwise, never an
+      // error), and --max-workers lets multiple files download concurrently. Confirmed
+      // live 2026-09-13: 6.3 MB/s without either, 21.3 MB/s with both, same repo/files.
       await sshExecDirect(
         host,
-        `hf download ${shQuote(model.repo)} --revision ${shQuote(model.revision)}${includeArgs} --local-dir ${shQuotePath(dir)}`,
+        `HF_HUB_ENABLE_HF_TRANSFER=1 hf download ${shQuote(model.repo)} --revision ${shQuote(model.revision)}${includeArgs} --local-dir ${shQuotePath(dir)} --max-workers 8`,
         { timeoutMs: MODEL_DOWNLOAD_TIMEOUT_MS, noBatch: true }
       );
 
