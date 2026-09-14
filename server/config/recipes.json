@@ -46,7 +46,8 @@
         "statusCmd": "./start.sh status",
         "runningPattern": "Up \\d",
         "containerName": "dsv41-exl3-head",
-        "llmPort": 8888
+        "llmPort": 8888,
+        "modelIds": ["DeepSeek-V4.1-Flash-EXL3-2.9bpw", "DeepSeek-V4.1-Flash"]
       }
     ]
   },
