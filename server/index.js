@@ -1732,6 +1732,24 @@ app.post("/api/model-registry/rescan", async (_req, res) => {
   }
 });
 
+/** Live-probed Hugging Face login state on the registry host (never a stored flag — see ModelRegistry.probeHfToken). */
+app.get("/api/model-registry/hf-token", async (_req, res) => {
+  res.json(await modelRegistry.probeHfToken());
+});
+
+/** Set or replace the Hugging Face login on the registry host. hf auth login validates the token itself. */
+app.put("/api/model-registry/hf-token", async (req, res) => {
+  if (!allowGlobalDestructive(principalKey(req))) {
+    return rejectLimited(res, "Too many requests — try again shortly");
+  }
+  try {
+    await modelRegistry.setHfToken(req.body?.token);
+    res.json(await modelRegistry.probeHfToken());
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
 /** Tracked models plus a live availability probe per model (never a stored flag). */
 app.get("/api/models", async (_req, res) => {
   const models = modelRegistry.all();

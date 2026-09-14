@@ -3,16 +3,19 @@ import {
   addModel,
   deleteModelFiles,
   downloadModel,
+  fetchHfTokenStatus,
   fetchModelJob,
   fetchModelRegistry,
   fetchModels,
   fetchSparks,
   removeModel,
   rescanModelRegistry,
+  setHfToken,
   updateModel,
   updateModelRegistry,
 } from "../api/client";
 import type {
+  HfTokenStatus,
   ModelEntry,
   ModelJobState,
   ModelRegistryScanResult,
@@ -99,6 +102,11 @@ export function ModelsDialog({ open, onClose }: ModelsDialogProps) {
   const [registryDirectory, setRegistryDirectory] = useState("");
   const [savingRegistry, setSavingRegistry] = useState(false);
 
+  const [hfTokenStatus, setHfTokenStatus] = useState<HfTokenStatus | null>(null);
+  const [hfTokenDraft, setHfTokenDraft] = useState("");
+  const [savingHfToken, setSavingHfToken] = useState(false);
+  const [hfTokenError, setHfTokenError] = useState<string | null>(null);
+
   const [form, setForm] = useState(EMPTY_FORM);
   const [formError, setFormError] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
@@ -120,12 +128,13 @@ export function ModelsDialog({ open, onClose }: ModelsDialogProps) {
   const load = () => {
     setLoading(true);
     setError(null);
-    Promise.all([fetchModelRegistry(), fetchModels(), fetchSparks()])
-      .then(([registry, models, sparks]) => {
+    Promise.all([fetchModelRegistry(), fetchModels(), fetchSparks(), fetchHfTokenStatus()])
+      .then(([registry, models, sparks, hfToken]) => {
         setData(models);
         setRegistryHostId(registry.hostId);
         setRegistryDirectory(registry.directory);
         setAllSparks(sparks.sparks);
+        setHfTokenStatus(hfToken);
       })
       .catch((err: Error) => setError(err.message))
       .finally(() => setLoading(false));
@@ -141,6 +150,9 @@ export function ModelsDialog({ open, onClose }: ModelsDialogProps) {
       setConfirmingId(null);
       setScanMessage(null);
       setEditingId(null);
+      setHfTokenStatus(null);
+      setHfTokenDraft("");
+      setHfTokenError(null);
       return;
     }
     load();
@@ -203,6 +215,21 @@ export function ModelsDialog({ open, onClose }: ModelsDialogProps) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setRescanning(false);
+    }
+  };
+
+  const handleSaveHfToken = async () => {
+    if (!hfTokenDraft.trim()) return;
+    setSavingHfToken(true);
+    setHfTokenError(null);
+    try {
+      const status = await setHfToken(hfTokenDraft.trim());
+      setHfTokenStatus(status);
+      setHfTokenDraft("");
+    } catch (err: unknown) {
+      setHfTokenError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSavingHfToken(false);
     }
   };
 
@@ -375,6 +402,43 @@ export function ModelsDialog({ open, onClose }: ModelsDialogProps) {
               {scanMessage}
             </p>
           )}
+        </div>
+
+        <div className="mb-4 space-y-2 rounded border border-border bg-surface-elevated p-3">
+          <label className="mb-1 block text-xs text-muted">Hugging Face token</label>
+          <p className="text-[10px] text-muted">
+            Stored on the registry host itself (hf-cli's own login), picked up automatically by
+            every download from there — not saved in sparkDash's own config.
+          </p>
+          <input
+            type="password"
+            value={hfTokenDraft}
+            onChange={(e) => setHfTokenDraft(e.target.value)}
+            placeholder={
+              hfTokenStatus?.hasToken
+                ? `•••••••• (logged in${hfTokenStatus.username ? ` as ${hfTokenStatus.username}` : ""} — paste a new token to replace)`
+                : "Paste a token from huggingface.co/settings/tokens"
+            }
+            className="w-full rounded border border-border bg-surface px-3 py-1.5 text-xs text-text outline-none focus:border-accent"
+          />
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-[10px] text-muted">
+              {hfTokenStatus?.error
+                ? <span className="text-danger">{hfTokenStatus.error}</span>
+                : hfTokenStatus?.hasToken
+                  ? <span className="text-success">Logged in{hfTokenStatus.username ? ` as ${hfTokenStatus.username}` : ""}</span>
+                  : "Not set — downloads run unauthenticated (lower rate limits)"}
+            </span>
+            <button
+              type="button"
+              onClick={handleSaveHfToken}
+              disabled={savingHfToken || !hfTokenDraft.trim() || !registryHostId}
+              className="rounded bg-accent px-3 py-1.5 text-xs font-medium text-white hover:bg-accent-hover disabled:opacity-50"
+            >
+              {savingHfToken ? "Saving..." : "Save"}
+            </button>
+          </div>
+          {hfTokenError && <p className="text-[10px] text-danger">{hfTokenError}</p>}
         </div>
 
         {loading && <p className="text-xs text-muted">Loading…</p>}

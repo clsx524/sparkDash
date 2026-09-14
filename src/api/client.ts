@@ -6,6 +6,7 @@ import type {
   HermesUpdatesResponse,
   LlmMetrics,
   LlmDailyResponse,
+  HfTokenStatus,
   ModelEntry,
   ModelJobState,
   ModelRegistryConfig,
@@ -488,6 +489,16 @@ export function updateModelRegistry(
 /** Re-scan the registry directory on demand (no config change) — for files added on disk after the registry was already configured. */
 export function rescanModelRegistry(): Promise<ModelRegistryScanResult> {
   return apiFetch("/api/model-registry/rescan", { method: "POST" });
+}
+
+/** Live-probed Hugging Face login state on the registry host (never a stored flag). */
+export function fetchHfTokenStatus(): Promise<HfTokenStatus> {
+  return apiFetch("/api/model-registry/hf-token");
+}
+
+/** Set or replace the Hugging Face login on the registry host — validated by hf auth login itself. */
+export function setHfToken(token: string): Promise<HfTokenStatus> {
+  return apiFetch("/api/model-registry/hf-token", { method: "PUT", body: JSON.stringify({ token }) });
 }
 
 /** Tracked models plus a live availability probe per model (never a stored flag). */

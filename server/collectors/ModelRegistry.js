@@ -411,6 +411,54 @@ export class ModelRegistry {
     return this.reconcileNames(names);
   }
 
+  // ─── Hugging Face auth on the registry host (never stored here) ──────
+  // The token itself lives only on the registry host, in hf-cli's own auth file
+  // (~/.cache/huggingface/token on whichever account runs `hf download` there) — never
+  // duplicated into this app's own config/secrets store. Matches this class's existing
+  // philosophy (probeStatus above, RecipeRegistry's active-state probe): state that can
+  // silently drift (a token rotated or revoked by hand outside this UI) must be read live,
+  // not trusted from something we wrote once and cached.
+
+  /**
+   * Live-probe whether the registry host currently has a working Hugging Face login —
+   * distinct from "no login set" (hasToken: false, error: null) vs a real probe failure
+   * (hasToken: false, error: message) the same way probeStatus separates "not downloaded"
+   * from "couldn't check".
+   * @returns {Promise<{hasToken: boolean, username: string|null, error: string|null}>}
+   */
+  async probeHfToken() {
+    const host = this.registryHost();
+    if (!host) return { hasToken: false, username: null, error: "No Model Registry host configured" };
+    try {
+      const out = await sshExecDirect(host, "hf auth whoami", { timeoutMs: PROBE_TIMEOUT_MS, noBatch: true });
+      const username = out.split("\n")[0].trim();
+      return { hasToken: Boolean(username), username: username || null, error: null };
+    } catch (err) {
+      if (/not logged in/i.test(err.message)) {
+        return { hasToken: false, username: null, error: null };
+      }
+      return { hasToken: false, username: null, error: err.message };
+    }
+  }
+
+  /**
+   * Set (or replace) the Hugging Face login on the registry host. `hf auth login --token`
+   * validates the token against the Hugging Face API itself before persisting it — an
+   * invalid token surfaces here as a rejected-login error, never silently saved. Overwrites
+   * whatever login (if any) was already there, matching the "paste a new one to update" UI.
+   * @param {string} token
+   */
+  async setHfToken(token) {
+    const value = typeof token === "string" ? token.trim() : "";
+    if (!value) throw new Error("Token is required");
+    const host = this.registryHost();
+    if (!host) throw new Error("No Model Registry host configured");
+    await sshExecDirect(host, `hf auth login --token ${shQuote(value)} --force`, {
+      timeoutMs: PROBE_TIMEOUT_MS,
+      noBatch: true,
+    });
+  }
+
   // ─── Live availability probe (never a stored flag) ───────
   /** @returns {Promise<{id: string, available: boolean, sizeBytes: number|null, error: string|null}>} */
   async probeStatus(model) {

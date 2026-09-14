@@ -112,6 +112,14 @@ export interface ModelRegistryScanResult {
   scanError: string | null;
 }
 
+/** Live-probed Hugging Face login state on the registry host — never a stored flag; the
+ *  token itself lives only in hf-cli's own auth file there, never in this app's config. */
+export interface HfTokenStatus {
+  hasToken: boolean;
+  username: string | null;
+  error: string | null;
+}
+
 export interface ModelFileManifestEntry {
   path: string;
   sha256: string;

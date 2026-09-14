@@ -144,6 +144,26 @@ test("downloadModel: a discovered model with no repo fails fast with a clear, po
   assert.match(job.error, /no source repo set/i);
 });
 
+// ─── Hugging Face auth on the registry host ────────────────
+
+test("probeHfToken: no registry host configured reports hasToken false with an error", async () => {
+  const r = fresh();
+  const status = await r.probeHfToken();
+  assert.deepEqual(status, { hasToken: false, username: null, error: "No Model Registry host configured" });
+});
+
+test("setHfToken: rejects an empty/whitespace-only token before ever touching the registry host", async () => {
+  const r = fresh();
+  await assert.rejects(() => r.setHfToken(""), /token is required/i);
+  await assert.rejects(() => r.setHfToken("   "), /token is required/i);
+  await assert.rejects(() => r.setHfToken(undefined), /token is required/i);
+});
+
+test("setHfToken: no registry host configured fails with a clear error even with a real token", async () => {
+  const r = fresh();
+  await assert.rejects(() => r.setHfToken("hf_realtoken"), /no model registry host configured/i);
+});
+
 // ─── registry config round-trip ────────────────────────────
 
 test("setRegistryConfig: trims directory, collapses empty hostId to null, round-trips", () => {
