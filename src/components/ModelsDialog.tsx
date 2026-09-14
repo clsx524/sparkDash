@@ -492,7 +492,9 @@ export function ModelsDialog({ open, onClose }: ModelsDialogProps) {
                           <span className="text-warning">Source repo not set (found on disk)</span>
                         )}
                       </div>
-                      <div className="text-[10px] text-muted">subfolder: {model.subfolder}</div>
+                      <div className="text-[10px] text-muted">
+                        id: <span className="font-mono">{model.id}</span> · subfolder: {model.subfolder}
+                      </div>
                       <div className="mt-1 text-[10px]">
                         {status?.available ? (
                           <span className="text-success">
