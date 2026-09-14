@@ -68,6 +68,45 @@ async function runNodeCommand(recipeRegistry, node, cmd, timeoutMs) {
   return sshExec(spark, `cd ${node.workdir} && ${cmd}`, { timeoutMs, noBatch: true });
 }
 
+const CLEAR_CONTAINERS_TIMEOUT_MS = 30_000;
+/** Containers that persist across every recipe switch — never touched by the sweep below. */
+const PERSISTENT_CONTAINER_NAMES = ["portainer_agent"];
+
+/**
+ * Force-stop and remove every running container on every head/worker Spark except the
+ * fleet's own persistent infrastructure (portainer_agent) — regardless of name, image, or
+ * whether probeRecipe's live detection currently believes anything is active there.
+ *
+ * Exists because that detection can be wrong (a runningPattern that doesn't match a
+ * recipe's real status text, a crashed sparkDash losing track, a container started by
+ * hand), and because several TP2 recipes only declare a head node in recipes.json — their
+ * worker-side container on the other physical Spark is invisible to target.nodes entirely,
+ * so a check scoped to just the target's own declared nodes would still miss it. Confirmed
+ * live 2026-09-13: GLM's runningPattern ("running") never matched its actual `Up 8 hours`
+ * status text, so the normal "stopping" phase below silently skipped it — both its head and
+ * worker containers were still running (host networking, so `docker ps`'s own Ports column
+ * shows nothing there either — port-based detection doesn't work for this fleet's
+ * containers) when the next switch's start.sh hit "PORT=8888 is already bound" on the head
+ * and a worker-container conflict on the other node.
+ *
+ * Scoped to head/worker Sparks only (never the Model Registry host or any other tracked
+ * host) — this fleet's invariant is "exactly one recipe's containers, or none, ever run on
+ * a compute Spark at a time" (see RecipeRegistry.js's module doc), so sweeping everything
+ * but the known persistent infrastructure there is safe by construction.
+ */
+async function clearStaleContainers(recipeRegistry) {
+  const sparks = recipeRegistry.sparkRegistry.sparks.filter(
+    (s) => s.role === "head" || s.role === "worker"
+  );
+  const excludeArgs = PERSISTENT_CONTAINER_NAMES.map((name) => `-e ${JSON.stringify(name)}`).join(" ");
+  const sweepCmd = `docker ps --format '{{.Names}}' | grep -vx ${excludeArgs} | xargs -r docker rm -f`;
+  await Promise.all(
+    sparks.map((spark) =>
+      sshExec(spark, sweepCmd, { timeoutMs: CLEAR_CONTAINERS_TIMEOUT_MS, noBatch: true })
+    )
+  );
+}
+
 /**
  * Sync every node's tied model (recipe node's optional `modelId`, referencing
  * a Model Registry entry) onto that node's own configured model folder,
@@ -171,9 +210,12 @@ let _switchInFlight = false;
  * Switch the cluster to `targetId`. Syncs each target node's tied model (if any), always stops
  * whatever recipe is currently live first — even when it is the same recipe as the target, so
  * "activate" is a full kill-and-redeploy-fresh, never a same-target no-op — confirms the stop,
- * starts the target's node(s), then waits for each to report healthy. Config (.env etc.) is
- * ansible's job, applied ahead of time by the relevant playbook run — this never generates or
- * copies config, only starts/stops the node commands already provisioned there.
+ * force-clears any stray container the graceful stop above missed (see
+ * clearStaleContainers — live probe detection or a head-only recipe definition can both leave
+ * something running undetected), starts the target's node(s), then waits for each to report
+ * healthy. Config (.env etc.) is ansible's job, applied ahead of time by the relevant playbook
+ * run — this never generates or copies config, only starts/stops the node commands already
+ * provisioned there.
  *
  * @param {import("./RecipeRegistry.js").RecipeRegistry} recipeRegistry
  * @param {import("./ModelRegistry.js").ModelRegistry | null} modelRegistry - null is fine for
@@ -221,6 +263,13 @@ export async function switchRecipe(recipeRegistry, modelRegistry, targetId, onPr
       emit("confirming-stopped", { from: current.id });
       await waitForRecipeStopped(recipeRegistry, current);
     }
+
+    emit("clearing-conflicts", { from: current?.id ?? null });
+    await withTimeout(
+      clearStaleContainers(recipeRegistry),
+      CLEAR_CONTAINERS_TIMEOUT_MS + 10_000,
+      "clearing stray containers timed out"
+    );
 
     emit("syncing-model", { from: current?.id ?? null });
     await withTimeout(

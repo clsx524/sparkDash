@@ -10,7 +10,7 @@
         "startCmd": "./start-deepseek-v4-flash-dspark.sh",
         "stopCmd": "./stop-deepseek-v4-flash-dspark.sh",
         "statusCmd": "./status-deepseek-v4-flash-dspark.sh",
-        "runningPattern": "running",
+        "runningPattern": "Up \\d",
         "containerName": "deepseek-v4-flash-vllm-dspark-1",
         "llmPort": 8888
       }
@@ -27,7 +27,7 @@
         "startCmd": "./start.sh",
         "stopCmd": "./stop.sh",
         "statusCmd": "./start.sh status",
-        "runningPattern": "running",
+        "runningPattern": "Up \\d",
         "containerName": "glm53-exl3-head",
         "llmPort": 8888
       }
@@ -44,7 +44,7 @@
         "startCmd": "./start.sh",
         "stopCmd": "./stop.sh",
         "statusCmd": "./start.sh status",
-        "runningPattern": "running",
+        "runningPattern": "Up \\d",
         "containerName": "dsv41-exl3-head",
         "llmPort": 8888
       }

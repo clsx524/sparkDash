@@ -653,6 +653,7 @@ export interface RecipeSwitchState {
     | "checking-current-state"
     | "stopping"
     | "confirming-stopped"
+    | "clearing-conflicts"
     | "syncing-model"
     | "starting"
     | "health-checking"
