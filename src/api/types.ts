@@ -129,6 +129,8 @@ export interface ModelEntry {
   subfolder: string;
   repo: string | null;
   revision: string;
+  /** One or more hf-cli --include globs, space/newline-separated (e.g. a repo where only
+   *  a few files should be fetched out of many). */
   includePattern?: string | null;
   manifest?: ModelFileManifestEntry[] | null;
   verifiedAt?: string | null;

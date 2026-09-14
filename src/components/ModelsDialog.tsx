@@ -603,11 +603,12 @@ export function ModelsDialog({ open, onClose }: ModelsDialogProps) {
             />
           </div>
           <div>
-            <label className="mb-1 block text-xs text-muted">Include pattern (optional)</label>
+            <label className="mb-1 block text-xs text-muted">Include pattern(s) (optional)</label>
             <input
               type="text"
               value={form.includePattern}
               onChange={(e) => setForm((prev) => ({ ...prev, includePattern: e.target.value }))}
+              placeholder="space-separated globs, e.g. model-0004[78]-of-00048.safetensors *.index.json"
               className="w-full rounded border border-border bg-surface px-3 py-1.5 text-xs text-text outline-none focus:border-accent"
             />
           </div>

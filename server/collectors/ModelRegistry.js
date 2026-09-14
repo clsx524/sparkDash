@@ -67,6 +67,68 @@ function joinRemotePath(dir, subfolder) {
 }
 
 /**
+ * Split a tracked model's stored includePattern into one or more hf-cli --include glob
+ * patterns (whitespace-separated). A single glob cannot always express what one model
+ * needs to fetch — e.g. Engram's two specific shards (47 of 48, 48 of 48) plus its index
+ * file share no common wildcard with the other 46 shards of the same repo they must be
+ * excluded from. hf download itself supports passing --include multiple times for exactly
+ * this; this just lets one tracked model's single stored field express that instead of
+ * requiring a separate tracked model per file.
+ * @param {string | null | undefined} includePattern
+ * @returns {string[]}
+ */
+export function splitIncludePatterns(includePattern) {
+  if (!includePattern) return [];
+  return includePattern.split(/\s+/).filter(Boolean);
+}
+
+
+/** Convert one fnmatch-style glob (the flavor hf download --include accepts: *, ?,
+ *  [seq], [!seq]) into a RegExp anchored to a full relative-path match. */
+function globToRegExp(glob) {
+  let pattern = "";
+  for (let i = 0; i < glob.length; i++) {
+    const c = glob[i];
+    if (c === "*") {
+      pattern += ".*";
+    } else if (c === "?") {
+      pattern += ".";
+    } else if (c === "[") {
+      let j = i + 1;
+      let cls = "[";
+      if (glob[j] === "!") {
+        cls += "^";
+        j++;
+      }
+      for (; j < glob.length && glob[j] !== "]"; j++) cls += glob[j];
+      cls += "]";
+      pattern += cls;
+      i = j;
+    } else {
+      pattern += c.replace(/[.+^${}()|\\]/g, "\\$&");
+    }
+  }
+  return new RegExp(`^${pattern}$`);
+}
+
+/**
+ * Filter a full-repo manifest (from fetchHfManifest) down to only the entries an
+ * includePattern actually selected. Needed because Engram-style partial fetches
+ * deliberately pull only a few files out of a much larger repo (e.g. 2 of 48 shards) —
+ * verifying the untouched 46 against a host that never fetched them would report every one
+ * as a false-positive "missing" mismatch. No includePattern set (a full-repo model) leaves
+ * the manifest untouched.
+ * @param {Array<{path: string, sha256: string}>} manifest
+ * @param {string | null | undefined} includePattern
+ */
+export function filterManifestToIncluded(manifest, includePattern) {
+  const patterns = splitIncludePatterns(includePattern);
+  if (patterns.length === 0) return manifest;
+  const regexes = patterns.map(globToRegExp);
+  return manifest.filter((entry) => regexes.some((re) => re.test(entry.path)));
+}
+
+/**
  * Fetch the Hugging Face Hub file tree for repo@revision and return the
  * subset of entries that carry a directly comparable content hash.
  *
@@ -436,15 +498,19 @@ export class ModelRegistry {
       if (!this._registryConfig.directory) throw new Error("No Model Registry directory configured");
 
       const dir = joinRemotePath(this._registryConfig.directory, model.subfolder);
-      const includeArg = model.includePattern ? ` --include ${shQuote(model.includePattern)}` : "";
+      const includeArgs = splitIncludePatterns(model.includePattern)
+        .map((pattern) => ` --include ${shQuote(pattern)}`)
+        .join("");
       await sshExecDirect(
         host,
-        `hf download ${shQuote(model.repo)} --revision ${shQuote(model.revision)}${includeArg} --local-dir ${shQuotePath(dir)}`,
+        `hf download ${shQuote(model.repo)} --revision ${shQuote(model.revision)}${includeArgs} --local-dir ${shQuotePath(dir)}`,
         { timeoutMs: MODEL_DOWNLOAD_TIMEOUT_MS, noBatch: true }
       );
 
       this._setJob(modelId, { phase: "verifying", message: "Verifying checksums against Hugging Face" });
-      const manifest = await fetchHfManifest(model.repo, model.revision);
+      const fullManifest = await fetchHfManifest(model.repo, model.revision);
+      const manifest = filterManifestToIncluded(fullManifest, model.includePattern);
+
       const mismatches = await this.verifyFilesOnHost(host, dir, manifest);
       if (mismatches.length > 0) {
         throw new Error(

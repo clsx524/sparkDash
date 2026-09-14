@@ -8,7 +8,7 @@ const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "sparkdash-modelregistry-"));
 process.env.MODEL_REGISTRY_JSON_PATH = path.join(tmp, "model-registry.json");
 process.env.MODELS_JSON_PATH = path.join(tmp, "models.json");
 
-const { ModelRegistry } = await import("../ModelRegistry.js");
+const { ModelRegistry, splitIncludePatterns, filterManifestToIncluded } = await import("../ModelRegistry.js");
 
 const sparkRegistryStub = { getSpark: () => null };
 
@@ -158,4 +158,56 @@ test("setRegistryConfig: empty hostId clears the registry host", () => {
   r.setRegistryConfig({ hostId: "beast", directory: "/mnt/models" });
   r.setRegistryConfig({ hostId: "", directory: "/mnt/models" });
   assert.equal(r.getRegistryConfig().hostId, null);
+});
+
+// ─── splitIncludePatterns / filterManifestToIncluded: multi-file partial fetches ──────
+// (e.g. Engram: only 2 of a 48-shard repo's shards plus its index, sharing no single glob)
+
+test("splitIncludePatterns: null/empty/whitespace-only yields no patterns", () => {
+  assert.deepEqual(splitIncludePatterns(null), []);
+  assert.deepEqual(splitIncludePatterns(undefined), []);
+  assert.deepEqual(splitIncludePatterns(""), []);
+  assert.deepEqual(splitIncludePatterns("   "), []);
+});
+
+test("splitIncludePatterns: splits on whitespace, ignores extra spacing/newlines", () => {
+  assert.deepEqual(
+    splitIncludePatterns("model-00047-of-00048.safetensors  model-00048-of-00048.safetensors\n*.index.json"),
+    ["model-00047-of-00048.safetensors", "model-00048-of-00048.safetensors", "*.index.json"]
+  );
+});
+
+test("filterManifestToIncluded: no includePattern keeps the full manifest untouched", () => {
+  const manifest = [{ path: "a.safetensors", sha256: "1" }, { path: "b.safetensors", sha256: "2" }];
+  assert.deepEqual(filterManifestToIncluded(manifest, null), manifest);
+});
+
+test("filterManifestToIncluded: keeps only entries matching one of several exact-filename patterns", () => {
+  const manifest = [
+    { path: "model-00001-of-00048.safetensors", sha256: "1" },
+    { path: "model-00047-of-00048.safetensors", sha256: "47" },
+    { path: "model-00048-of-00048.safetensors", sha256: "48" },
+    { path: "config.json", sha256: "c" },
+  ];
+  const filtered = filterManifestToIncluded(
+    manifest,
+    "model-00047-of-00048.safetensors model-00048-of-00048.safetensors"
+  );
+  assert.deepEqual(filtered.map((e) => e.path), [
+    "model-00047-of-00048.safetensors",
+    "model-00048-of-00048.safetensors",
+  ]);
+});
+
+test("filterManifestToIncluded: glob character class matches a numeric range without matching neighbors", () => {
+  const manifest = [
+    { path: "model-00046-of-00048.safetensors", sha256: "46" },
+    { path: "model-00047-of-00048.safetensors", sha256: "47" },
+    { path: "model-00048-of-00048.safetensors", sha256: "48" },
+  ];
+  const filtered = filterManifestToIncluded(manifest, "model-0004[78]-of-00048.safetensors");
+  assert.deepEqual(filtered.map((e) => e.path), [
+    "model-00047-of-00048.safetensors",
+    "model-00048-of-00048.safetensors",
+  ]);
 });
