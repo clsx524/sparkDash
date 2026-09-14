@@ -68,20 +68,10 @@
     ]
   },
   {
-    "id": "h3-plus-deepseek-single",
-    "label": "MiniMax H3 (worker) + DeepSeek-V4-Flash-0731-EXL3 single-node (head)",
-    "group": "h3-plus-single-llm",
+    "id": "minimax-h3",
+    "label": "MiniMax H3 (single-node, worker)",
+    "group": "single-node",
     "nodes": [
-      {
-        "role": "head",
-        "workdir": "~/DeepSeek-v4-Flash-One-DGX-Spark",
-        "startCmd": "./start.sh --no-wait",
-        "stopCmd": "./stop.sh",
-        "statusCmd": "./start.sh status",
-        "runningPattern": "Up",
-        "containerName": "deepseek-v4-flash-spark-deepseek-v4-flash-1",
-        "llmPort": 8888
-      },
       {
         "role": "worker",
         "workdir": "~/MiniMax-H3-DGX-Spark",

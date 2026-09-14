@@ -43,7 +43,7 @@ function formatEtaSeconds(sec: number | null | undefined): string | null {
 
 const GROUP_LABEL: Record<string, string> = {
   "dual-text-gen": "Dual-node text generation (TP2, one at a time)",
-  "h3-plus-single-llm": "Split single-node (one model per Spark)",
+  "single-node": "Single-node (other Spark idle)",
 };
 
 export function RecipesDialog({ open, onClose, recipeSwitch }: RecipesDialogProps) {

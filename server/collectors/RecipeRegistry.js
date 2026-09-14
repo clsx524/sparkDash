@@ -2,8 +2,11 @@
  * RecipeRegistry — named *deployment recipes* for the two-Spark pair, as opposed to the
  * physical-node config SparkRegistry already owns. A recipe is one of the mutually exclusive
  * ways this cluster's combined GPU memory can be occupied: one TP2 model across both nodes
- * (`dual-text-gen` group), or two independent single-node models, one per node
- * (`h3-plus-single-llm` group). Exactly one recipe — or none — is active at a time.
+ * (`dual-text-gen` group), or one model on a single node with the other Spark idle
+ * (`single-node` group — e.g. MiniMax H3 on the worker; DeepSeek-V4-Flash-0731's matching
+ * single-node head recipe is intentionally not wired in here: ansible still keeps its repo
+ * checked out on the head for a cheap re-enable later, but nothing in this file can start it
+ * or trigger its weight download — see tasks/deepseek-single.yml).
  *
  * Deliberately config, not code: server/config/recipes.json lists every recipe's nodes,
  * start/stop/status commands, and health-check port. Adding a sixth recipe later means
