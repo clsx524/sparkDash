@@ -142,6 +142,11 @@ export interface ModelEntry {
   includePattern?: string | null;
   manifest?: ModelFileManifestEntry[] | null;
   verifiedAt?: string | null;
+  /** Snapshot of includePattern at the moment it was last actually verified against disk.
+   *  Mismatched against the live includePattern means an edit happened since (e.g. adding a
+   *  file to an existing partial fetch) that hasn't been synced yet — that's the disabled/
+   *  enabled signal for the Sync button, distinct from "not downloaded at all". */
+  includePatternAtVerify?: string | null;
 }
 
 /** Live-probed availability on the registry host — never a stored flag. */

@@ -89,6 +89,16 @@ function describeScan(result: ModelRegistryScanResult): string {
   return `Discovered ${result.discovered.length} model(s) on disk: ${result.discovered.join(", ")}. Set their source repo to enable download.`;
 }
 
+/** Has this model actually been downloaded+verified against the includePattern it currently
+ *  has? False both when never verified at all, and when includePattern was edited (e.g. a
+ *  file added to an existing partial fetch) since the last successful verify — that edit
+ *  makes the on-disk verify stale even though the model is still `available`. Drives the
+ *  Sync button's disabled state: nothing useful for it to do while this is true. */
+export function isModelSynced(model: Pick<ModelEntry, "verifiedAt" | "includePattern" | "includePatternAtVerify">): boolean {
+  if (!model.verifiedAt) return false;
+  return (model.includePatternAtVerify ?? null) === (model.includePattern ?? null);
+}
+
 const EMPTY_FORM = {
   id: "",
   label: "",
@@ -126,6 +136,7 @@ export function ModelsDialog({ open, onClose }: ModelsDialogProps) {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editRepo, setEditRepo] = useState("");
   const [editRevision, setEditRevision] = useState("");
+  const [editIncludePattern, setEditIncludePattern] = useState("");
   const [editSaving, setEditSaving] = useState(false);
 
   useEscape(onClose);
@@ -260,6 +271,7 @@ export function ModelsDialog({ open, onClose }: ModelsDialogProps) {
     setEditingId(model.id);
     setEditRepo(model.repo ?? "");
     setEditRevision(model.revision || "main");
+    setEditIncludePattern(model.includePattern ?? "");
     setError(null);
   };
 
@@ -273,7 +285,11 @@ export function ModelsDialog({ open, onClose }: ModelsDialogProps) {
     setEditSaving(true);
     setError(null);
     try {
-      await updateModel(model.id, { repo: editRepo.trim(), revision: editRevision.trim() || "main" });
+      await updateModel(model.id, {
+        repo: editRepo.trim(),
+        revision: editRevision.trim() || "main",
+        includePattern: editIncludePattern.trim() || null,
+      });
       setEditingId(null);
       load();
     } catch (err: unknown) {
@@ -478,6 +494,7 @@ export function ModelsDialog({ open, onClose }: ModelsDialogProps) {
               const status = data.statuses[model.id];
               const job = jobs[model.id];
               const busy = job?.phase === "running" || job?.phase === "verifying";
+              const isSynced = isModelSynced(model);
               return (
                 <div key={model.id} className="rounded border border-border bg-surface-elevated p-3">
                   <div className="flex items-start justify-between gap-3">
@@ -512,25 +529,38 @@ export function ModelsDialog({ open, onClose }: ModelsDialogProps) {
                     {editingId !== model.id && (
                       <div className="flex shrink-0 flex-col items-end gap-1">
                         {model.repo ? (
-                          status?.available ? (
-                            <button
-                              type="button"
-                              onClick={() => handleDeleteFiles(model)}
-                              disabled={busy}
-                              className="rounded border border-danger/40 bg-surface px-2.5 py-1 text-[10px] text-danger hover:bg-danger/10 disabled:opacity-50"
-                            >
-                              {busy && job?.kind === "delete" ? "Deleting…" : "Delete files"}
-                            </button>
-                          ) : (
-                            <button
-                              type="button"
-                              onClick={() => handleDownload(model)}
-                              disabled={busy}
-                              className="rounded bg-accent px-2.5 py-1 text-[10px] font-medium text-white hover:bg-accent-hover disabled:opacity-50"
-                            >
-                              {busy && job?.kind === "download" ? "Downloading…" : "Download"}
-                            </button>
-                          )
+                          <>
+                            {status?.available && (
+                              <button
+                                type="button"
+                                onClick={() => handleDownload(model)}
+                                disabled={busy || isSynced}
+                                title={isSynced ? "Already downloaded and verified against the current include pattern" : "Re-run download — fetches only missing/changed files, then re-verifies checksums"}
+                                className="rounded border border-border bg-surface px-2.5 py-1 text-[10px] text-muted hover:bg-surface-hover disabled:opacity-50"
+                              >
+                                {busy && job?.kind === "download" ? "Syncing…" : "Sync"}
+                              </button>
+                            )}
+                            {status?.available ? (
+                              <button
+                                type="button"
+                                onClick={() => handleDeleteFiles(model)}
+                                disabled={busy}
+                                className="rounded border border-danger/40 bg-surface px-2.5 py-1 text-[10px] text-danger hover:bg-danger/10 disabled:opacity-50"
+                              >
+                                {busy && job?.kind === "delete" ? "Deleting…" : "Delete files"}
+                              </button>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={() => handleDownload(model)}
+                                disabled={busy}
+                                className="rounded bg-accent px-2.5 py-1 text-[10px] font-medium text-white hover:bg-accent-hover disabled:opacity-50"
+                              >
+                                {busy && job?.kind === "download" ? "Downloading…" : "Download"}
+                              </button>
+                            )}
+                          </>
                         ) : (
                           <button
                             type="button"
@@ -590,6 +620,19 @@ export function ModelsDialog({ open, onClose }: ModelsDialogProps) {
                           placeholder="main"
                           className="w-full rounded border border-border bg-surface-elevated px-3 py-1.5 text-xs text-text outline-none focus:border-accent"
                         />
+                      </div>
+                      <div>
+                        <label className="mb-1 block text-xs text-muted">Include pattern(s) (optional)</label>
+                        <input
+                          type="text"
+                          value={editIncludePattern}
+                          onChange={(e) => setEditIncludePattern(e.target.value)}
+                          placeholder="space-separated globs, e.g. model-0004[78]-of-00048.safetensors *.index.json"
+                          className="w-full rounded border border-border bg-surface-elevated px-3 py-1.5 text-xs text-text outline-none focus:border-accent"
+                        />
+                        <p className="mt-1 text-[10px] text-muted">
+                          Editing this does not re-download anything by itself — Save, then use Sync.
+                        </p>
                       </div>
                       <div className="flex justify-end gap-2">
                         <button

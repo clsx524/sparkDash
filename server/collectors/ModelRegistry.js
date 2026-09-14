@@ -265,6 +265,12 @@ export class ModelRegistry {
           : null,
       manifest: null,
       verifiedAt: null,
+      // Snapshot of includePattern at the moment it was last actually verified against disk —
+      // compared to the live includePattern to tell "downloaded and covers everything this
+      // model is now supposed to include" from "includePattern was edited since, may be
+      // missing newly-added files" (e.g. config.json added to an existing partial fetch).
+      // null here (never verified) always reads as stale, same as a mismatch.
+      includePatternAtVerify: null,
     };
     this._models = [...this._models, model];
     this._saveModels();
@@ -394,6 +400,7 @@ export class ModelRegistry {
           includePattern: null,
           manifest: null,
           verifiedAt: null,
+          includePatternAtVerify: null,
         },
       ];
       trackedSubfolders.add(name);
@@ -620,7 +627,11 @@ export class ModelRegistry {
         );
       }
 
-      this._updateModel(modelId, { manifest, verifiedAt: new Date().toISOString() });
+      this._updateModel(modelId, {
+        manifest,
+        verifiedAt: new Date().toISOString(),
+        includePatternAtVerify: model.includePattern,
+      });
       this._setJob(modelId, { phase: "done", message: "Downloaded and verified" });
     } catch (err) {
       this._setJob(modelId, { phase: "failed", error: err.message });
