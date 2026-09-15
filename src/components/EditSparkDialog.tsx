@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import {
   deleteSpark,
+  fetchModelRegistry,
   fetchSparks,
   setSparkPassword,
   testSpark,
@@ -54,6 +55,7 @@ export function EditSparkDialog({
   const [testResult, setTestResult] = useState<SparkTestResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [savedPasswordNote, setSavedPasswordNote] = useState<string | null>(null);
+  const [registryHostId, setRegistryHostId] = useState<string | null>(null);
 
   useEscape(onClose);
 
@@ -78,17 +80,19 @@ export function EditSparkDialog({
       setTestResult(null);
       setError(null);
       setSavedPasswordNote(null);
+      setRegistryHostId(null);
       return;
     }
     let cancelled = false;
     setLoading(true);
-    fetchSparks()
-      .then((res) => {
+    Promise.all([fetchSparks(), fetchModelRegistry()])
+      .then(([res, registry]) => {
         if (cancelled) return;
         setAllSparks(res.sparks);
         const found = res.sparks.find((s) => s.id === sparkId) || null;
         setConfig(found);
         setSavedConfig(found);
+        setRegistryHostId(registry.hostId);
         if (!found) setError("Spark not found");
       })
       .catch((err: Error) => {
@@ -105,6 +109,12 @@ export function EditSparkDialog({
   if (!mounted) return null;
 
   const role: SparkRole = resolveSparkRole(config ?? {});
+
+  /** Other tracked hosts marked relay-capable — candidates for this host's relay hop. */
+  const relayHosts = allSparks.filter((s) => s.id !== config?.id && s.canActAsModelRelay);
+
+  /** This host already IS the Model Registry — sync route is meaningless (nothing to route to). */
+  const isRegistryHost = Boolean(config?.id) && config?.id === registryHostId;
 
   const update = (patch: Partial<SparkConfig>) => {
     setConfig((prev) => (prev ? { ...prev, ...patch } : prev));
@@ -239,6 +249,12 @@ export function EditSparkDialog({
         })(),
         hermesMonitoring: Boolean(config.hermesMonitoring),
         tailscaleMonitoring: Boolean(config.tailscaleMonitoring),
+        modelFolder: config.modelFolder?.trim() || "",
+        canActAsModelRelay: Boolean(config.canActAsModelRelay),
+        modelSyncRoute:
+          config.modelSyncRoute?.mode === "relay"
+            ? { mode: "relay" as const, relayHostId: config.modelSyncRoute.relayHostId ?? null }
+            : { mode: "direct" as const },
         ssh: {
           host: config.ssh.host || config.lanIp,
           user: config.ssh.user,
@@ -515,6 +531,82 @@ export function EditSparkDialog({
                   </span>
                 </label>
               </div>
+
+              <div>
+                <label className="mb-1 block text-xs text-muted">Model folder</label>
+                <input
+                  type="text"
+                  value={config.modelFolder || ""}
+                  onChange={(e) => update({ modelFolder: e.target.value })}
+                  className="w-full rounded border border-border bg-surface-elevated px-3 py-1.5 text-xs text-text outline-none focus:border-accent"
+                />
+                <p className="mt-1 text-[10px] text-muted">
+                  Where synced model weights land on this host. Defaults to the standard Hugging
+                  Face cache dir (~/.cache/huggingface).
+                </p>
+              </div>
+
+              <label className="flex items-center gap-2 text-xs text-muted">
+                <input
+                  type="checkbox"
+                  checked={Boolean(config.canActAsModelRelay)}
+                  onChange={(e) => update({ canActAsModelRelay: e.target.checked })}
+                  className="rounded border-border"
+                />
+                <span>Allow other hosts to relay through this one to reach the Model Registry</span>
+              </label>
+
+              {isRegistryHost ? (
+                <p className="text-[10px] text-muted">
+                  This host is the Model Registry — models are already here, nothing to sync or
+                  route.
+                </p>
+              ) : (
+                <div>
+                  <label className="mb-1 block text-xs text-muted">Model sync route</label>
+                  <select
+                    value={config.modelSyncRoute?.mode ?? "direct"}
+                    onChange={(e) =>
+                      update({
+                        modelSyncRoute:
+                          e.target.value === "relay"
+                            ? { mode: "relay", relayHostId: config.modelSyncRoute?.relayHostId ?? null }
+                            : { mode: "direct" },
+                      })
+                    }
+                    className="w-full rounded border border-border bg-surface-elevated px-3 py-1.5 text-xs text-text outline-none focus:border-accent"
+                  >
+                    <option value="direct">Direct to Model Registry</option>
+                    <option value="relay">Via relay</option>
+                  </select>
+                  {config.modelSyncRoute?.mode === "relay" && (
+                    <div className="mt-2">
+                      {relayHosts.length === 0 ? (
+                        <p className="text-[10px] text-muted">
+                          No hosts are marked as relay-capable yet.
+                        </p>
+                      ) : (
+                        <select
+                          value={config.modelSyncRoute?.relayHostId || ""}
+                          onChange={(e) =>
+                            update({
+                              modelSyncRoute: { mode: "relay", relayHostId: e.target.value || null },
+                            })
+                          }
+                          className="w-full rounded border border-border bg-surface-elevated px-3 py-1.5 text-xs text-text outline-none focus:border-accent"
+                        >
+                          <option value="">Select a relay host</option>
+                          {relayHosts.map((s) => (
+                            <option key={s.id} value={s.id}>
+                              {s.name}
+                            </option>
+                          ))}
+                        </select>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
 
               {role === "worker" && (
                 <div className="space-y-3">

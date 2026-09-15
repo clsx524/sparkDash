@@ -108,13 +108,13 @@ test("a poll from an earlier monitor run cannot commit or clear a restarted poll
   const currentRunPoll = monitor._pollDomain("gpu");
   await Promise.resolve();
 
-  pendingResolvers[0](validGpu(41));
+  pendingResolvers[0](tagged(validGpu(41)));
   await priorRunPoll;
   assert.equal(monitor.snapshot().metrics.gpu.temperature, 0);
   assert.equal(monitor._lastUpdate.gpu, undefined);
   assert.ok(monitor._inflight.gpu, "the earlier poll must not clear the current guard");
 
-  pendingResolvers[1](validGpu(42));
+  pendingResolvers[1](tagged(validGpu(42)));
   await currentRunPoll;
   assert.equal(monitor.snapshot().metrics.gpu.temperature, 42);
   assert.ok(Number.isFinite(monitor._lastUpdate.gpu));
@@ -134,12 +134,12 @@ test("a poll from before updateConfig cannot commit against the new target", asy
   const currentTargetPoll = monitor._pollDomain("gpu");
   await Promise.resolve();
 
-  pendingResolvers[0](validGpu(41));
+  pendingResolvers[0](tagged(validGpu(41)));
   await priorTargetPoll;
   assert.equal(monitor.snapshot().metrics.gpu.temperature, 0);
   assert.ok(monitor._inflight.gpu, "the prior target poll must not clear the current guard");
 
-  pendingResolvers[1](validGpu(42));
+  pendingResolvers[1](tagged(validGpu(42)));
   await currentTargetPoll;
   assert.equal(monitor.snapshot().metrics.gpu.temperature, 42);
 });
@@ -174,6 +174,61 @@ test("a rejected older CPU poll cannot rewind the accepted generation baseline",
   await olderPoll;
   await monitor._pollDomain("cpu");
   assert.equal(monitor.snapshot().metrics.cpu.usage, 40);
+});
+
+test("gpu/cpu collection failing over SSH is not mistaken for collector-liveness evidence", async () => {
+  // collectGpu()/collectCpu() never throw on SSH failure — they catch internally and return
+  // a tagged-failed default (unlike storage/network/ram, which throw and let _pollDomain's
+  // own catch handle it). This is exactly the regression: a genuinely offline dedicated-GPU
+  // host ("beast") kept reaching the success path every 2s and was reported online forever.
+  const monitor = new SparkMonitor({ ...spark(), isLocal: false });
+  monitor._running = true;
+  monitor.collector._getRemoteGpu = async () => {
+    throw new Error("ssh to beast failed");
+  };
+  monitor.collector._getRemoteCpu = async () => {
+    throw new Error("ssh to beast failed");
+  };
+
+  await monitor._pollDomain("gpu");
+  await monitor._pollDomain("cpu");
+
+  assert.equal(monitor._metricCollectionSuccessful.gpu, false);
+  assert.equal(monitor._metricCollectionSuccessful.cpu, false);
+  assert.equal(monitor._lastSuccessAt.gpu, undefined, "a failed collection must not count as success");
+  assert.equal(monitor._lastSuccessAt.cpu, undefined);
+
+  const evidence = monitor._collectorEvidence(Date.now());
+  assert.equal(evidence.eligible, true);
+  assert.equal(evidence.ok, false, "no genuinely successful hardware domain exists yet");
+});
+
+test("a genuinely successful gpu poll IS valid collector-liveness evidence", async () => {
+  const monitor = new SparkMonitor({ ...spark(), isLocal: false });
+  monitor._running = true;
+  monitor.collector._getRemoteGpu = async () => validGpu(55);
+
+  await monitor._pollDomain("gpu");
+
+  assert.equal(monitor._metricCollectionSuccessful.gpu, true);
+  assert.ok(Number.isFinite(monitor._lastSuccessAt.gpu));
+  const evidence = monitor._collectorEvidence(Date.now());
+  assert.equal(evidence.ok, true);
+});
+
+test("an LLM-endpoint success is never mistaken for SSH collector evidence", async () => {
+  // llm/comfy/tailscale/hermes are HTTP/other-tool probes, not SSH — their success must
+  // never feed _collectorEvidence (that would double up with, and weaken, the dedicated
+  // LLM fallback's own eligibility rules, e.g. letting a worker piggyback on an endpoint).
+  const monitor = new SparkMonitor({ ...spark(), isLocal: false, llmMonitoring: true });
+  monitor._running = true;
+  monitor.llmProbes = new Map([["8888", { port: 8888, probe: async () => ({ available: true }) }]]);
+
+  await monitor._pollDomain("llm");
+
+  assert.equal(monitor._lastSuccessAt.llm, undefined);
+  const evidence = monitor._collectorEvidence(Date.now());
+  assert.equal(evidence.ok, false, "an LLM probe succeeding must not count as SSH evidence");
 });
 
 test("a liveness check from an earlier run cannot commit or clear a restarted check", async (t) => {
