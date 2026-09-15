@@ -6,6 +6,14 @@ import type {
   HermesUpdatesResponse,
   LlmMetrics,
   LlmDailyResponse,
+  HfTokenStatus,
+  ModelEntry,
+  ModelJobStateOrIdle,
+  ModelRegistryConfig,
+  ModelRegistryScanResult,
+  ModelsListResponse,
+  RecipeActivateResponse,
+  RecipeListResponse,
   Settings,
   ShowcaseListResponse,
   ShowcaseSessionState,
@@ -157,6 +165,18 @@ export function updateDisabledInterfaces(
     method: "PUT",
     body: JSON.stringify({ disabledInterfaces }),
   });
+}
+
+// ─── Local SSH terminal ───────────────────────────────────
+/**
+ * Ask the local server to open a terminal for one Spark.
+ *
+ * The Spark id is the entire request — no host, user, command or option is sent, because the
+ * server derives all of them from its own registry. There is deliberately no parameter here
+ * for a caller to widen later.
+ */
+export function launchSshShell(id: string): Promise<{ success: boolean; id: string; target: string }> {
+  return apiFetch(`/api/sparks/${encodeURIComponent(id)}/ssh-shell`, { method: "POST" });
 }
 
 // ─── Manual metric refresh ────────────────────────────────
@@ -441,4 +461,80 @@ export function updateSettings(patch: Partial<Settings>): Promise<Settings> {
     method: "PUT",
     body: JSON.stringify(patch),
   });
+}
+
+// ─── Recipe registry / switching ──────────────────────────
+/** Live-inferred list of deployment recipes plus which one (if any) is running. */
+export function fetchRecipes(): Promise<RecipeListResponse> {
+  return apiFetch("/api/recipes");
+}
+
+/** Start switching the cluster to a different recipe. Returns immediately; watch `recipeSwitch` on the WS snapshot for progress. */
+export function activateRecipe(id: string): Promise<RecipeActivateResponse> {
+  return apiFetch(`/api/recipes/${encodeURIComponent(id)}/activate`, { method: "POST" });
+}
+
+// ─── Model Registry (generic model tracking/sync) ─────────
+export function fetchModelRegistry(): Promise<ModelRegistryConfig> {
+  return apiFetch("/api/model-registry");
+}
+
+/** Setting/changing the host or directory immediately reconciles the tracked list against disk — see the returned discovered/scanError. */
+export function updateModelRegistry(
+  patch: ModelRegistryConfig
+): Promise<ModelRegistryConfig & ModelRegistryScanResult> {
+  return apiFetch("/api/model-registry", { method: "PUT", body: JSON.stringify(patch) });
+}
+
+/** Re-scan the registry directory on demand (no config change) — for files added on disk after the registry was already configured. */
+export function rescanModelRegistry(): Promise<ModelRegistryScanResult> {
+  return apiFetch("/api/model-registry/rescan", { method: "POST" });
+}
+
+/** Live-probed Hugging Face login state on the registry host (never a stored flag). */
+export function fetchHfTokenStatus(): Promise<HfTokenStatus> {
+  return apiFetch("/api/model-registry/hf-token");
+}
+
+/** Set or replace the Hugging Face login on the registry host — validated by hf auth login itself. */
+export function setHfToken(token: string): Promise<HfTokenStatus> {
+  return apiFetch("/api/model-registry/hf-token", { method: "PUT", body: JSON.stringify({ token }) });
+}
+
+/** Tracked models plus a live availability probe per model (never a stored flag). */
+export function fetchModels(): Promise<ModelsListResponse> {
+  return apiFetch("/api/models");
+}
+
+export function addModel(
+  input: Pick<ModelEntry, "id" | "label" | "subfolder" | "revision" | "includePattern"> & { repo: string }
+): Promise<ModelEntry> {
+  return apiFetch("/api/models", { method: "POST", body: JSON.stringify(input) });
+}
+
+/** Edit an existing tracked model's label/repo/revision/includePattern — e.g. attaching a source repo to a disk-discovered entry. */
+export function updateModel(
+  id: string,
+  patch: Partial<Pick<ModelEntry, "label" | "repo" | "revision" | "includePattern">>
+): Promise<ModelEntry> {
+  return apiFetch(`/api/models/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(patch) });
+}
+
+/** Remove a tracked model entry (metadata only — does not touch downloaded files). */
+export function removeModel(id: string): Promise<ModelEntry> {
+  return apiFetch(`/api/models/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+/** Delete a model's downloaded files from the registry host. Entry stays tracked. */
+export function deleteModelFiles(id: string): Promise<{ started: boolean }> {
+  return apiFetch(`/api/models/${encodeURIComponent(id)}/files`, { method: "DELETE" });
+}
+
+/** Kick off async download + checksum verification. Poll fetchModelJob for progress. */
+export function downloadModel(id: string): Promise<{ started: boolean }> {
+  return apiFetch(`/api/models/${encodeURIComponent(id)}/download`, { method: "POST" });
+}
+
+export function fetchModelJob(id: string): Promise<ModelJobStateOrIdle> {
+  return apiFetch(`/api/models/${encodeURIComponent(id)}/job`);
 }

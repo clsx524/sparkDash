@@ -84,9 +84,107 @@ export interface SparkConfig {
   tailscaleMonitoring?: boolean;
   /** When true, storage is only updated on manual refresh, not auto-polled. */
   storagePollDisabled?: boolean;
+  /**
+   * Model Registry integration — plain user-entered value, no assumed default.
+   * Where synced model weights land on this host.
+   */
+  modelFolder?: string;
+  /** Opt-in: other hosts may tunnel through this one (SSH ProxyJump) to reach the Model Registry host. */
+  canActAsModelRelay?: boolean;
+  /** How this host reaches the Model Registry host. relayHostId only applies when mode is "relay". */
+  modelSyncRoute?: { mode: "direct" | "relay"; relayHostId?: string | null };
 }
 
 export type SparkRole = "head" | "worker" | "standalone";
+
+// ─── Model Registry ────────────────────────────────────────
+/** Which tracked host holds the canonical model files, and where. */
+export interface ModelRegistryConfig {
+  hostId: string | null;
+  directory: string;
+}
+
+/** Result of PUT /api/model-registry or POST /api/model-registry/rescan — a
+ *  directory scan reconciles the tracked list against disk every time the
+ *  registry host/directory is set or changed. */
+export interface ModelRegistryScanResult {
+  discovered: string[];
+  scanError: string | null;
+}
+
+/** Live-probed Hugging Face login state on the registry host — never a stored flag; the
+ *  token itself lives only in hf-cli's own auth file there, never in this app's config. */
+export interface HfTokenStatus {
+  hasToken: boolean;
+  username: string | null;
+  error: string | null;
+}
+
+export interface ModelFileManifestEntry {
+  path: string;
+  sha256: string;
+}
+
+/**
+ * One tracked model. Either operator-declared (Add model, always has a
+ * repo) or disk-discovered by reconcileWithDisk (repo: null until an
+ * operator edits one in — a directory name alone doesn't reveal its
+ * Hugging Face source).
+ */
+export interface ModelEntry {
+  id: string;
+  label: string;
+  subfolder: string;
+  repo: string | null;
+  revision: string;
+  /** One or more hf-cli --include globs, space/newline-separated (e.g. a repo where only
+   *  a few files should be fetched out of many). */
+  includePattern?: string | null;
+  manifest?: ModelFileManifestEntry[] | null;
+  verifiedAt?: string | null;
+  /** Snapshot of includePattern at the moment it was last actually verified against disk.
+   *  Mismatched against the live includePattern means an edit happened since (e.g. adding a
+   *  file to an existing partial fetch) that hasn't been synced yet — that's the disabled/
+   *  enabled signal for the Sync button, distinct from "not downloaded at all". */
+  includePatternAtVerify?: string | null;
+}
+
+/** Live-probed availability on the registry host — never a stored flag. */
+export interface ModelStatus {
+  id: string;
+  available: boolean;
+  sizeBytes?: number | null;
+  /** Set when the probe itself failed (SSH unreachable, auth rejected, timed
+   *  out, ...) — distinct from a clean "not downloaded yet" (null). */
+  error?: string | null;
+}
+
+export interface ModelsListResponse {
+  registry: ModelRegistryConfig;
+  models: ModelEntry[];
+  statuses: Record<string, ModelStatus>;
+}
+
+export interface ModelJobState {
+  modelId: string;
+  kind: "download" | "delete";
+  phase: "running" | "verifying" | "done" | "failed";
+  message?: string;
+  error?: string;
+  /** Live progress while phase is "running" — a du -sb poll on the destination directory,
+   *  since a multi-hundred-GB download's own phase never changes for hours otherwise.
+   *  null before the first poll tick and once verification starts. */
+  bytesDownloaded?: number | null;
+  bytesPerSecond?: number | null;
+  updatedAt: string;
+}
+
+/** GET /api/models/:id/job's shape when no job has ever run for that model. Deliberately
+ *  `Omit<ModelJobState, "phase"> & {...}`, not a plain intersection with ModelJobState —
+ *  intersecting two differing declarations of the same property computes the intersection
+ *  of their types, which silently drops "idle" since ModelJobState's own phase field never
+ *  included it. */
+export type ModelJobStateOrIdle = Omit<ModelJobState, "phase"> & { phase: "idle" | ModelJobState["phase"] };
 
 // ─── Hermes Agent status ───────────────────────────────
 /** Opt-in Hermes Agent update monitoring state, pushed in every snapshot. */
@@ -257,12 +355,46 @@ export interface NetworkInterface {
   disabled?: boolean;
 }
 
+/**
+ * One RDMA/RoCE port, read from the HCA's own sysfs counters.
+ *
+ * Deliberately separate from NetworkInterface: RDMA bypasses the kernel network stack, so
+ * these bytes and the netdev bytes measure different things and must not share a shape.
+ * A busy RoCE link shows large `txBytes` here while its netdev counters barely move.
+ */
+export interface RdmaPortMetrics {
+  /** HCA device, e.g. "rocep1s0f1". */
+  hca: string;
+  port: number;
+  /** Backing Ethernet interface, e.g. "enp1s0f1np1". null when unresolved. */
+  netdev: string | null;
+  /** IPv4 bound to the backing interface. null when unaddressed. */
+  ip: string | null;
+  /** Port state, e.g. "ACTIVE". */
+  state: string | null;
+  /** Physical state, e.g. "LinkUp". */
+  physicalState: string | null;
+  /** "Ethernet" for RoCE, "InfiniBand" for native IB. */
+  linkLayer: string | null;
+  rateGbps: number | null;
+  /** Cumulative bytes (counter words x 4). null when unreadable. */
+  txBytes: number | null;
+  rxBytes: number | null;
+  /** Live rate. null on first sample or after a counter reset — never a fabricated 0. */
+  txBytesPerSecond: number | null;
+  rxBytesPerSecond: number | null;
+  txPackets: number | null;
+  rxPackets: number | null;
+}
+
 export interface NetworkMetrics {
   primaryInterface: string | null;
   linkSpeedMbps: number | null;
   interfaces: NetworkInterface[];
   /** MAC of enP7s7 when present (same value persisted as detectedMacAddress). */
   wolMac?: string | null;
+  /** RDMA/RoCE ports. Empty on hosts without RDMA. */
+  rdma?: RdmaPortMetrics[];
 }
 
 // ─── Unified memory metrics ──────────────────────────────
@@ -293,6 +425,8 @@ export interface LlmMetrics {
   slotsTotal: number;
   generationTps: number;
   prefillTps: number;
+  /** vLLM-only: lifetime-average prefill tok/s (total tokens admitted / total TTFT-seconds). Slow-moving but immune to the windowed pairing bug `prefillTps`'s fallback can hit. */
+  prefillTpsLifetime?: number | null;
   /** Live cached-prefill tok/s when the backend splits kinds (ds4, llama.cpp, sglang). */
   cachedPrefillTps?: number | null;
   /** Live uncached/computed prefill tok/s when split is available. */
@@ -516,6 +650,63 @@ export interface SparkSnapshot {
   metrics: SparkMetrics;
 }
 
+// ─── Recipe registry / switching ──────────────────────────
+export interface RecipeNodeStatus {
+  role: string;
+  running: boolean;
+  detail: string;
+}
+
+export interface RecipeInfo {
+  id: string;
+  label: string;
+  group: string;
+  nodes: { role: string; workdir: string }[];
+  active: boolean;
+  nodeStatus: RecipeNodeStatus[];
+}
+
+export interface RecipeSwitchProgress {
+  percent: number;
+  etaSeconds: number | null;
+  /** "log": a real shard-loading percent parsed from container output.
+   * "estimate": no log signal (shards done, or this loader never prints one) — driven by
+   * elapsed time against past switches' average duration, capped below 100%. */
+  source: "log" | "estimate";
+}
+
+export interface RecipeSwitchState {
+  phase:
+    | "checking-current-state"
+    | "stopping"
+    | "confirming-stopped"
+    | "clearing-conflicts"
+    | "syncing-model"
+    | "starting"
+    | "health-checking"
+    | "done"
+    | "failed";
+  targetId: string;
+  from?: string | null;
+  error?: string;
+  /** Only present during "health-checking" — how far the cold model load has gotten. */
+  progress?: RecipeSwitchProgress;
+  updatedAt: number;
+}
+
+export interface RecipeListResponse {
+  recipes: RecipeInfo[];
+  activeId: string | null;
+  conflict: boolean;
+  conflictIds: string[];
+  switch: RecipeSwitchState | null;
+}
+
+export interface RecipeActivateResponse {
+  started: boolean;
+  targetId: string;
+}
+
 // ─── WebSocket envelope ───────────────────────────────────
 export interface WsSnapshot {
   type: "snapshot";
@@ -523,6 +714,7 @@ export interface WsSnapshot {
   generatedAt?: number;
   sparks: SparkSnapshot[];
   refreshInterval: number;
+  recipeSwitch?: RecipeSwitchState | null;
 }
 
 export interface FleetEnergy {

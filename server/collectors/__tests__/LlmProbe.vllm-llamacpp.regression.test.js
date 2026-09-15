@@ -204,7 +204,9 @@ test("vLLM /metrics body is not misread as ds4", () => {
   probe.lastTokenCounts = { input: 0, output: 0 };
   probe._applyVllmMetrics(VLLM_METRICS, 2);
   assert.equal(probe.generationTps, 250); // 500/2
-  assert.equal(probe.prefillTps, 500); // 1000/2
+  assert.equal(probe.prefillTps, 500); // 1000/2 — first observation, no TTFT signal yet, poll-dt fallback
+  // No TTFT series in this fixture at all, so the lifetime-average companion has no data.
+  assert.equal(probe.prefillTpsLifetime, null);
   // sticky sglang state must remain unused
   assert.equal(probe._sglangStickyTps, null);
 });

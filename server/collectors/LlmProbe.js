@@ -79,10 +79,25 @@ export class LlmProbe {
     this.slotsTotal = 0;
     this.generationTps = 0;
     this.prefillTps = 0;
+    /**
+     * vLLM-only companion to `prefillTps`: ratio of lifetime aggregates (total tokens admitted
+     * over total seconds spent reaching first token). Immune to the admission/completion
+     * pairing bug `prefillTps`'s windowed fallback can hit (see _applyVllmMetrics), at the
+     * cost of being a slow-moving average rather than a live number. null on other backends.
+     */
+    this.prefillTpsLifetime = null;
     /** Live cached-prefill tok/s when the backend splits kinds (ds4 / llama.cpp / sglang). null otherwise. */
     this.cachedPrefillTps = null;
     /** Live uncached/computed prefill tok/s when split is available. null otherwise. */
     this.uncachedPrefillTps = null;
+    /** Running count from the previous poll, to spot the moment a request starts. */
+    this._prevRunning = 0;
+    /** Prompt tokens admitted but not yet paired with a TTFT observation. */
+    this._pendingPrefillTokens = 0;
+    /** Last TTFT histogram aggregate, for per-request deltas. */
+    this._lastTtftAgg = { sum: 0, count: 0 };
+    /** False until one vLLM scrape has established a counter baseline. */
+    this._vllmPrimed = false;
     this.error = null;
 
     // Per-slot rate tracking (for llama.cpp native path)
@@ -235,8 +250,13 @@ export class LlmProbe {
     this.modelPath = null;
     this.generationTps = 0;
     this.prefillTps = 0;
+    this.prefillTpsLifetime = null;
     this.cachedPrefillTps = null;
     this.uncachedPrefillTps = null;
+    this._prevRunning = 0;
+    this._pendingPrefillTokens = 0;
+    this._lastTtftAgg = { sum: 0, count: 0 };
+    this._vllmPrimed = false;
     this.contextLength = null;
     this.gpuMemoryUtilization = null;
     this.slotsActive = 0;
@@ -891,6 +911,29 @@ export class LlmProbe {
     const ttftP95 = this._histogramQuantile(ttftHist.buckets, ttftHist.total, 0.95);
     this.ttftP95Seconds = ttftP95 == null ? null : Math.round(ttftP95 * 1000) / 1000;
 
+    // Effective prefill rate: tokens admitted since the last observation, over the seconds
+    // those requests actually spent reaching their first token. The histogram sum grows by
+    // exactly one request's TTFT each time its count grows, so this is measured, not inferred.
+    const ttftSum = this._getVllmMetric(txt, "time_to_first_token_seconds_sum");
+    const ttftCount = this._getVllmMetric(txt, "time_to_first_token_seconds_count");
+    // Ratio of the two lifetime aggregates: every prompt token the server has admitted over
+    // every second it has spent reaching a first token. An average, and labelled as one.
+    //
+    // Windowed pairing was tried and abandoned. Tokens are credited at admission while TTFT is
+    // recorded at first token, so the two land in different polls and cannot be matched
+    // reliably: a request that never produces a first token — the empty-completion fault seen
+    // on this cluster — adds tokens that no TTFT observation will ever pair with, and they
+    // then corrupt every later reading. Measured 15,102 / 115,087 / 185,797 tok/s against a
+    // client-measured 326 / ~1,900 / 17,597.
+    //
+    // The ratio of totals cannot drift that way: an unpaired request perturbs it by its own
+    // share and nothing accumulates. It moves slowly, which is honest — it is an average over
+    // the server's lifetime, not a live rate.
+    if (ttftSum != null && ttftSum > 0 && promptTokens != null && promptTokens > 0) {
+      this.prefillTpsLifetime = Math.max(0, Math.round((promptTokens / ttftSum) * 100) / 100);
+    }
+    this._vllmPrimed = true;
+
     const e2eHist = this._parseVllmHistogram(txt, "vllm:e2e_request_latency_seconds");
     const e2eP95 = this._histogramQuantile(e2eHist.buckets, e2eHist.total, 0.95);
     this.e2eP95Seconds = e2eP95 == null ? null : Math.round(e2eP95 * 1000) / 1000;
@@ -1541,6 +1584,7 @@ export class LlmProbe {
       slotsTotal: this.slotsTotal,
       generationTps: this.generationTps,
       prefillTps: this.prefillTps,
+      prefillTpsLifetime: this.prefillTpsLifetime,
       cachedPrefillTps: this.cachedPrefillTps,
       uncachedPrefillTps: this.uncachedPrefillTps,
       totalOutputTokens: this.totalOutputTokens,
@@ -1571,6 +1615,7 @@ export class LlmProbe {
       slotsTotal: 0,
       generationTps: 0,
       prefillTps: 0,
+      prefillTpsLifetime: null,
       cachedPrefillTps: null,
       uncachedPrefillTps: null,
       totalOutputTokens: 0,

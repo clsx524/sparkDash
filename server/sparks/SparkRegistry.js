@@ -629,7 +629,42 @@ export class SparkRegistry {
       disabledDevices: Array.isArray(config.disabledDevices) ? config.disabledDevices : [],
       disabledInterfaces: Array.isArray(config.disabledInterfaces) ? config.disabledInterfaces : [],
       storagePollDisabled: Boolean(config.storagePollDisabled),
+      /**
+       * Model Registry integration. Defaults to the standard Hugging Face
+       * cache directory (matches every Spark's existing `hf_home` ansible
+       * group_var and the `hf` CLI's own default) — not a fleet-specific
+       * guess, just the same convention this fleet, and `hf`/`transformers`
+       * generally, already use. Still fully operator-editable per host.
+       */
+      modelFolder: this._normalizeModelFolder(config.modelFolder),
+      /**
+       * Opt-in: this host can be selected as another host's SSH ProxyJump
+       * relay when that host has no direct path to the Model Registry host.
+       */
+      canActAsModelRelay: Boolean(config.canActAsModelRelay),
+      /**
+       * How this host reaches the Model Registry host for model sync:
+       * direct (default) or tunneled via another host's canActAsModelRelay.
+       * relayHostId is only meaningful when mode is "relay". Meaningless
+       * (and hidden in the UI) when this host itself is the Model Registry
+       * host — there is nothing to route to, it already holds the files.
+       */
+      modelSyncRoute: this._normalizeModelSyncRoute(config.modelSyncRoute, config.id),
     };
+  }
+
+  /** Trim optional model storage folder path; empty falls back to the standard HF cache dir. */
+  _normalizeModelFolder(value) {
+    const trimmed = typeof value === "string" ? value.trim() : "";
+    return trimmed || "~/.cache/huggingface";
+  }
+
+  /** Normalize the model-sync route. Unknown/missing shape falls back to direct. */
+  _normalizeModelSyncRoute(value, selfId) {
+    const mode = value?.mode === "relay" ? "relay" : "direct";
+    let relayHostId = typeof value?.relayHostId === "string" ? value.relayHostId.trim() : "";
+    if (mode !== "relay" || !relayHostId || relayHostId === selfId) relayHostId = null;
+    return { mode: relayHostId ? "relay" : "direct", relayHostId };
   }
 
   /** Normalize ComfyUI port to 1–65535 (default 8188). */

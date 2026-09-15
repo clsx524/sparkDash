@@ -444,6 +444,7 @@ export function LlmPanel({
 
   const generationTps = llm?.generationTps ?? 0;
   const prefillTps = llm?.prefillTps ?? 0;
+  const prefillTpsLifetime = llm?.prefillTpsLifetime ?? null;
   const showPrefillSplit = llm?.cachedPrefillTps != null || llm?.uncachedPrefillTps != null;
   const cachedPrefillTps = llm?.cachedPrefillTps ?? 0;
   const uncachedPrefillTps = llm?.uncachedPrefillTps ?? 0;
@@ -731,6 +732,17 @@ export function LlmPanel({
               </div>
             </div>
           </div>
+          {prefillTpsLifetime != null && (
+            <div
+              className="flex items-center justify-between"
+              title="Lifetime average: total prompt tokens admitted over total seconds spent reaching first token, measured from vLLM's own counters. Moves slowly and never spikes — use this to sanity-check the live number above if it looks off during a long or bursty prefill."
+            >
+              <span className="text-xs text-muted">Prefill tok/s (avg)</span>
+              <span className="font-tabular text-sm font-semibold text-muted">
+                {prefillTpsLifetime.toFixed(1)}
+              </span>
+            </div>
+          )}
           {showPrefillSplit && (
             <>
               <div

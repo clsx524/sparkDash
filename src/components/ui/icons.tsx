@@ -178,11 +178,27 @@ export function MemoryIcon({ className = "" }: { className?: string }) {
   );
 }
 
-export function BoltIcon({ className = "" }: { className?: string }) {
+/**
+ * Aetos eagle — the SparkDash brand mark, replacing the original lightning bolt.
+ *
+ * This is the actual Aetos artwork scaled down, not a redrawn approximation: a hand-traced
+ * silhouette lost the layered feathers, the hooked head and the tail and read as a thick V at
+ * pill size. The source is served from public/aetos-eagle.png — square, transparent, 96px, so
+ * it stays sharp at up to 3x device pixel ratio in an ~18px slot and doubles as the favicon.
+ *
+ * An <img> rather than an inline SVG because the mark carries its own gold gradient and
+ * shading. It therefore does NOT inherit currentColor — pass sizing classes only. That is
+ * fine here: the pill is dark in every theme, so the mark is gold throughout.
+ */
+export function EagleIcon({ className = "" }: { className?: string }) {
   return (
-    <svg {...baseProps(className)}>
-      <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" />
-    </svg>
+    <img
+      src="/aetos-eagle.png"
+      alt=""
+      aria-hidden={true}
+      draggable={false}
+      className={className}
+    />
   );
 }
 
@@ -190,6 +206,16 @@ export function RotateIcon({ className = "" }: { className?: string }) {
   return (
     <svg {...baseProps(className)}>
       <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2" />
+    </svg>
+  );
+}
+
+/** Console window with a prompt caret — used for the SSH shell launch actions. */
+export function TerminalIcon({ className = "" }: { className?: string }) {
+  return (
+    <svg {...baseProps(className)}>
+      <rect x="2" y="4" width="20" height="16" rx="2" />
+      <path d="M6 9l3 3-3 3M12.5 15H17" />
     </svg>
   );
 }
@@ -250,6 +276,17 @@ export function CompactIcon({ className = "" }: { className?: string }) {
       <line x1="4" y1="9" x2="20" y2="9" />
       <line x1="4" y1="12" x2="20" y2="12" />
       <line x1="4" y1="15" x2="20" y2="15" />
+    </svg>
+  );
+}
+
+/** 3D package/box — used for the Model Registry (weights storage) trigger. */
+export function BoxIcon({ className = "" }: { className?: string }) {
+  return (
+    <svg {...baseProps(className)}>
+      <path d="M21 8l-9-5-9 5 9 5 9-5z" />
+      <path d="M3 8v8l9 5 9-5V8" />
+      <path d="M12 13v8" />
     </svg>
   );
 }

@@ -1,0 +1,88 @@
+[
+  {
+    "id": "deepseek-dual",
+    "label": "DeepSeek-V4-Flash-0731 (DSpark, TP2)",
+    "group": "dual-text-gen",
+    "nodes": [
+      {
+        "role": "head",
+        "workdir": "~/DeepSeek-v4-Flash-DSpark-2x-DGX-Spark",
+        "startCmd": "./start-deepseek-v4-flash-dspark.sh",
+        "stopCmd": "./stop-deepseek-v4-flash-dspark.sh",
+        "statusCmd": "./status-deepseek-v4-flash-dspark.sh",
+        "runningPattern": "Up \\d",
+        "containerName": "deepseek-v4-flash-vllm-dspark-1",
+        "llmPort": 8888
+      }
+    ]
+  },
+  {
+    "id": "glm53-exl3",
+    "label": "GLM-5.3-Flash EXL3 (TP2)",
+    "group": "dual-text-gen",
+    "nodes": [
+      {
+        "role": "head",
+        "workdir": "~/GLM-5.3-Flash-EXL3-2x-DGX-Sparks",
+        "startCmd": "./start.sh",
+        "stopCmd": "./stop.sh",
+        "statusCmd": "./start.sh status",
+        "runningPattern": "Up \\d",
+        "containerName": "glm53-exl3-head",
+        "llmPort": 8888
+      }
+    ]
+  },
+  {
+    "id": "deepseek-v41-flash-exl3",
+    "label": "DeepSeek-v4.1-Flash EXL3 (TP2)",
+    "group": "dual-text-gen",
+    "nodes": [
+      {
+        "role": "head",
+        "workdir": "~/DeepSeek-v4.1-Flash-EXL3-2x-DGX-Sparks",
+        "startCmd": "./start.sh",
+        "stopCmd": "./stop.sh",
+        "statusCmd": "./start.sh status",
+        "runningPattern": "Up \\d",
+        "containerName": "dsv41-exl3-head",
+        "llmPort": 8888,
+        "modelIds": ["DeepSeek-V4.1-Flash-EXL3-2.9bpw", "DeepSeek-V4.1-Flash"]
+      }
+    ]
+  },
+  {
+    "id": "qwen38-flash-next",
+    "label": "Qwen3.8-Flash-Next (TP2+EP+MTP3)",
+    "group": "dual-text-gen",
+    "nodes": [
+      {
+        "role": "head",
+        "workdir": "~/Qwen3.8-Flash-Next-Dual-DGX-Sparks",
+        "startCmd": "./start.sh --launch",
+        "stopCmd": "./stop.sh",
+        "statusCmd": "docker inspect --format '{{.State.Status}}' vllm-fn",
+        "runningPattern": "running",
+        "containerName": "vllm-fn",
+        "llmPort": 8888
+      }
+    ]
+  },
+  {
+    "id": "minimax-h3",
+    "label": "MiniMax H3 (single-node, worker)",
+    "group": "single-node",
+    "nodes": [
+      {
+        "role": "worker",
+        "workdir": "~/MiniMax-H3-DGX-Spark",
+        "startCmd": "make up",
+        "stopCmd": "make down",
+        "statusCmd": "make status",
+        "runningPattern": "HTTP 200",
+        "containerName": "minimax-h3-fl2va",
+        "llmPort": 8000
+      }
+    ]
+  }
+]

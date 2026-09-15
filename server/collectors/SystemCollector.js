@@ -3,6 +3,7 @@ import path from "path";
 import { HOST_PATHS, GPU_MEMORY_JSON_PATH, DGX_SPARK, HARDWARE_DEFAULTS, POLL_INTERVAL_NVERR } from "../config.js";
 import { normalizeMac, WOL_INTERFACE } from "../wol.js";
 import { sshExec } from "./ssh.js";
+import { parseRdmaPorts, rdmaProbeCommand, toRdmaPortMetrics } from "./rdma.js";
 
 const NVERR_JOURNAL_CMD =
   'journalctl -k --no-pager -q --grep=NV_ERR_NO_MEMORY 2>/dev/null | grep -c NV_ERR_NO_MEMORY || true';
@@ -46,6 +47,8 @@ export class SystemCollector {
 
     // Rate-tracking baselines
     this.lastNetworkStats = new Map();
+    /** Previous RDMA counter sample per "hca/port" — rates need a delta, not a snapshot. */
+    this.lastRdmaStats = new Map();
     this.lastCpuStat = null;
     this._cpuCollectionSequence = 0;
     /** Last computed CPU usage percentage (0-100) — used by GPU system-draw estimate. */
@@ -267,10 +270,19 @@ export class SystemCollector {
       const memOut = await this._nvidiaSmi(
         "--query-gpu=memory.used,memory.total --format=csv,noheader,nounits"
       );
-      const line = memOut.trim().split("\n").filter(Boolean)[0] || "";
-      const parts = line.split(",").map((s) => s.trim());
-      used = this._parseSmiNumber(parts[0]);
-      total = this._parseSmiNumber(parts[1]);
+      // Sum across every GPU line — a multi-GPU host's total VRAM is the sum
+      // of its cards, not just the first one.
+      let sawAny = false;
+      let sumUsed = 0;
+      let sumTotal = 0;
+      for (const line of memOut.trim().split("\n").filter(Boolean)) {
+        const parts = line.split(",").map((s) => s.trim());
+        const lineUsed = this._parseSmiNumber(parts[0]);
+        const lineTotal = this._parseSmiNumber(parts[1]);
+        if (lineUsed != null) { sumUsed += lineUsed; sawAny = true; }
+        if (lineTotal != null) { sumTotal += lineTotal; sawAny = true; }
+      }
+      if (sawAny) { used = sumUsed; total = sumTotal; }
     } catch {
       /* memory.* often N/A on GB10 */
     }
@@ -369,9 +381,19 @@ export class SystemCollector {
     return Number.isFinite(n) ? n : null;
   }
 
+  /**
+   * Parses every GPU line, not just the first — a `kind: "host"` unit can have
+   * multiple discrete GPUs (e.g. a workstation with 3 cards), and taking only
+   * lines[0] silently dropped every card after the first from temperature,
+   * usage, power, and throttle reporting. Aggregates into the single-GPU
+   * shape the UI renders: temperature/usage/throttle take the worst
+   * (max/most-active) card since that is what is actually worth alerting on;
+   * power draw and limit sum across cards since total system power really is
+   * additive.
+   */
   _parseGpuLine(output) {
     const lines = output.trim().split("\n").filter(Boolean);
-    if (!lines[0]) {
+    if (!lines.length) {
       return {
         temperature: 0,
         usage: 0,
@@ -380,29 +402,60 @@ export class SystemCollector {
         throttle: this._defaultThrottle(),
       };
     }
-    const parts = lines[0].split(",").map((s) => s.trim());
-    const temperature = parseFloat(parts[0]) || 0;
-    const usage = parseFloat(parts[1]) || 0;
-    const powerDraw = parseFloat(parts[2]) || 0;
-    const powerLimit = this._parseSmiNumber(parts[3]) ?? 120;
-    const smClockMHz = this._parseSmiNumber(parts[4]);
-    const smClockMaxMHz = this._parseSmiNumber(parts[5]);
-    const hwThermal = this._parseSmiActive(parts[6]);
-    const swThermal = this._parseSmiActive(parts[7]);
-    const hwSlowdown = this._parseSmiActive(parts[8]);
-    const powerCap = this._parseSmiActive(parts[9]);
+    let temperature = 0;
+    let usage = 0;
+    let powerDraw = 0;
+    let powerLimit = 0;
+    let hwThermalAny = false;
+    let swThermalAny = false;
+    let hwSlowdownAny = false;
+    let powerCapAny = false;
+    let worstSmClockMHz = null;
+    let worstSmClockMaxMHz = null;
+    let worstSmClockPct = Infinity;
+    for (const line of lines) {
+      const parts = line.split(",").map((s) => s.trim());
+      const t = parseFloat(parts[0]) || 0;
+      const u = parseFloat(parts[1]) || 0;
+      const p = parseFloat(parts[2]) || 0;
+      const limit = this._parseSmiNumber(parts[3]) ?? 120;
+      const smClockMHz = this._parseSmiNumber(parts[4]);
+      const smClockMaxMHz = this._parseSmiNumber(parts[5]);
+      const hwThermal = this._parseSmiActive(parts[6]);
+      const swThermal = this._parseSmiActive(parts[7]);
+      const hwSlowdown = this._parseSmiActive(parts[8]);
+      const powerCap = this._parseSmiActive(parts[9]);
+      temperature = Math.max(temperature, t);
+      usage = Math.max(usage, u);
+      powerDraw += p;
+      powerLimit += limit;
+      hwThermalAny = hwThermalAny || hwThermal;
+      swThermalAny = swThermalAny || swThermal;
+      hwSlowdownAny = hwSlowdownAny || hwSlowdown;
+      powerCapAny = powerCapAny || powerCap;
+      // Track the card with the lowest clock-vs-max ratio — the one closest to
+      // being throttled — for the reported sm clock percentage.
+      if (smClockMHz != null && smClockMaxMHz != null && smClockMaxMHz > 0) {
+        const pct = smClockMHz / smClockMaxMHz;
+        if (pct < worstSmClockPct) {
+          worstSmClockPct = pct;
+          worstSmClockMHz = smClockMHz;
+          worstSmClockMaxMHz = smClockMaxMHz;
+        }
+      }
+    }
     return {
       temperature,
       usage,
       powerDraw,
       powerLimit,
       throttle: this._buildThrottle({
-        hwThermal,
-        swThermal,
-        hwSlowdown,
-        powerCap,
-        smClockMHz,
-        smClockMaxMHz,
+        hwThermal: hwThermalAny,
+        swThermal: swThermalAny,
+        hwSlowdown: hwSlowdownAny,
+        powerCap: powerCapAny,
+        smClockMHz: worstSmClockMHz,
+        smClockMaxMHz: worstSmClockMaxMHz,
       }),
     };
   }
@@ -1023,13 +1076,20 @@ export class SystemCollector {
 
       const gpu = this._parseGpuLine(gpuOut);
 
-      // Parse memory.used / memory.total from nvidia-smi (may be [N/A] on GB10)
-      let used = null;
-      let total = null;
-      const memLine = memFields.split("\n").filter(Boolean)[0] || "";
-      const memParts = memLine.split(",").map((s) => s.trim());
-      used = this._parseSmiNumber(memParts[0]);
-      total = this._parseSmiNumber(memParts[1]);
+      // Parse memory.used / memory.total from nvidia-smi (may be [N/A] on GB10).
+      // Sums across every GPU line — a multi-GPU host's total VRAM is the sum
+      // of its cards, not just the first one.
+      let used = 0;
+      let total = 0;
+      let sawAny = false;
+      for (const line of memFields.split("\n").filter(Boolean)) {
+        const memParts = line.split(",").map((s) => s.trim());
+        const lineUsed = this._parseSmiNumber(memParts[0]);
+        const lineTotal = this._parseSmiNumber(memParts[1]);
+        if (lineUsed != null) { used += lineUsed; sawAny = true; }
+        if (lineTotal != null) { total += lineTotal; sawAny = true; }
+      }
+      if (!sawAny) { used = null; total = null; }
 
       const apps = this._parseComputeApps(computeOut);
       this.nvidiaComputeAppsCache.clear();
@@ -1082,7 +1142,11 @@ export class SystemCollector {
       };
     } catch (err) {
       console.error(`[SystemCollector] Remote GPU error for ${this.spark.id}:`, err.message);
-      return this._defaultGpu();
+      // Rethrow rather than returning zeroed defaults. A failed SSH poll means we learned
+      // nothing this cycle, not that the hardware reads zero; SparkMonitor keeps the last
+      // good value and ages it via metricFreshness. Returning defaults here is what made a
+      // single timed-out probe look like a dead node.
+      throw err;
     }
   }
 
@@ -1147,7 +1211,11 @@ export class SystemCollector {
       };
     } catch (err) {
       console.error(`[SystemCollector] Remote CPU error for ${this.spark.id}:`, err.message);
-      return this._defaultCpu();
+      // Rethrow rather than returning zeroed defaults. A failed SSH poll means we learned
+      // nothing this cycle, not that the hardware reads zero; SparkMonitor keeps the last
+      // good value and ages it via metricFreshness. Returning defaults here is what made a
+      // single timed-out probe look like a dead node.
+      throw err;
     }
   }
 
@@ -1185,7 +1253,11 @@ export class SystemCollector {
       };
     } catch (err) {
       console.error(`[SystemCollector] Remote RAM error for ${this.spark.id}:`, err.message);
-      return this._defaultRam();
+      // Rethrow rather than returning zeroed defaults. A failed SSH poll means we learned
+      // nothing this cycle, not that the hardware reads zero; SparkMonitor keeps the last
+      // good value and ages it via metricFreshness. Returning defaults here is what made a
+      // single timed-out probe look like a dead node.
+      throw err;
     }
   }
 
@@ -1239,7 +1311,11 @@ export class SystemCollector {
       return disks;
     } catch (err) {
       console.error(`[SystemCollector] Remote Storage error for ${this.spark.id}:`, err.message);
-      return [];
+      // Rethrow rather than returning zeroed defaults. A failed SSH poll means we learned
+      // nothing this cycle, not that the hardware reads zero; SparkMonitor keeps the last
+      // good value and ages it via metricFreshness. Returning defaults here is what made a
+      // single timed-out probe look like a dead node.
+      throw err;
     }
   }
 
@@ -1258,6 +1334,11 @@ export class SystemCollector {
         // WoL MAC for the primary LAN NIC on DGX Spark
         `cat /sys/class/net/${WOL_INTERFACE}/address 2>/dev/null || true`,
         "echo '---'",
+        // RDMA/RoCE port state + hardware counters. Appended to this existing command rather
+        // than polled separately, so no additional SSH session per node is introduced. Hosts
+        // without RDMA emit nothing, which parses to an empty list.
+        rdmaProbeCommand(),
+        "echo '---'",
         // Link speed for every interface, not just the primary one: which
         // interface is primary only falls out of the route table above, and
         // fetching that one afterwards cost a second SSH login per poll.
@@ -1272,7 +1353,8 @@ export class SystemCollector {
       const ipOut = sections[2]?.trim() || "";
       const operstateOut = sections[3]?.trim() || "";
       const wolMac = normalizeMac(sections[4]?.trim() || "");
-      const speedOut = sections[5]?.trim() || "";
+      const rdmaOut = sections[5]?.trim() || "";
+      const speedOut = sections[6]?.trim() || "";
 
       // Parse link speed lines ("enP7s7:10000"); blank values stay unknown.
       const speedMap = new Map();
@@ -1353,10 +1435,47 @@ export class SystemCollector {
 
       const linkSpeedMbps = (primaryInterface && speedMap.get(primaryInterface)) || null;
 
-      return { primaryInterface, linkSpeedMbps, interfaces: tagged, wolMac };
+      const rdma = this._buildRdmaMetrics(rdmaOut, ipMap, now);
+
+      return { primaryInterface, linkSpeedMbps, interfaces: tagged, wolMac, rdma };
     } catch (err) {
       console.error(`[SystemCollector] Remote Network error for ${this.spark.id}:`, err.message);
-      return this._defaultNetwork();
+      // Rethrow rather than returning zeroed defaults. A failed SSH poll means we learned
+      // nothing this cycle, not that the hardware reads zero; SparkMonitor keeps the last
+      // good value and ages it via metricFreshness. Returning defaults here is what made a
+      // single timed-out probe look like a dead node.
+      throw err;
+    }
+  }
+
+  /**
+   * Turn the RDMA sysfs dump into API metrics, deriving rates against the previous sample.
+   *
+   * Rates come from the HCA's own counters, not netdev — RDMA bypasses the kernel stack, so
+   * netdev bytes stay near zero while the link is busy. Per-port previous samples live in
+   * `lastRdmaStats`, keyed by device and port so a counter reset on one port cannot corrupt
+   * another's rate.
+   */
+  _buildRdmaMetrics(rdmaOut, ipMap, now) {
+    try {
+      const raw = parseRdmaPorts(rdmaOut);
+      if (raw.length === 0) return [];
+      return raw.map((p) => {
+        const key = `${p.hca}/${p.port}`;
+        const ip = p.netdev ? ipMap.get(p.netdev) ?? null : null;
+        const metrics = toRdmaPortMetrics(p, this.lastRdmaStats.get(key), now, ip);
+        if (metrics.txBytes !== null || metrics.rxBytes !== null) {
+          this.lastRdmaStats.set(key, {
+            txBytes: metrics.txBytes,
+            rxBytes: metrics.rxBytes,
+            time: now,
+          });
+        }
+        return metrics;
+      });
+    } catch {
+      // RDMA telemetry is additive; never let it break ordinary network collection.
+      return [];
     }
   }
 
@@ -1410,7 +1529,11 @@ export class SystemCollector {
       };
     } catch (err) {
       console.error(`[SystemCollector] Remote Unified Memory error for ${this.spark.id}:`, err.message);
-      return this._defaultUnifiedMemory();
+      // Rethrow rather than returning zeroed defaults. A failed SSH poll means we learned
+      // nothing this cycle, not that the hardware reads zero; SparkMonitor keeps the last
+      // good value and ages it via metricFreshness. Returning defaults here is what made a
+      // single timed-out probe look like a dead node.
+      throw err;
     }
   }
 
@@ -1496,9 +1619,14 @@ export class SystemCollector {
         coresParsed = Number.isInteger(n) && n > 0 ? n : null;
       }
 
-      const smiLine = smiOut.split("\n").find(Boolean) || "";
-      const smiParts = smiLine.split(",").map((s) => s.trim());
-      const gpuChip = smiParts[0] || null;
+      const smiLines = smiOut.split("\n").map((l) => l.trim()).filter(Boolean);
+      const smiParts = (smiLines[0] || "").split(",").map((s) => s.trim());
+      // List every distinct GPU model present (e.g. "RTX 3090 + RTX 3080 Ti + RTX 3080")
+      // rather than only the first card, so a multi-GPU host's header is not misleading.
+      const gpuModels = [
+        ...new Set(smiLines.map((l) => l.split(",")[0]?.trim()).filter(Boolean)),
+      ];
+      const gpuChip = gpuModels.length > 1 ? gpuModels.join(" + ") : gpuModels[0] || null;
       const cudaDriver = smiParts[1] || null;
 
       const modelMatch = cpuinfo.match(/model name\s*:\s*(.+)/i);
@@ -1648,7 +1776,7 @@ export class SystemCollector {
   }
 
   _defaultNetwork() {
-    return { primaryInterface: null, linkSpeedMbps: null, interfaces: [], wolMac: null };
+    return { primaryInterface: null, linkSpeedMbps: null, interfaces: [], wolMac: null, rdma: [] };
   }
 
   _defaultUnifiedMemory() {
