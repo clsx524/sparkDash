@@ -147,3 +147,30 @@ test("syncModelToSpark: a non-registry target with no model folder gets an actio
     /spark2 has no model folder configured/
   );
 });
+
+// syncModelToSpark: a non-registry target that already has a verified-
+// correct copy must skip the registry host entirely, including its
+// reachability preflight (hit live 2026-09-15: spark1 already had
+// deepseek-v41-flash-exl3's weights correct, but activation failed anyway
+// because the preflight ran unconditionally before this fix). Exercised
+// with a stub verifyFilesOnHost — if the short-circuit didn't fire, this
+// would fall into modelSync.js's real sshExecDirect against a targetSpark
+// with no .ssh config and fail a different way.
+test("syncModelToSpark: non-registry target already verified — skips the registry host preflight", async () => {
+  let verifyCalledWith = null;
+  const modelRegistry = makeModelRegistry({
+    verifyFilesOnHost: async (host, dir, manifest) => {
+      verifyCalledWith = { hostId: host.id, dir, manifest };
+      return [];
+    },
+  });
+  const model = { subfolder: "llama-4", manifest: [{ path: "model.safetensors", sha256: "abc" }] };
+  const targetSpark = { id: "spark1", modelFolder: "/mnt/models" };
+  const result = await syncModelToSpark(modelRegistry, sparkRegistryStub, model, targetSpark);
+  assert.deepEqual(result, { destDir: "/mnt/models/llama-4", skipped: true });
+  assert.deepEqual(verifyCalledWith, {
+    hostId: "spark1",
+    dir: "/mnt/models/llama-4",
+    manifest: model.manifest,
+  });
+});
