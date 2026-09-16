@@ -47,6 +47,26 @@ const GROUP_LABEL: Record<string, string> = {
   "single-node": "Single-node (other Spark idle)",
 };
 
+/**
+ * The already-active recipe's button is never disabled or dead-ended at "Active" — the
+ * backend's switchRecipe() already treats same-target activation as a full
+ * stop-clear-resync-restart cycle, not a no-op (see recipeActions.js's doc comment), so the
+ * button just needs to expose that: "Refresh" instead of "Activate" once a recipe is already
+ * live, useful when the recipe's own files/pin changed and the running instance won't pick
+ * that up on its own. Only an in-flight switch (any recipe) disables it, matching the single
+ * `_switchInFlight` lock the backend enforces.
+ */
+export function activateButtonState(
+  isActive: boolean,
+  switchInFlight: boolean,
+  busy: boolean
+): { disabled: boolean; label: string } {
+  return {
+    disabled: switchInFlight,
+    label: busy ? "Switching…" : isActive ? "Refresh" : "Activate",
+  };
+}
+
 export function RecipesDialog({ open, onClose, recipeSwitch }: RecipesDialogProps) {
   const [data, setData] = useState<RecipeListResponse | null>(null);
   const [loading, setLoading] = useState(false);
@@ -172,6 +192,7 @@ export function RecipesDialog({ open, onClose, recipeSwitch }: RecipesDialogProp
             {data.recipes.map((recipe) => {
               const isActive = data.activeId === recipe.id;
               const busy = switchInFlight && activatingId === recipe.id;
+              const { disabled, label } = activateButtonState(isActive, switchInFlight, busy);
               return (
                 <div
                   key={recipe.id}
@@ -203,11 +224,12 @@ export function RecipesDialog({ open, onClose, recipeSwitch }: RecipesDialogProp
                     </div>
                     <button
                       type="button"
-                      disabled={isActive || switchInFlight}
+                      disabled={disabled}
                       onClick={() => handleActivate(recipe)}
+                      title={isActive ? "Stop, resync, and restart this recipe fresh — picks up any recipe/config changes the running instance hasn't" : undefined}
                       className="shrink-0 rounded bg-accent px-3 py-1.5 text-xs font-medium text-white hover:bg-accent-hover disabled:opacity-50"
                     >
-                      {busy ? "Switching…" : isActive ? "Active" : "Activate"}
+                      {label}
                     </button>
                   </div>
                 </div>
