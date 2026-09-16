@@ -11,6 +11,16 @@
  * failure surfaces as a clear, actionable error rather than a bare rsync
  * failure.
  *
+ * If the target already has a verified-correct copy (manifest checksums all
+ * match), the sync is skipped entirely — including the registry-host
+ * reachability preflight below. Registry reachability should never gate a
+ * sync that has nothing left to do; hit live 2026-09-15 when spark1 had
+ * deepseek-v41-flash-exl3's weights already present and correct but the
+ * registry host (beast) was temporarily unreachable, and recipe activation
+ * failed on the preflight alone. Only trustworthy with a manifest to check
+ * against — no manifest means "already there" can't be told apart from
+ * "silently incomplete", so that case still requires a real sync.
+ *
  * The sync command always runs FROM the target host, pulling FROM the
  * registry (optionally tunneled through a relay via SSH ProxyJump) — never
  * the reverse. This is a hard-won, fleet-proven constraint: some networks
@@ -108,7 +118,7 @@ async function listSyncFiles(host, dir) {
  * @param {object} model - tracked model entry (id, subfolder, manifest, ...)
  * @param {object} targetSpark - full SparkConfig (with secrets) of the host to sync onto
  * @param {{timeoutMs?: number}} [options]
- * @returns {Promise<{destDir: string}>}
+ * @returns {Promise<{destDir: string, skipped?: boolean}>}
  */
 export async function syncModelToSpark(modelRegistry, sparkRegistry, model, targetSpark, options = {}) {
   const registryHost = modelRegistry.registryHost();
@@ -138,6 +148,16 @@ export async function syncModelToSpark(modelRegistry, sparkRegistry, model, targ
 
   const sourceDir = joinRemotePath(registryConfig.directory, model.subfolder);
   const destDir = joinRemotePath(targetSpark.modelFolder, model.subfolder);
+
+  // Already correct on the target? Skip the registry host entirely — see
+  // the module doc comment above for why this must come before the
+  // reachability preflight, not after it.
+  if (Array.isArray(model.manifest) && model.manifest.length > 0) {
+    const mismatches = await modelRegistry.verifyFilesOnHost(targetSpark, destDir, model.manifest);
+    if (mismatches.length === 0) {
+      return { destDir, skipped: true };
+    }
+  }
 
   const route = targetSpark.modelSyncRoute || { mode: "direct" };
   let proxyJumpArg = "";
