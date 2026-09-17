@@ -9,6 +9,7 @@ import { SparkRegistry } from "./sparks/SparkRegistry.js";
 import { SparkMonitor } from "./sparks/SparkMonitor.js";
 import { sshExec } from "./collectors/ssh.js";
 import { comfyCancelJob } from "./collectors/comfyActions.js";
+import { formatPrometheusMetrics } from "./collectors/metricsExport.js";
 import {
   validateSparkTarget,
   createRateLimiter,
@@ -335,6 +336,16 @@ app.use(createAuthMiddleware());
 
 app.get("/api/health", (_req, res) => {
   res.json(inspectHealth(process.env.BIND_HOST || "127.0.0.1"));
+});
+
+/**
+ * Prometheus scrape target. Formats whatever orderedSnapshots() already has
+ * cached from the normal 2s poll loop -- never triggers a fresh collection,
+ * so a scrape is cheap and independent of Prometheus's own scrape_interval.
+ */
+app.get("/metrics", (_req, res) => {
+  res.set("Content-Type", "text/plain; version=0.0.4; charset=utf-8");
+  res.send(formatPrometheusMetrics(orderedSnapshots()));
 });
 
 function clientKey(req) {
