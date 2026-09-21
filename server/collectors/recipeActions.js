@@ -70,12 +70,16 @@ async function runNodeCommand(recipeRegistry, node, cmd, timeoutMs) {
 
 const CLEAR_CONTAINERS_TIMEOUT_MS = 30_000;
 /** Containers that persist across every recipe switch — never touched by the sweep below.
- *  portainer_agent is the fleet's own persistent infrastructure. The rest are kernel-nfsd
- *  exporters (DSpark, deepseek-v41-flash-exl3, and any future recipe using the same
- *  "share weights over NFSv4 instead of copying them onto the worker" pattern) — every one
- *  of those recipes' own start scripts already prefers reusing a live exporter over
- *  rebuilding it (nfs_ensure_server()'s nfs_live_container() check), specifically because a
- *  privileged --network host container holding kernel-level NFS state (rpc.nfsd,
+ *  portainer_agent is the fleet's own persistent infrastructure. qwen3-embedding (spark1)
+ *  and semif (spark2) are standalone always-on services, independent of whichever recipe
+ *  is active — neither is a recipe container at all (no recipes.json entry, no start.sh),
+ *  they were just getting swept as unrecognized cruft on every recipe switch (confirmed
+ *  live 2026-09-20: both removed the moment GLM was reactivated). The rest are
+ *  kernel-nfsd exporters (DSpark, deepseek-v41-flash-exl3, and any future recipe using the
+ *  same "share weights over NFSv4 instead of copying them onto the worker" pattern) —
+ *  every one of those recipes' own start scripts already prefers reusing a live exporter
+ *  over rebuilding it (nfs_ensure_server()'s nfs_live_container() check), specifically
+ *  because a privileged --network host container holding kernel-level NFS state (rpc.nfsd,
  *  /proc/fs/nfsd) can take Docker's kill well past its wait timeout even though it does
  *  genuinely exit — confirmed live 2026-09-14: every deepseek-v41-flash-exl3 retry hit
  *  "could not kill container: tried to kill container, but did not receive an exit event"
@@ -84,8 +88,10 @@ const CLEAR_CONTAINERS_TIMEOUT_MS = 30_000;
  *  one kernel nfsd can ever be live host-wide regardless of which named container started
  *  it ("a second nfsd will not start" — see nfs-share.sh), so leaving a stray one running
  *  across a recipe switch can never itself conflict with whatever starts next. */
-const PERSISTENT_CONTAINER_NAMES = [
+export const PERSISTENT_CONTAINER_NAMES = [
   "portainer_agent",
+  "qwen3-embedding",
+  "semif",
   "vllm-fn-nfs",
   "glm53-nfs",
   "dsv41-nfs",
