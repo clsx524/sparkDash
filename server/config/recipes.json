@@ -24,7 +24,7 @@
       {
         "role": "head",
         "workdir": "~/GLM-5.3-Flash-EXL3-2x-DGX-Sparks",
-        "startCmd": "./start.sh",
+        "startCmd": "ABLIT=1 ./start.sh",
         "stopCmd": "./stop.sh",
         "statusCmd": "./start.sh status",
         "runningPattern": "Up \\d",
