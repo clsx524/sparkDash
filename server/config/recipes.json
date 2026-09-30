@@ -34,6 +34,23 @@
     ]
   },
   {
+    "id": "glm53-tensorfold",
+    "label": "GLM-5.3-Flash TensorFold (TP2)",
+    "group": "dual-text-gen",
+    "nodes": [
+      {
+        "role": "head",
+        "workdir": "~/glm53-tensorfold-spark",
+        "startCmd": "scripts/serve.sh start",
+        "stopCmd": "scripts/serve.sh stop",
+        "statusCmd": "scripts/serve.sh status",
+        "runningPattern": "Up \\d",
+        "containerName": "glm53-tf-r0",
+        "llmPort": 8888
+      }
+    ]
+  },
+  {
     "id": "deepseek-v41-flash-exl3",
     "label": "DeepSeek-v4.1-Flash EXL3 (TP2)",
     "group": "dual-text-gen",
