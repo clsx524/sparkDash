@@ -527,19 +527,57 @@ export class LlmProbe {
       }
     }
 
-    // TensorFold: no Prometheus. /health carries cumulative token totals when the
-    // server publishes them; without them tok/s stays 0 rather than guessing.
+    // TensorFold: upstream's CUDA /health is {ok:true}; the MiaAI-derived server
+    // (patches/0150, glm53-tensorfold-spark) adds cumulative `tensorfold_*`
+    // counters on GET /metrics and no token totals on /health. Use /health's
+    // counters when a server publishes them (MLX / older builds), else fold
+    // /metrics into the same contract. Without either, tok/s stays 0 rather
+    // than guessing.
     if (this.backendType === "tensorfold") {
+      let health = null;
       try {
         const healthRes = await this._fetch(`${this.baseUrl}/health`);
-        if (healthRes.ok) {
-          const health = await healthRes.json().catch(() => null);
-          this._applyTensorFoldHealth(health, dtSec);
-        } else {
-          this._applyTensorFoldHealth(null, dtSec);
-        }
+        if (healthRes.ok) health = await healthRes.json().catch(() => null);
       } catch {
-        this._applyTensorFoldHealth(null, dtSec);
+        health = null;
+      }
+      let extra = null;
+      if (!(health && Number.isFinite(Number(health.completion_tokens_total)))) {
+        try {
+          const metricsRes = await this._fetch(`${this.baseUrl}/metrics`);
+          if (metricsRes.ok) extra = this._tensorFoldMetricsToHealth(await metricsRes.text());
+        } catch {
+          extra = null;
+        }
+      }
+      this._applyTensorFoldHealth(extra ? { ...(health ?? {}), ...extra } : health, dtSec);
+      if (extra) {
+        this.requestsRunning = extra.inflight;
+        this.slotsActive = extra.inflight;
+        this.slotsTotal = Math.max(this.slotsTotal || 1, extra.inflight);
+        if (extra.cached_tokens_total != null) this.totalCachedTokens = extra.cached_tokens_total;
+        if (extra.prompt_tokens_total > 0 && extra.cached_tokens_total != null) {
+          this.prefixCacheHitRate = Math.min(1, extra.cached_tokens_total / extra.prompt_tokens_total);
+        }
+        // Counters advance only when a completion finishes, so a per-poll delta
+        // would report a whole reply as one second of decode (a 4 s, ~40 tok/s
+        // reply read as ~186). Rate = tokens / decode seconds of the completions
+        // that finished since the last sample (a per-stream rate). It is shown on
+        // the poll where tokens landed and held while a request is running, and
+        // is 0 when idle. There is no live per-token rate mid-request: the server
+        // only publishes totals at completion.
+        const prev = this._tfRate;
+        this._tfRate = { tokens: extra.completion_tokens_total, seconds: extra.decode_seconds_total, tps: prev?.tps ?? 0 };
+        let landed = false;
+        if (prev && extra.decode_seconds_total != null && prev.seconds != null) {
+          const dTok = extra.completion_tokens_total - prev.tokens;
+          const dSec = extra.decode_seconds_total - prev.seconds;
+          if (dTok > 0 && dSec > 0) {
+            this._tfRate.tps = Math.round((dTok / dSec) * 100) / 100;
+            landed = true;
+          }
+        }
+        this.generationTps = extra.busy || landed ? this._tfRate.tps : 0;
       }
       return this._getSnapshot();
     }
@@ -910,6 +948,36 @@ export class LlmProbe {
     this.lastTokenCounts.output = completion;
     this.totalOutputTokens = completion;
     if (Number.isFinite(prompt)) this.totalPromptTokens = prompt;
+  }
+
+  /**
+   * Fold TensorFold's Prometheus `tensorfold_*` series (GET /metrics) into the
+   * EXL3 /health counter contract that `_applyTensorFoldHealth` consumes.
+   * Counters advance when a completion FINISHES, so tok/s reads as bursts at
+   * request boundaries, not a per-token live rate. Returns null when the text
+   * carries no completion counter (not a TensorFold /metrics body).
+   * @param {string} txt
+   * @returns {{ prompt_tokens_total: number, completion_tokens_total: number, cached_tokens_total: number | null, decode_seconds_total: number | null, inflight: number, busy: boolean } | null}
+   */
+  _tensorFoldMetricsToHealth(txt) {
+    const read = (name) => {
+      const m = new RegExp(`^tensorfold_${name}(?:\\{[^}]*\\})?\\s+([-+0-9.eE]+)\\s*$`, "m").exec(String(txt ?? ""));
+      if (!m) return null;
+      const n = Number(m[1]);
+      return Number.isFinite(n) ? n : null;
+    };
+    const completion = read("completion_tokens_total");
+    if (completion == null) return null;
+    const prompt = read("prompt_tokens_total");
+    const inflight = Math.max(0, Math.round(read("requests_inflight") ?? 0));
+    return {
+      prompt_tokens_total: prompt ?? NaN,
+      completion_tokens_total: completion,
+      cached_tokens_total: read("cached_tokens_total"),
+      decode_seconds_total: read("decode_seconds_total"),
+      inflight,
+      busy: inflight > 0,
+    };
   }
 
   /**
