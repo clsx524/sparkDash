@@ -48,7 +48,7 @@
         "runningPattern": "Up \\d",
         "containerName": "dsv41-tf-r0",
         "llmPort": 8888,
-        "modelIds": ["DeepSeek-V4.1-Flash-EXL3-2.9bpw", "DeepSeek-V4.1-Flash-engram"]
+        "modelIds": ["DeepSeek-V4.1-Flash-EXL3-2.9bpw", "DeepSeek-V4.1-Flash"]
       }
     ]
   },
