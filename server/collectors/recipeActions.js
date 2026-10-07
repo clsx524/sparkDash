@@ -70,11 +70,12 @@ async function runNodeCommand(recipeRegistry, node, cmd, timeoutMs) {
 
 const CLEAR_CONTAINERS_TIMEOUT_MS = 30_000;
 /** Containers that persist across every recipe switch — never touched by the sweep below.
- *  portainer_agent is the fleet's own persistent infrastructure. qwen3-embedding (spark1)
- *  and semif (spark2) are standalone always-on services, independent of whichever recipe
- *  is active — neither is a recipe container at all (no recipes.json entry, no start.sh),
- *  they were just getting swept as unrecognized cruft on every recipe switch (confirmed
- *  live 2026-09-20: both removed the moment GLM was reactivated). The rest are
+ *  portainer_agent is the fleet's own persistent infrastructure. qwen3-embedding (spark1),
+ *  semif (spark2), qwen3-tts (spark1) and qwen3-asr (spark2) are standalone always-on
+ *  services, independent of whichever recipe is active — none is a recipe container
+ *  (no recipes.json entry, no start.sh), so the sweep below treated them as unrecognized
+ *  cruft on every recipe switch (confirmed live 2026-09-20: embedding and semif removed
+ *  the moment GLM was reactivated). The rest are
  *  kernel-nfsd exporters (DSpark, deepseek-v41-flash-exl3, and any future recipe using the
  *  same "share weights over NFSv4 instead of copying them onto the worker" pattern) —
  *  every one of those recipes' own start scripts already prefers reusing a live exporter
@@ -92,6 +93,8 @@ export const PERSISTENT_CONTAINER_NAMES = [
   "portainer_agent",
   "qwen3-embedding",
   "semif",
+  "qwen3-tts",
+  "qwen3-asr",
   "vllm-fn-nfs",
   "glm53-nfs",
   "dsv41-nfs",

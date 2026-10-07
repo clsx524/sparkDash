@@ -13,6 +13,8 @@ import { PERSISTENT_CONTAINER_NAMES } from "../recipeActions.js";
 test("PERSISTENT_CONTAINER_NAMES excludes the fleet's standalone always-on services from the recipe-switch sweep", () => {
   assert.ok(PERSISTENT_CONTAINER_NAMES.includes("qwen3-embedding"));
   assert.ok(PERSISTENT_CONTAINER_NAMES.includes("semif"));
+  assert.ok(PERSISTENT_CONTAINER_NAMES.includes("qwen3-tts"));
+  assert.ok(PERSISTENT_CONTAINER_NAMES.includes("qwen3-asr"));
 });
 
 test("PERSISTENT_CONTAINER_NAMES still excludes the fleet's own infrastructure and NFS exporters", () => {
