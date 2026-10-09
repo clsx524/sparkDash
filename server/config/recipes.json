@@ -35,24 +35,6 @@
     ]
   },
   {
-    "id": "dsv41-tensorfold",
-    "label": "DeepSeek-V4.1-Flash TensorFold (TP2, bertholomus)",
-    "group": "dual-text-gen",
-    "nodes": [
-      {
-        "role": "head",
-        "workdir": "~/dsv41-tensorfold",
-        "startCmd": "./sync-registry-weights.sh && ./tf-dsv41.sh start",
-        "stopCmd": "./tf-dsv41.sh stop",
-        "statusCmd": "./tf-dsv41.sh status",
-        "runningPattern": "Up \\d",
-        "containerName": "dsv41-tf-r0",
-        "llmPort": 8888,
-        "modelIds": ["DeepSeek-V4.1-Flash-EXL3-2.9bpw", "DeepSeek-V4.1-Flash"]
-      }
-    ]
-  },
-  {
     "id": "deepseek-v41-flash-exl3",
     "label": "DeepSeek-v4.1-Flash EXL3 (TP2)",
     "group": "dual-text-gen",
