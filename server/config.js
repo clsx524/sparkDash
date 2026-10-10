@@ -24,6 +24,23 @@ const LLM_TOKEN_JSON_PATH =
 /** Rolling fleet energy estimates (gitignored; written atomically at mode 0600). */
 const FLEET_ENERGY_JSON_PATH =
   process.env.FLEET_ENERGY_JSON_PATH || path.join(ROOT, "config", "fleet-energy.json");
+/** Rolling recipe-switch durations, for estimating in-flight switch progress (gitignored). */
+const RECIPE_SWITCH_HISTORY_JSON_PATH =
+  process.env.RECIPE_SWITCH_HISTORY_JSON_PATH ||
+  path.join(ROOT, "config", "recipe-switch-history.json");
+/** Model Registry host + directory designation (gitignored). */
+const MODEL_REGISTRY_JSON_PATH =
+  process.env.MODEL_REGISTRY_JSON_PATH || path.join(ROOT, "config", "model-registry.json");
+/** User-tracked model list (gitignored). */
+const MODELS_JSON_PATH =
+  process.env.MODELS_JSON_PATH || path.join(ROOT, "config", "models.json");
+/** Timeout for a single `hf download` invocation over SSH — large models, hours not minutes. */
+const MODEL_DOWNLOAD_TIMEOUT_MS = parseInt(
+  process.env.MODEL_DOWNLOAD_TIMEOUT_MS || "21600000",
+  10
+);
+/** Timeout for a single model-sync (rsync pull) between two hosts. */
+const MODEL_SYNC_TIMEOUT_MS = parseInt(process.env.MODEL_SYNC_TIMEOUT_MS || "21600000", 10);
 
 // ─── LLM / Comfy probe timeouts ──────────────────────────
 const LLM_PROBE_TIMEOUT_MS = 3000;
@@ -186,6 +203,11 @@ export {
   LLM_DAILY_JSON_PATH,
   LLM_TOKEN_JSON_PATH,
   FLEET_ENERGY_JSON_PATH,
+  RECIPE_SWITCH_HISTORY_JSON_PATH,
+  MODEL_REGISTRY_JSON_PATH,
+  MODELS_JSON_PATH,
+  MODEL_DOWNLOAD_TIMEOUT_MS,
+  MODEL_SYNC_TIMEOUT_MS,
   LLM_PROBE_TIMEOUT_MS,
   COMFY_PROBE_TIMEOUT_MS,
   TAILSCALE_PROBE_TIMEOUT_MS,

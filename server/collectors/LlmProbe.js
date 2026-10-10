@@ -606,11 +606,43 @@ export class LlmProbe {
         const healthRes = await this._fetch(`${this.baseUrl}/health`);
         if (healthRes.ok) {
           const health = await healthRes.json().catch(() => null);
-          this._applyTensorFoldHealth(health, dtSec);
-          this._applyTensorFoldLive(health);
           // Newer builds report live rates in /health but cumulative totals only on Prometheus /metrics.
           const totalRaw = health?.completion_tokens_total;
-          if (totalRaw == null || !Number.isFinite(Number(totalRaw))) await this._applyTensorFoldMetrics();
+          const noTotals = totalRaw == null || !Number.isFinite(Number(totalRaw));
+          // The MiaAI-derived GLM server exposes `tensorfold_*` counters (underscore dialect):
+          // fold them into the /health counter contract so tok/s is a real rate.
+          const extra = noTotals ? await this._tensorFoldUnderscoreHealth() : null;
+          this._applyTensorFoldHealth(extra ? { ...(health ?? {}), ...extra } : health, dtSec);
+          this._applyTensorFoldLive(health);
+        if (extra) {
+          this.requestsRunning = extra.inflight;
+          this.slotsActive = extra.inflight;
+          this.slotsTotal = Math.max(this.slotsTotal || 1, extra.inflight);
+          if (extra.cached_tokens_total != null) this.totalCachedTokens = extra.cached_tokens_total;
+          if (extra.prompt_tokens_total > 0 && extra.cached_tokens_total != null) {
+            this.prefixCacheHitRate = Math.min(1, extra.cached_tokens_total / extra.prompt_tokens_total);
+          }
+          // Counters advance only when a completion finishes, so a per-poll delta
+          // would report a whole reply as one second of decode (a 4 s, ~40 tok/s
+          // reply read as ~186). Rate = tokens / decode seconds of the completions
+          // that finished since the last sample (a per-stream rate). It is shown on
+          // the poll where tokens landed and held while a request is running, and
+          // is 0 when idle. There is no live per-token rate mid-request: the server
+          // only publishes totals at completion.
+          const prev = this._tfRate;
+          this._tfRate = { tokens: extra.completion_tokens_total, seconds: extra.decode_seconds_total, tps: prev?.tps ?? 0 };
+          let landed = false;
+          if (prev && extra.decode_seconds_total != null && prev.seconds != null) {
+            const dTok = extra.completion_tokens_total - prev.tokens;
+            const dSec = extra.decode_seconds_total - prev.seconds;
+            if (dTok > 0 && dSec > 0) {
+              this._tfRate.tps = Math.round((dTok / dSec) * 100) / 100;
+              landed = true;
+            }
+          }
+          this.generationTps = extra.busy || landed ? this._tfRate.tps : 0;
+        }
+          if (noTotals && !extra) await this._applyTensorFoldMetrics();
         } else {
           this._applyTensorFoldHealth(null, dtSec);
         }
@@ -1199,6 +1231,39 @@ export class LlmProbe {
       this.requestsRunning = Math.round(conns);
       this.slotsActive = Math.round(conns);
     }
+  }
+
+  /**
+   * TensorFold's `tensorfold_*` Prometheus series (GET /metrics, underscore dialect, as served by the
+   * MiaAI-derived GLM build) folded into the /health counter contract `_applyTensorFoldHealth` consumes.
+   * Null when /metrics is unreachable or carries no `tensorfold_completion_tokens_total`.
+   */
+  async _tensorFoldUnderscoreHealth() {
+    let txt;
+    try {
+      const res = await this._fetch(`${this.baseUrl}/metrics`);
+      if (!res.ok) return null;
+      txt = await res.text();
+    } catch {
+      return null;
+    }
+    const read = (name) => {
+      const m = new RegExp(`^tensorfold_${name}(?:\\{[^}]*\\})?\\s+([-+0-9.eE]+)\\s*$`, "m").exec(String(txt ?? ""));
+      if (!m) return null;
+      const n = Number(m[1]);
+      return Number.isFinite(n) ? n : null;
+    };
+    const completion = read("completion_tokens_total");
+    if (completion == null) return null;
+    const inflight = Math.max(0, Math.round(read("requests_inflight") ?? 0));
+    return {
+      prompt_tokens_total: read("prompt_tokens_total") ?? NaN,
+      completion_tokens_total: completion,
+      cached_tokens_total: read("cached_tokens_total"),
+      decode_seconds_total: read("decode_seconds_total"),
+      inflight,
+      busy: inflight > 0,
+    };
   }
 
   /**

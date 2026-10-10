@@ -267,7 +267,10 @@ export function sshCommandSpec(spark, opts = {}) {
  *
  * @param {Object} spark - Spark config object
  * @param {string} cmd - Command to execute (passed as a single remote argv via bash -c)
- * @param {{ timeoutMs?: number }} [options]
+ * @param {{ timeoutMs?: number, multiplex?: boolean, extraSshArgs?: string[] }} [options]
+ *   `multiplex: false` forces a connection of its own instead of riding the shared ControlMaster
+ *   socket (needed for many concurrent sessions to one host, e.g. sharded transfers), and
+ *   `extraSshArgs` are inserted before the destination.
  * @returns {Promise<string>} - Trimmed stdout
  */
 export async function sshExec(spark, cmd, options = {}) {
@@ -280,6 +283,8 @@ export async function sshExec(spark, cmd, options = {}) {
 
   const { file, args, env, targetHost, multiplex, sshPort } = sshCommandSpec(spark, {
     remoteArgv: [cmd],
+    multiplex: options.multiplex,
+    extraSshArgs: options.extraSshArgs,
   });
 
   const execute = (execArgs) =>
@@ -405,4 +410,44 @@ export async function comfyTest(spark, port) {
   } catch (err) {
     return { ok: false, message: err.message };
   }
+}
+
+/**
+ * Write `content` to `remotePath` on `spark` over SSH (piped via stdin to a
+ * remote `cat >`) — no `scp`/`sftp` binary dependency, reuses the exact same
+ * auth/host-resolution path as every other command in this module.
+ *
+ * `rm -f` first: some remote shells (zsh, confirmed on the DGX Sparks) run even
+ * non-interactive `ssh host 'cmd'` sessions with `noclobber` active, which makes a bare
+ * `cat > existing-file` fail with "file exists" — so a caller writing the same path twice
+ * (e.g. modelSync.js's per-shard manifest files) would succeed exactly once and fail forever
+ * after. Removing first makes this correct under bash/zsh/sh alike, regardless of noclobber.
+ * @param {object} spark
+ * @param {string|Buffer} content
+ * @param {string} remotePath
+ * @param {{timeoutMs?: number}} [options]
+ */
+export async function copyToSpark(spark, content, remotePath, options = {}) {
+  const timeoutMs =
+    Number.isFinite(options.timeoutMs) && options.timeoutMs > 0 ? options.timeoutMs : 30000;
+  const quoted = "'" + String(remotePath).replace(/'/g, "'\\''") + "'";
+  const { file, args, env, targetHost } = sshCommandSpec(spark, {
+    remoteArgv: [`rm -f ${quoted}; cat > ${quoted}`],
+  });
+  return new Promise((resolve, reject) => {
+    const child = execFile(
+      file,
+      args,
+      { timeout: timeoutMs, env, maxBuffer: 10 * 1024 * 1024 },
+      (err, _stdout, stderr) => {
+        if (err) {
+          reject(new Error(`Copy to ${targetHost} failed: ${stderr?.trim() || err.message}`));
+        } else {
+          resolve();
+        }
+      }
+    );
+    child.stdin.write(content);
+    child.stdin.end();
+  });
 }

@@ -11,6 +11,7 @@ import { SparkMonitor } from "./sparks/SparkMonitor.js";
 import { collectionWasSuccessful } from "./collectors/SystemCollector.js";
 import { sshExec } from "./collectors/ssh.js";
 import { comfyCancelJob } from "./collectors/comfyActions.js";
+import { formatPrometheusMetrics } from "./collectors/metricsExport.js";
 import {
   validateSparkTarget,
   normalizeSshPort,
@@ -51,6 +52,9 @@ import {
 } from "./llmtokens/LlmTokenRuntime.js";
 import { closeLlmStreamAgent } from "./collectors/LlmStreaming.js";
 import { compareSemver, getLatestRelease } from "./collectors/HermesReleases.js";
+import { RecipeRegistry } from "./collectors/RecipeRegistry.js";
+import { ModelRegistry } from "./collectors/ModelRegistry.js";
+import { switchRecipe, isSwitchInFlight, RecipeSwitchError } from "./collectors/recipeActions.js";
 import { FLEET_ENERGY_JSON_PATH } from "./config.js";
 import { FleetEnergyTracker } from "./energy/FleetEnergyTracker.js";
 import { EventLog } from "./events/EventLog.js";
@@ -68,7 +72,7 @@ import {
 import { testSparkConnectivity } from "./connectivity.js";
 import { TailscaleProbe } from "./collectors/TailscaleProbe.js";
 import { inspectStartupPreflight, logStartupPreflight } from "./startupPreflight.js";
-import { PROMETHEUS_CONTENT_TYPE, renderPrometheusMetrics } from "./prometheus.js";
+import { PROMETHEUS_CONTENT_TYPE } from "./prometheus.js";
 
 dotenv.config();
 
@@ -288,6 +292,12 @@ function consumeBenchStartQuota(req, res) {
 // ─── Spark registry ──────────────────────────────────────
 const registry = new SparkRegistry();
 
+// ─── Recipe registry (deployment recipes, distinct from physical-node config) ──
+const recipeRegistry = new RecipeRegistry(registry);
+// ─── Model Registry (generic model tracking/sync, distinct from recipes) ──
+const modelRegistry = new ModelRegistry(registry);
+/** Latest recipe-switch progress, broadcast to every WS client and served to late joiners. */
+let recipeSwitchState = null;
 const fleetEnergyTracker = new FleetEnergyTracker({
   nodeIds: registry.sparkIds,
   filePath: FLEET_ENERGY_JSON_PATH,
@@ -749,6 +759,7 @@ app.get("/api/sparks/:id/gpu-history", (req, res) => {
 app.get("/api/sparks/:id/metrics", (req, res) => {
   const monitor = monitors.get(req.params.id);
   if (!monitor) return res.status(404).json({ error: "Spark not found" });
+  // Request/response, not the deduplicated broadcast, so the volatile freshness fields are safe.
   res.json(monitor.snapshot());
 });
 
@@ -926,8 +937,11 @@ app.post("/api/sparks/:id/refresh/:domain", async (req, res) => {
     const monitor = monitors.get(req.params.id);
     if (!monitor) return res.status(404).json({ error: "Spark not found" });
     const { domain } = req.params;
-    if (domain !== "storage" && domain !== "llm") {
-      return res.status(400).json({ error: "Only 'storage' and 'llm' domains are supported" });
+    // "storage" gets refreshDomain's own dedicated dance (collectStorage() directly, its own
+    // generation/in-flight token); "network" (RDMA Interconnect refresh) and "llm" need nothing
+    // special. Widen this list if another manual-refresh button is ever added.
+    if (domain !== "storage" && domain !== "network" && domain !== "llm") {
+      return res.status(400).json({ error: "Only 'storage', 'network' or 'llm' domains are supported" });
     }
     await monitor.refreshDomain(domain);
     forceBroadcast();
@@ -2129,6 +2143,193 @@ app.post("/api/sparks/:id/wake", async (req, res) => {
   }
 });
 
+// ─── Recipe registry / switching ──────────────────────────
+// Live-inferred list of deployment recipes plus which one (if any) is actually running.
+// See RecipeRegistry.js — active state is never trusted from a stored flag.
+app.get("/api/recipes", async (_req, res) => {
+  try {
+    const snapshot = await recipeRegistry.list();
+    res.json({ ...snapshot, switch: recipeSwitchState });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * Switch the cluster to a different recipe. Responds immediately once the switch has started;
+ * the operation itself (stop current → confirm stopped → start target → health-check) can take
+ * many minutes and is reported over the WebSocket via `recipeSwitch` in the snapshot payload,
+ * not in this response.
+ */
+app.post("/api/recipes/:id/activate", (req, res) => {
+  if (!recipeRegistry.get(req.params.id)) {
+    return res.status(404).json({ error: "Recipe not found" });
+  }
+  if (isSwitchInFlight()) {
+    return res.status(409).json({ error: "A recipe switch is already in progress" });
+  }
+
+  res.json({ started: true, targetId: req.params.id });
+
+  switchRecipe(recipeRegistry, modelRegistry, req.params.id, (state) => {
+    recipeSwitchState = { ...state, updatedAt: Date.now() };
+    forceBroadcast();
+  }).catch((err) => {
+    // switchRecipe already emitted a "failed" progress state for real switch failures;
+    // this only catches the class of error it throws before entering the state machine
+    // (unknown recipe id, switch already in flight — the isSwitchInFlight() check above
+    // makes the latter a race rather than the common case).
+    if (err instanceof RecipeSwitchError) {
+      console.warn(`[recipes] switch to ${req.params.id} failed: ${err.message}`);
+    } else {
+      console.error(`[recipes] switch to ${req.params.id} failed unexpectedly:`, err);
+    }
+  });
+});
+
+// ─── Model Registry (generic model tracking/sync) ─────────
+// Which tracked host holds canonical model files, and where. No default is
+// assumed — both fields are empty until the operator sets them.
+app.get("/api/model-registry", (_req, res) => {
+  res.json(modelRegistry.getRegistryConfig());
+});
+
+/**
+ * Setting or changing the registry host/directory immediately reconciles the
+ * tracked model list against what's actually on disk there (see
+ * ModelRegistry.reconcileWithDisk) — an operator pointing this at an
+ * existing directory shouldn't have to retype every subfolder already
+ * sitting on it. A scan failure (host unreachable, etc.) does not fail the
+ * whole request — the config is saved regardless — it's reported separately
+ * via scanError so the UI can show it without losing the save.
+ */
+app.put("/api/model-registry", async (req, res) => {
+  let config;
+  try {
+    config = modelRegistry.setRegistryConfig(req.body || {});
+  } catch (err) {
+    return res.status(400).json({ error: err.message });
+  }
+  let discovered = [];
+  let scanError = null;
+  try {
+    ({ discovered } = await modelRegistry.reconcileWithDisk());
+  } catch (err) {
+    scanError = err.message;
+  }
+  res.json({ ...config, discovered, scanError });
+});
+
+/** Re-scan the registry directory on demand (no config change) — for files added on disk after the registry was already configured. */
+app.post("/api/model-registry/rescan", async (_req, res) => {
+  try {
+    res.json(await modelRegistry.reconcileWithDisk());
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+/** Live-probed Hugging Face login state on the registry host (never a stored flag — see ModelRegistry.probeHfToken). */
+app.get("/api/model-registry/hf-token", async (_req, res) => {
+  res.json(await modelRegistry.probeHfToken());
+});
+
+/** Set or replace the Hugging Face login on the registry host. hf auth login validates the token itself. */
+app.put("/api/model-registry/hf-token", async (req, res) => {
+  if (!allowGlobalDestructive(principalKey(req))) {
+    return rejectLimited(res, "Too many requests — try again shortly");
+  }
+  try {
+    await modelRegistry.setHfToken(req.body?.token);
+    res.json(await modelRegistry.probeHfToken());
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+/** Tracked models plus a live availability probe per model (never a stored flag). */
+app.get("/api/models", async (_req, res) => {
+  const models = modelRegistry.all();
+  const statuses = await modelRegistry.statuses();
+  res.json({ registry: modelRegistry.getRegistryConfig(), models, statuses });
+});
+
+app.post("/api/models", (req, res) => {
+  if (!allowGlobalDestructive(principalKey(req))) {
+    return rejectLimited(res, "Too many requests — try again shortly");
+  }
+  try {
+    res.status(201).json(modelRegistry.addModel(req.body || {}));
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+/** Edit an existing tracked model's label/repo/revision/includePattern — e.g. attaching a source repo to a disk-discovered entry. */
+app.patch("/api/models/:id", (req, res) => {
+  if (!allowGlobalDestructive(principalKey(req))) {
+    return rejectLimited(res, "Too many requests — try again shortly");
+  }
+  try {
+    res.json(modelRegistry.updateModel(req.params.id, req.body || {}));
+  } catch (err) {
+    res.status(404).json({ error: err.message });
+  }
+});
+
+/** Remove a tracked model entry (metadata only — does not touch downloaded files). */
+app.delete("/api/models/:id", (req, res) => {
+  if (!allowGlobalDestructive(principalKey(req))) {
+    return rejectLimited(res, "Too many requests — try again shortly");
+  }
+  try {
+    res.json(modelRegistry.removeModel(req.params.id));
+  } catch (err) {
+    res.status(404).json({ error: err.message });
+  }
+});
+
+/** Delete a model's downloaded files from the registry host. Entry stays tracked. */
+app.delete("/api/models/:id/files", (req, res) => {
+  if (!allowGlobalDestructive(principalKey(req))) {
+    return rejectLimited(res, "Too many requests — try again shortly");
+  }
+  if (!modelRegistry.getModel(req.params.id)) {
+    return res.status(404).json({ error: "Model not tracked" });
+  }
+  res.json({ started: true });
+  modelRegistry
+    .deleteModelFiles(req.params.id)
+    .catch((err) => console.warn(`[models] delete ${req.params.id} failed: ${err.message}`));
+});
+
+/**
+ * Kick off an async download + checksum verification from Hugging Face onto
+ * the registry host. Responds immediately; poll GET /api/models/:id/job for
+ * progress, same shape as the recipe-switch WS-vs-poll split but simpler
+ * (single-model, no multi-node fan-out to broadcast).
+ */
+app.post("/api/models/:id/download", (req, res) => {
+  if (!allowGlobalDestructive(principalKey(req))) {
+    return rejectLimited(res, "Too many requests — try again shortly");
+  }
+  if (!modelRegistry.getModel(req.params.id)) {
+    return res.status(404).json({ error: "Model not tracked" });
+  }
+  const existingJob = modelRegistry.getJobState(req.params.id);
+  if (existingJob && existingJob.phase !== "done" && existingJob.phase !== "failed") {
+    return res.status(409).json({ error: "A job is already in progress for this model" });
+  }
+  res.json({ started: true });
+  modelRegistry
+    .downloadModel(req.params.id)
+    .catch((err) => console.warn(`[models] download ${req.params.id} failed: ${err.message}`));
+});
+
+app.get("/api/models/:id/job", (req, res) => {
+  res.json(modelRegistry.getJobState(req.params.id) || { modelId: req.params.id, phase: "idle" });
+});
+
 // ─── Prometheus exposition (opt-in) ──────────────────────
 // Registered after the auth middleware (a token-protected install needs the
 // scraper's bearer token) and before the SPA fallback, which would otherwise
@@ -2141,18 +2342,10 @@ app.get("/metrics", (_req, res) => {
       .type("text")
       .send("Prometheus export is off. Enable it in Settings → Prometheus metrics.\n");
   }
-  const entries = registry.sparkIds
-    .map((id) => monitors.get(id))
-    .filter(Boolean)
-    .map((monitor) => ({
-      snapshot: monitor.snapshot(),
-      // Per-domain provenance: a failed GPU/CPU read is zero-filled, not real.
-      collected: { ...monitor._metricCollectionSuccessful },
-    }));
-  // res.end, not res.send: send() reorders the media type parameters; keep the
-  // header exactly as the exposition format spells it.
+  // Fork: our own formatter (collectors/metricsExport.js) so the fleet's Grafana panels keep
+  // the metric names they query; the route, auth position and Settings toggle are upstream's.
   res.setHeader("Content-Type", PROMETHEUS_CONTENT_TYPE);
-  res.end(renderPrometheusMetrics(entries));
+  res.end(formatPrometheusMetrics(orderedSnapshots()));
 });
 
 // ─── Static files (built frontend) ───────────────────────
@@ -2225,6 +2418,7 @@ function buildSnapshotPayload() {
     generatedAt: Date.now(),
     sparks: orderedSnapshots(),
     refreshInterval: getSettings().pollIntervalMs,
+    recipeSwitch: recipeSwitchState,
   });
 }
 
@@ -2234,23 +2428,25 @@ function buildSnapshotPayload() {
  *   buffering on slow/flaky connections (e.g. phone over spotty WiFi).
  * - Returns the payload so callers can compare against the previous broadcast.
  */
-function broadcastPayload(payload) {
-  wss.clients.forEach((client) => {
-    if (client.readyState !== 1) return; // OPEN only
-    if (client.bufferedAmount > 1_000_000) {
-      try {
-        client.close(1008, "client too slow");
-      } catch {
-        /* ignore */
-      }
-      return;
-    }
+function sendPayload(client, payload) {
+  if (client.readyState !== 1) return; // OPEN only
+  if (client.bufferedAmount > 1_000_000) {
     try {
-      client.send(payload);
+      client.close(1008, "client too slow");
     } catch {
-      /* per-client send failure — ignore, close handler will clean up */
+      /* ignore */
     }
-  });
+    return;
+  }
+  try {
+    client.send(payload);
+  } catch {
+    /* per-client send failure — ignore, close handler will clean up */
+  }
+}
+
+function broadcastPayload(payload) {
+  wss.clients.forEach((client) => sendPayload(client, payload));
 }
 
 /**

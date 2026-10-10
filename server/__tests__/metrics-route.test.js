@@ -77,6 +77,7 @@ test("GET /metrics answers 404 while off and Prometheus text once enabled", asyn
   assert.equal(on.headers.get("content-type"), "text/plain; version=0.0.4; charset=utf-8");
   assert.equal(on.headers.get("cache-control"), "no-store");
   const body = await on.text();
-  assert.match(body, /^# HELP sparkdash_up /);
-  assert.match(body, /\n# TYPE sparkdash_up gauge\n$/);
+  // Fork: the exposition is collectors/metricsExport.js (our metric names); with no units
+  // registered it has no samples to emit.
+  assert.equal(body, "");
 });

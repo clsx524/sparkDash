@@ -664,7 +664,21 @@ export class SparkRegistry {
       disabledDevices: Array.isArray(config.disabledDevices) ? config.disabledDevices : [],
       disabledInterfaces: Array.isArray(config.disabledInterfaces) ? config.disabledInterfaces : [],
       storagePollDisabled: Boolean(config.storagePollDisabled),
+      /**
+       * Model Registry integration. Defaults to the standard Hugging Face
+       * cache directory (matches every Spark's existing `hf_home` ansible
+       * group_var and the `hf` CLI's own default) — not a fleet-specific
+       * guess, just the same convention this fleet, and `hf`/`transformers`
+       * generally, already use. Still fully operator-editable per host.
+       */
+      modelFolder: this._normalizeModelFolder(config.modelFolder),
     };
+  }
+
+  /** Trim optional model storage folder path; empty falls back to the standard HF cache dir. */
+  _normalizeModelFolder(value) {
+    const trimmed = typeof value === "string" ? value.trim() : "";
+    return trimmed || "~/.cache/huggingface";
   }
 
   /** Normalize ComfyUI port to 1–65535 (default 8188). */

@@ -14,6 +14,7 @@ import { ActivityIcon, PowerOnIcon, RotateIcon } from "../ui/icons";
 import { formatMb } from "../../shared/formatBytes";
 import { vramContextFor } from "../../shared/vramBreakdown";
 import { makeHeadResolver } from "../../shared/sparkHead";
+import { ForkClusterTop } from "./ForkCluster";
 import "../../styles/overview.css";
 
 interface OverviewPageProps {
@@ -302,6 +303,8 @@ export function OverviewPage({
           </select>
         </div>
       ) : null}
+
+      <ForkClusterTop sparks={visibleSparks} temperatureUnit={temperatureUnit} />
 
       <div className="ov-grid">
         <div className="ov-sparks">

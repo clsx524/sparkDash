@@ -307,3 +307,68 @@ test("_applyTensorFoldHealth: prefillActive follows streams.prefilling and the l
   probe._applyTensorFoldHealth(h(3000, 12, 1), 2);
   assert.equal(probe.prefillTps, 0);
 });
+
+// ─── MiaAI-derived GLM server: `tensorfold_*` counters on /metrics (underscore dialect) ───
+function tfMetrics({ prompt, completion, cached, inflight, decode = 0 }) {
+  const l = 'model="GLM-5.3-Flash-EXL3"';
+  return [
+    `tensorfold_prompt_tokens_total{${l}} ${prompt}`,
+    `tensorfold_cached_tokens_total{${l}} ${cached}`,
+    `tensorfold_completion_tokens_total{${l}} ${completion}`,
+    `tensorfold_decode_seconds_total{${l}} ${decode}`,
+    `tensorfold_requests_inflight{${l}} ${inflight}`,
+    "",
+  ].join("\n");
+}
+
+function underscoreProbe(getMetrics, health = { ok: true }) {
+  const probe = new LlmProbe({ lanIp: "10.0.0.1" }, 8888);
+  probe._fetch = async (url) => {
+    const u = String(url);
+    if (u.endsWith("/slots")) return notFound();
+    if (u.endsWith("/v1/models")) return jsonRes(CUDA_MODELS);
+    if (u.endsWith("/health")) return jsonRes(health);
+    if (u.endsWith("/metrics")) return { ok: true, status: 200, text: async () => getMetrics(), json: async () => ({}) };
+    return notFound();
+  };
+  return probe;
+}
+
+test("_tensorFoldUnderscoreHealth: parses the labeled series; non-TensorFold text → null", async () => {
+  let body = tfMetrics({ prompt: 844731, completion: 5589, cached: 749696, inflight: 2 });
+  const probe = underscoreProbe(() => body);
+  assert.deepEqual(await probe._tensorFoldUnderscoreHealth(), {
+    prompt_tokens_total: 844731,
+    completion_tokens_total: 5589,
+    cached_tokens_total: 749696,
+    decode_seconds_total: 0,
+    inflight: 2,
+    busy: true,
+  });
+  body = "vllm:prompt_tokens_total 5\n";
+  assert.equal(await probe._tensorFoldUnderscoreHealth(), null);
+});
+
+test("probe: counter-less /health + underscore /metrics → totals, cache hit and running", async () => {
+  let metrics = tfMetrics({ prompt: 1000, completion: 100, cached: 500, inflight: 1 });
+  const probe = underscoreProbe(() => metrics);
+  await probe.probe();
+  metrics = tfMetrics({ prompt: 1200, completion: 300, cached: 700, inflight: 2 });
+  const snap = await probe.probe();
+  assert.equal(snap.backend, "tensorfold");
+  assert.equal(probe.totalOutputTokens, 300);
+  assert.equal(probe.totalCachedTokens, 700);
+  assert.ok(Math.abs(probe.prefixCacheHitRate - 700 / 1200) < 1e-9);
+  assert.equal(probe.requestsRunning, 2);
+});
+
+test("probe: underscore /metrics tok/s = tokens / decode seconds, 0 once idle", async () => {
+  let metrics = tfMetrics({ prompt: 100, completion: 1000, cached: 0, inflight: 0, decode: 20 });
+  const probe = underscoreProbe(() => metrics);
+  await probe.probe();
+  metrics = tfMetrics({ prompt: 100, completion: 1200, cached: 0, inflight: 0, decode: 25 });
+  await probe.probe();
+  assert.equal(probe.generationTps, 40, "rate is shown on the poll where tokens landed");
+  await probe.probe();
+  assert.equal(probe.generationTps, 0, "idle after that");
+});
