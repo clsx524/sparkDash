@@ -14,6 +14,7 @@ import { computeVramBreakdown, type VramBreakdownContext } from "../../shared/vr
 import { ImageIcon, PowerOnIcon } from "../ui/icons";
 import { formatCtx } from "./fleetStats";
 import { ModelLauncher } from "./ModelLauncher";
+import { SHOW_MODEL_LAUNCHERS } from "../../forkFlags";
 
 type Unit = "celsius" | "fahrenheit";
 
@@ -179,7 +180,8 @@ function SparkCardImpl({
     !llm && (memUsed >= 2048 || usage >= 10)
       ? `${formatMb(memUsed)} VRAM in use · GPU ${Math.round(usage)}%`
       : null;
-  const showLauncher = role !== "worker" && !llm && spark.llmMonitoring !== false && spark.platform !== "windows";
+  const showLauncher =
+    SHOW_MODEL_LAUNCHERS && role !== "worker" && !llm && spark.llmMonitoring !== false && spark.platform !== "windows";
 
   const showTps = role !== "worker" && !!llm;
   const isStrata = llm?.backend === "strata";
