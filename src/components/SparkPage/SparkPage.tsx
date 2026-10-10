@@ -15,6 +15,7 @@ import { LlmPanel } from "./LlmPanel";
 import { ComfyPanel } from "./ComfyPanel";
 import { LlmModelsPanel } from "./LlmModelsPanel";
 import { RocePanel } from "./RocePanel";
+import { SHOW_MODEL_LAUNCHERS } from "../../forkFlags";
 import { UnifiedMemoryPanel } from "./UnifiedMemoryPanel";
 import { HistoryPanel } from "./HistoryPanel";
 import "../../styles/spark.css";
@@ -145,7 +146,7 @@ export function SparkPage({
   const showSvc = showServices && view !== "resources";
   // Models you start/stop with your own start.sh / stop.sh. Shown on every Spark and in every tab,
   // so it is always easy to find (a worker may have its own scripts too).
-  const modelsPanel = <LlmModelsPanel spark={spark} />;
+  const modelsPanel = SHOW_MODEL_LAUNCHERS ? <LlmModelsPanel spark={spark} /> : null;
   const primaryPort = llmPorts[0];
   const extraPorts = llmPorts.slice(1);
   const unified = metrics.unifiedMemory;

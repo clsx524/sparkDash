@@ -257,6 +257,7 @@ export function EditSparkDialog({
         })(),
         hermesMonitoring: Boolean(config.hermesMonitoring),
         tailscaleMonitoring: Boolean(config.tailscaleMonitoring),
+        modelFolder: config.modelFolder?.trim() || "",
         ssh: {
           host: config.ssh.host || config.lanIp,
           user: config.ssh.user,
@@ -550,6 +551,20 @@ export function EditSparkDialog({
                 </div>
                 </>
               )}
+
+              <div>
+                <label className="mb-1 block text-xs text-muted">Model folder</label>
+                <input
+                  type="text"
+                  value={config.modelFolder || ""}
+                  onChange={(e) => update({ modelFolder: e.target.value })}
+                  className="w-full rounded border border-border bg-surface-elevated px-3 py-1.5 text-xs text-text outline-none focus:border-accent"
+                />
+                <p className="mt-1 text-[10px] text-muted">
+                  Where synced model weights land on this host. Defaults to the standard Hugging
+                  Face cache dir (~/.cache/huggingface).
+                </p>
+              </div>
 
               {role === "worker" && (
                 <div className="space-y-3">

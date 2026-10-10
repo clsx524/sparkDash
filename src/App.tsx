@@ -38,7 +38,10 @@ import {
   ThermometerIcon,
   BotIcon,
   CoinsIcon,
+  FlaskIcon,
 } from "./components/ui/icons";
+import { RecipesDialog } from "./components/RecipesDialog";
+import { ModelsDialog } from "./components/ModelsDialog";
 import { ConnectionBanner } from "./components/ui/ConnectionBanner";
 import { ErrorBanner } from "./components/ui/ErrorBanner";
 import {
@@ -179,6 +182,7 @@ function DashboardApp() {
     setActiveId,
     activeSpark: liveActive,
     connected,
+    recipeSwitch,
     lastValidSnapshotAt,
     snapshotError,
     refreshInterval,
@@ -212,6 +216,8 @@ function DashboardApp() {
       return next;
     });
   }, []);
+  const [showRecipes, setShowRecipes] = useState(false);
+  const [showModels, setShowModels] = useState(false);
   const [settings, setSettings] = useState<Settings | null>(null);
   const [authMode, setAuthMode] = useState<AuthMode | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -502,7 +508,9 @@ function DashboardApp() {
       { id: "act:theme", group: "Actions", label: "Switch theme", hint: "white · light · dark · oled", icon: <SunIcon className="h-4 w-4" />, keywords: "appearance dark light", run: () => window.dispatchEvent(new Event("sparkdash:cycle-theme")) },
       { id: "act:sidebar", group: "Actions", label: "Show or hide the sidebar", icon: <PanelLeftIcon className="h-4 w-4" />, keywords: "collapse expand navigation rail menu", run: toggleSidebar },
       { id: "act:settings", group: "Actions", label: "Open settings", icon: <GearIcon className="h-4 w-4" />, keywords: "preferences density refresh", run: () => setShowSettings(true) },
-      { id: "act:harness", group: "Actions", label: "Set up harness sessions", icon: <BotIcon className="h-4 w-4" />, keywords: "occupancy openclaw opencode hermes oh-my-pi wizard", run: () => { setHarnessSparkId(undefined); setShowHarness(true); } }
+      { id: "act:harness", group: "Actions", label: "Set up harness sessions", icon: <BotIcon className="h-4 w-4" />, keywords: "occupancy openclaw opencode hermes oh-my-pi wizard", run: () => { setHarnessSparkId(undefined); setShowHarness(true); } },
+      { id: "act:recipes", group: "Actions", label: "Deployment recipes", icon: <FlaskIcon className="h-4 w-4" />, keywords: "recipe switch model launch deploy", run: () => setShowRecipes(true) },
+      { id: "act:models", group: "Actions", label: "Model Registry", icon: <ServerIcon className="h-4 w-4" />, keywords: "weights download sync checkpoint", run: () => setShowModels(true) },
     );
     return cmds;
   }, [displaySparks, displayActive, navigate, toggleSidebar]);
@@ -518,6 +526,8 @@ function DashboardApp() {
           onAdd={() => setShowAdd(true)}
           onReorder={handleReorder}
           onOpenSettings={() => setShowSettings(true)}
+          onOpenRecipes={() => setShowRecipes(true)}
+          onOpenModels={() => setShowModels(true)}
           onOpenSearch={() => setShowPalette(true)}
           benchType={benchType}
           onSelectBench={(type) => navigate(benchId(type))}
@@ -688,6 +698,12 @@ function DashboardApp() {
           llmPorts: spark.llmPorts?.length ? spark.llmPorts : [spark.llmPort],
         }))}
       />
+      <RecipesDialog
+        open={showRecipes}
+        onClose={() => setShowRecipes(false)}
+        recipeSwitch={recipeSwitch}
+      />
+      <ModelsDialog open={showModels} onClose={() => setShowModels(false)} />
     </div>
   );
 }
