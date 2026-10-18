@@ -52,18 +52,17 @@
     ]
   },
   {
-    "id": "deepseek-v41-3x",
-    "label": "DeepSeek-V4.1-Flash (native, 3x TP3)",
+    "id": "deepseek-v41-lakyfx-tp3",
+    "label": "DeepSeek-V4.1-Flash 1017 (EXL3 3.5bpw TensorFold, TP3)",
     "group": "multi-node",
     "nodes": [
       {
         "role": "head",
-        "workdir": "~/DeepSeek-v4.1-Flash-DGX-Sparks",
-        "startCmd": "./start.sh serve",
-        "stopCmd": "./start.sh stop",
-        "statusCmd": "docker ps -a --filter 'name=^dsv41-head$' --format '{{.Names}} {{.Status}}'",
-        "runningPattern": "Up \\d",
-        "containerName": "dsv41-head",
+        "workdir": "~/ds41f-1.2.0",
+        "startCmd": "./tp3-cluster.sh start",
+        "stopCmd": "./tp3-cluster.sh stop",
+        "statusCmd": "./tp3-cluster.sh status",
+        "runningPattern": "tp3@0 running[\\s\\S]*tp3@1 running[\\s\\S]*tp3@2 running",
         "llmPort": 8888
       }
     ]
