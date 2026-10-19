@@ -560,12 +560,16 @@ export interface PowerResult {
   output?: string;
   mac?: string;
   broadcast?: string;
+  /** Which path the server used: a configured power endpoint or Wake-on-LAN. */
+  method?: "power" | "wol";
   error?: string;
 }
 
 export interface BatchPowerResult {
   success: boolean;
-  results: {
+  /** Batch actions are asynchronous; progress arrives on the WS `powerAction`. */
+  started?: boolean;
+  results?: {
     id: string;
     ok: boolean;
     error?: string;

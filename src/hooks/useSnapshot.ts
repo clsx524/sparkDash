@@ -27,6 +27,7 @@ export function useSnapshot() {
   const [serverAlerts, setServerAlerts] = useState<AlertInstance[] | null>(null);
   const [activeId, setActiveId] = useState<string | null>(initialActiveId);
   const [recipeSwitch, setRecipeSwitch] = useState<WsSnapshot["recipeSwitch"]>(null);
+  const [powerAction, setPowerAction] = useState<WsSnapshot["powerAction"]>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   /** When false, onclose must not schedule reconnect (unmount / intentional close). */
@@ -79,6 +80,7 @@ export function useSnapshot() {
           ingestSnapshots(msg.sparks, msg.generatedAt ?? receivedAt);
           setSparks(msg.sparks);
           setRecipeSwitch(msg.recipeSwitch ?? null);
+          setPowerAction(msg.powerAction ?? null);
           setConnected(true);
           receivedSnapshot = true;
           authCheckedFor.current = null;
@@ -155,6 +157,7 @@ export function useSnapshot() {
     setActiveId,
     activeSpark,
     recipeSwitch,
+    powerAction,
     lastValidSnapshotAt,
     snapshotGeneratedAt,
     snapshotError,

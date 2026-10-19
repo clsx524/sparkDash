@@ -48,6 +48,9 @@ const MODEL_PRICES_FETCH = ["1", "true"].includes(
 const RECIPE_SWITCH_HISTORY_JSON_PATH =
   process.env.RECIPE_SWITCH_HISTORY_JSON_PATH ||
   path.join(ROOT, "config", "recipe-switch-history.json");
+/** Last active recipe captured before a fleet shutdown, re-activated after wake-all. */
+const POWER_STATE_JSON_PATH =
+  process.env.POWER_STATE_JSON_PATH || path.join(ROOT, "config", "power-state.json");
 /** Model Registry host + directory designation (gitignored). */
 const MODEL_REGISTRY_JSON_PATH =
   process.env.MODEL_REGISTRY_JSON_PATH || path.join(ROOT, "config", "model-registry.json");
@@ -239,6 +242,7 @@ export {
   MODEL_PRICES_JSON_PATH,
   MODEL_PRICES_FETCH,
   RECIPE_SWITCH_HISTORY_JSON_PATH,
+  POWER_STATE_JSON_PATH,
   MODEL_REGISTRY_JSON_PATH,
   MODELS_JSON_PATH,
   MODEL_DOWNLOAD_TIMEOUT_MS,

@@ -53,6 +53,7 @@ export function EditSparkDialog({
   /** All Sparks — used for the worker head picker. */
   const [allSparks, setAllSparks] = useState<SparkConfig[]>([]);
   const [password, setPassword] = useState("");
+  const [powerToken, setPowerToken] = useState("");
   const [loading, setLoading] = useState(false);
   const [testing, setTesting] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -81,6 +82,7 @@ export function EditSparkDialog({
       setSavedConfig(null);
       setAllSparks([]);
       setPassword("");
+      setPowerToken("");
       setTestResult(null);
       setError(null);
       setSavedPasswordNote(null);
@@ -127,6 +129,20 @@ export function EditSparkDialog({
 
   const updateSsh = (patch: Partial<SparkConfig["ssh"]>) => {
     setConfig((prev) => (prev ? { ...prev, ssh: { ...prev.ssh, ...patch } } : prev));
+  };
+
+  const updatePowerControl = (patch: Partial<NonNullable<SparkConfig["powerControl"]>>) => {
+    setConfig((prev) =>
+      prev
+        ? {
+            ...prev,
+            powerControl: {
+              ...(prev.powerControl || {}),
+              ...patch,
+            },
+          }
+        : prev
+    );
   };
 
   const needsPassword =
@@ -258,6 +274,25 @@ export function EditSparkDialog({
         hermesMonitoring: Boolean(config.hermesMonitoring),
         tailscaleMonitoring: Boolean(config.tailscaleMonitoring),
         modelFolder: config.modelFolder?.trim() || "",
+        powerControl: (() => {
+          const pc = config.powerControl;
+          if (!pc) return null;
+          const onUrl = pc.onUrl?.trim() || null;
+          const offUrl = pc.offUrl?.trim() || null;
+          if (!onUrl && !offUrl) return null;
+          return {
+            onUrl,
+            offUrl,
+            target: pc.target?.trim() || null,
+            method: pc.method || "POST",
+            headers: pc.headers || {},
+            body: pc.body ?? null,
+            timeoutMs: Number(pc.timeoutMs) || 10000,
+            tokenHeader: pc.tokenHeader?.trim() || "Authorization",
+            tokenPrefix: pc.tokenPrefix ?? "Bearer ",
+          };
+        })(),
+        ...(powerToken ? { powerToken } : {}),
         ssh: {
           host: config.ssh.host || config.lanIp,
           user: config.ssh.user,
@@ -564,6 +599,97 @@ export function EditSparkDialog({
                   Where synced model weights land on this host. Defaults to the standard Hugging
                   Face cache dir (~/.cache/huggingface).
                 </p>
+              </div>
+
+              <div className="space-y-3 rounded border border-border p-3">
+                <div>
+                  <label className="mb-1 block text-xs text-muted">Power control (optional)</label>
+                  <p className="text-[10px] text-muted">
+                    Generic HTTP endpoints. SparkDash sends one batch request per endpoint with{" "}
+                    <code>{'{"targets": ["<target>"]}'}</code>. Point these at the Kasa MCP
+                    (<code>http://kasa-mcp:8812/outlets/on</code> and{" "}
+                    <code>http://kasa-mcp:8812/outlets/off</code>) or any other controller.
+                  </p>
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="mb-1 block text-xs text-muted">Power on URL</label>
+                    <input
+                      type="text"
+                      value={config.powerControl?.onUrl || ""}
+                      onChange={(e) => updatePowerControl({ onUrl: e.target.value })}
+                      placeholder="http://kasa-mcp:8812/outlets/on"
+                      className="w-full rounded border border-border bg-surface-elevated px-3 py-1.5 text-xs text-text outline-none focus:border-accent"
+                    />
+                  </div>
+                  <div>
+                    <label className="mb-1 block text-xs text-muted">Power off URL</label>
+                    <input
+                      type="text"
+                      value={config.powerControl?.offUrl || ""}
+                      onChange={(e) => updatePowerControl({ offUrl: e.target.value })}
+                      placeholder="http://kasa-mcp:8812/outlets/off"
+                      className="w-full rounded border border-border bg-surface-elevated px-3 py-1.5 text-xs text-text outline-none focus:border-accent"
+                    />
+                  </div>
+                </div>
+                <div className="grid grid-cols-3 gap-3">
+                  <div>
+                    <label className="mb-1 block text-xs text-muted">Outlet target</label>
+                    <input
+                      type="text"
+                      value={config.powerControl?.target || ""}
+                      onChange={(e) => updatePowerControl({ target: e.target.value })}
+                      placeholder="1"
+                      className="w-full rounded border border-border bg-surface-elevated px-3 py-1.5 text-xs text-text outline-none focus:border-accent"
+                    />
+                  </div>
+                  <div>
+                    <label className="mb-1 block text-xs text-muted">Method</label>
+                    <select
+                      value={config.powerControl?.method || "POST"}
+                      onChange={(e) =>
+                        updatePowerControl({
+                          method: e.target.value as "GET" | "POST" | "PUT" | "PATCH",
+                        })
+                      }
+                      className="w-full rounded border border-border bg-surface-elevated px-3 py-1.5 text-xs text-text outline-none focus:border-accent"
+                    >
+                      <option value="POST">POST</option>
+                      <option value="PUT">PUT</option>
+                      <option value="PATCH">PATCH</option>
+                      <option value="GET">GET</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="mb-1 block text-xs text-muted">Timeout (ms)</label>
+                    <input
+                      type="number"
+                      min={1000}
+                      max={60000}
+                      value={config.powerControl?.timeoutMs ?? 10000}
+                      onChange={(e) =>
+                        updatePowerControl({ timeoutMs: Number(e.target.value) || 10000 })
+                      }
+                      className="w-full rounded border border-border bg-surface-elevated px-3 py-1.5 text-xs text-text outline-none focus:border-accent"
+                    />
+                  </div>
+                </div>
+                <div>
+                  <label className="mb-1 block text-xs text-muted">Bearer token</label>
+                  <input
+                    type="password"
+                    value={powerToken}
+                    onChange={(e) => setPowerToken(e.target.value)}
+                    placeholder={config.hasPowerToken ? "•••••••• (stored)" : "optional"}
+                    autoComplete="off"
+                    className="w-full rounded border border-border bg-surface-elevated px-3 py-1.5 text-xs text-text outline-none focus:border-accent"
+                  />
+                  <p className="mt-1 text-[10px] text-muted">
+                    Sent as <code>Authorization: Bearer …</code>. Stored encrypted and never
+                    returned by the API. Leave blank to keep the stored token.
+                  </p>
+                </div>
               </div>
 
               {role === "worker" && (

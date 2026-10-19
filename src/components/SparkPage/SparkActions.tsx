@@ -80,7 +80,10 @@ export function SparkActions({ spark, onEdit, className }: SparkActionsProps) {
     setPowerMsg(null);
     try {
       const res = await wakeSpark(spark.id);
-      setPowerMsg({ text: res.message || "Wake packet sent", tone: "ok" });
+      setPowerMsg({
+        text: res.message || (res.method === "power" ? "Power on requested" : "Wake packet sent"),
+        tone: "ok",
+      });
     } catch (err: unknown) {
       setPowerMsg({
         text: err instanceof Error ? err.message : "Wake failed",
@@ -165,23 +168,27 @@ export function SparkActions({ spark, onEdit, className }: SparkActionsProps) {
             <PowerOffIcon className="h-3.5 w-3.5" />
             Shut down
           </button>
-        ) : spark.kind === "host" ? (
+        ) : spark.hasPowerControl || spark.kind === "host" ? (
           <button
             type="button"
             onClick={() => void handleWake()}
             disabled={powerLoading}
-            title="Wake-on-LAN (set MAC address in Edit Spark)"
+            title={
+              spark.hasPowerControl
+                ? "Power on through the configured outlet endpoint"
+                : "Wake-on-LAN (set MAC address in Edit Spark)"
+            }
             className="btn"
           >
             <PowerOnIcon className="h-3.5 w-3.5" />
-            Wake
+            {spark.hasPowerControl ? "Power on" : "Wake"}
           </button>
         ) : (
           <span
             className="sp-muted"
-            title="DGX Spark does not wake from a magic packet. The onboard NIC has no Wake-on-LAN."
+            title="No power endpoint configured, and DGX Spark does not wake from a magic packet."
           >
-            No Wake-on-LAN
+            No power control
           </span>
         )}
       </div>

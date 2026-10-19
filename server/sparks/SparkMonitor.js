@@ -662,6 +662,10 @@ export class SparkMonitor {
       uptime: this._uptimeSeconds,
       lanIp: this.spark.lanIp || "",
       isLocal: Boolean(this.spark.isLocal),
+      /** True when a generic power endpoint is configured (on/off URL). */
+      hasPowerControl: Boolean(
+        this.spark.powerControl?.onUrl || this.spark.powerControl?.offUrl
+      ),
       disabledDevices: this.spark.disabledDevices || [],
       disabledInterfaces: this.spark.disabledInterfaces || [],
       storagePollDisabled: Boolean(this.spark.storagePollDisabled),
@@ -887,6 +891,16 @@ export class SparkMonitor {
   }
 
   // ─── Liveness ─────────────────────────────────────────────
+  /**
+   * Force a liveness check now, bypassing the widening backoff. Used by the
+   * power orchestrator after a wake so a node that just booted is noticed
+   * without waiting for the next scheduled probe.
+   */
+  async checkOnlineNow() {
+    this._nextLivenessAt = 0;
+    await this._checkOnline();
+  }
+
   async _checkOnline() {
     if (!this._running || this._inflight.online) return;
     // Backoff gate: a unit that keeps refusing us is probed on a widening

@@ -25,6 +25,27 @@ export interface SparkConfig {
   macAddress?: string | null;
   /** Last MAC read from enP7s7 while the Spark was online (read-only). */
   detectedMacAddress?: string | null;
+  /**
+   * Optional generic power-control endpoints. SparkDash only speaks HTTP:
+   * `onUrl` / `offUrl` are batch endpoints, `target` identifies this unit in
+   * the batch body (`{"targets": ["1"]}`). The bearer token is stored
+   * server-side and never returned.
+   */
+  powerControl?: {
+    onUrl?: string | null;
+    offUrl?: string | null;
+    target?: string | null;
+    method?: "GET" | "POST" | "PUT" | "PATCH";
+    headers?: Record<string, string>;
+    body?: unknown;
+    timeoutMs?: number;
+    tokenHeader?: string;
+    tokenPrefix?: string;
+  } | null;
+  /** Response-only: true when a power-control token is stored server-side. */
+  hasPowerToken?: boolean;
+  /** Request-only: write-only power-control bearer token. */
+  powerToken?: string;
   isLocal: boolean;
   ssh: {
     host: string;
@@ -794,6 +815,8 @@ export interface SparkSnapshot {
   /** LAN IP for browser deep-links (e.g. Open ComfyUI). */
   lanIp?: string;
   isLocal?: boolean;
+  /** True when a generic power endpoint is configured (on/off URL). */
+  hasPowerControl?: boolean;
   disabledDevices: string[];
   disabledInterfaces: string[];
   storagePollDisabled?: boolean;
@@ -883,6 +906,41 @@ export interface RecipeListResponse {
   switch: RecipeSwitchState | null;
 }
 
+/** Progress of a fleet shutdown-all / wake-all (WS `powerAction`). */
+export interface PowerActionState {
+  action: "shutdown-all" | "wake-all";
+  phase:
+    | "starting"
+    | "capturing-recipe"
+    | "shutting-down"
+    | "waiting-offline"
+    | "powering-off"
+    | "powering-on"
+    | "waiting-online"
+    | "reactivating-recipe"
+    | "done"
+    | "failed";
+  startedAt: number;
+  updatedAt: number;
+  total: number;
+  completed: number;
+  current?: string | null;
+  recipeId?: string | null;
+  recipeIds?: string[];
+  error?: string | null;
+  message?: string | null;
+  results: Array<{
+    id: string;
+    name?: string;
+    ok: boolean;
+    skipped?: boolean;
+    error?: string | null;
+    message?: string | null;
+  }>;
+  /** Recipe-switch progress while `phase === "reactivating-recipe"`. */
+  recipeSwitch?: RecipeSwitchState | null;
+}
+
 export interface RecipeActivateResponse {
   started: boolean;
   targetId: string;
@@ -898,6 +956,7 @@ export interface WsSnapshot {
   /** Alert notifications' firing set — present only while `alertsEnabled` is on. */
   alerts?: { active: AlertInstance[] };
   recipeSwitch?: RecipeSwitchState | null;
+  powerAction?: PowerActionState | null;
 }
 
 // ─── Alert notifications (server/alerts) ──────────────────

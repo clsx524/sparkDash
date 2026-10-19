@@ -49,3 +49,5 @@ config/metrics-history.json.corrupt-*
 config/fleet-energy.scope-*.json
 config/*.tmp
 config/*.json.*.tmp
+config/power-state.json
+config/power-state.json.*
