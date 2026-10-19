@@ -4,10 +4,11 @@
     "label": "GLM-5.3-Flash EXL3 (TP2, TensorFold)",
     "group": "dual-text-gen",
     "tp": 2,
-    "requiredNodes": [{ "role": "head" }, { "role": "worker" }],
+    "requiredNodes": [{ "sparkId": "spark1" }, { "sparkId": "spark2" }],
     "nodes": [
       {
         "role": "head",
+        "sparkId": "spark1",
         "workdir": "~/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold",
         "startCmd": "./link-registry-weights.sh && ./start.sh",
         "stopCmd": "./stop.sh",
@@ -24,10 +25,11 @@
     "label": "Qwen3.8-Flash-Next (TP2+EP+MTP3)",
     "group": "dual-text-gen",
     "tp": 2,
-    "requiredNodes": [{ "role": "head" }, { "role": "worker" }],
+    "requiredNodes": [{ "sparkId": "spark1" }, { "sparkId": "spark2" }],
     "nodes": [
       {
         "role": "head",
+        "sparkId": "spark1",
         "workdir": "~/Qwen3.8-Flash-Next-Dual-DGX-Sparks",
         "startCmd": "./start.sh --launch",
         "stopCmd": "./stop.sh",
@@ -43,10 +45,11 @@
     "label": "MiniMax H3 (single-node, worker)",
     "group": "single-node",
     "tp": 1,
-    "requiredNodes": [{ "role": "worker" }],
+    "requiredNodes": [{ "sparkId": "spark2" }],
     "nodes": [
       {
         "role": "worker",
+        "sparkId": "spark2",
         "workdir": "~/MiniMax-H3-DGX-Spark",
         "startCmd": "make up",
         "stopCmd": "make down",
@@ -62,10 +65,11 @@
     "label": "DeepSeek-V4.1-Flash 1017 (EXL3 3.5bpw TensorFold, TP3)",
     "group": "multi-node",
     "tp": 3,
-    "requiredNodes": [{ "role": "head" }, { "role": "worker" }, { "sparkId": "atom" }],
+    "requiredNodes": [{ "sparkId": "spark1" }, { "sparkId": "spark2" }, { "sparkId": "atom" }],
     "nodes": [
       {
         "role": "head",
+        "sparkId": "spark1",
         "workdir": "~/ds41f-1.2.0",
         "startCmd": "./tp3-cluster.sh start",
         "stopCmd": "./tp3-cluster.sh stop",

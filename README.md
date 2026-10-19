@@ -1157,12 +1157,14 @@ declares `tp` and `requiredNodes` separately from its launcher commands:
 | MiniMax H3 | 1 | Worker (spark2) |
 | DeepSeek-V4.1-Flash | 3 | Head (spark1), worker (spark2), Atom |
 
-Dependency selectors use `{"role":"head"}`, `{"role":"worker"}`, or an explicit
-Spark ID such as `{"sparkId":"atom"}`. Each selector must resolve to exactly one
-configured Spark, and the unique dependency count must equal `tp`. The shipped
-DeepSeek recipe expects Atom's Spark ID to be `atom`; change that selector if
-your main-server configuration uses a different ID. Override definitions via
-`RECIPES_JSON_PATH` must include this metadata too.
+The shipped fleet definitions use explicit Spark IDs for both dependencies and
+launcher targets: `spark1`, `spark2`, and `atom`. Multiple nodes can therefore have
+the `worker` role without changing which machines a recipe wakes or starts.
+Custom definitions may use a role selector only when it resolves to exactly one
+Spark. Every selector must resolve uniquely, and the unique dependency count
+must equal `tp`. If your configured IDs differ, update both `requiredNodes`
+selectors and launcher `nodes[].sparkId` in the recipe definition. Overrides via
+`RECIPES_JSON_PATH` must include the same topology metadata.
 
 - Activation checks every required node over SSH, wakes only offline dependencies
   through their configured batch power-on endpoint (or host Wake-on-LAN), then
