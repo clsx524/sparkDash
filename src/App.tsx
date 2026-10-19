@@ -183,6 +183,7 @@ function DashboardApp() {
     activeSpark: liveActive,
     connected,
     recipeSwitch,
+    powerAction,
     lastValidSnapshotAt,
     snapshotError,
     refreshInterval,
@@ -610,6 +611,8 @@ function DashboardApp() {
                   }}
                   showVramBreakdown={settings?.showVramBreakdown ?? true}
                   temperatureUnit={settings?.temperatureUnit ?? "celsius"}
+                  powerAction={powerAction}
+                  recipeSwitch={recipeSwitch}
                   onSelectSpark={navigate}
                   onNavigate={navigate}
                 />

@@ -11,6 +11,7 @@
  *     version: 2,
  *     secrets: { [sparkId]: "<encrypted ssh password>" },
  *     llmApiKeys: { [sparkId]: "<encrypted JSON { \"8000\": \"sk-…\" }>" },
+ *     powerTokens: { [sparkId]: "<encrypted power-control bearer token>" }, (optional)
  *     alertChannels: { [channelId]: "<encrypted alert channel URL>" },   (optional)
  *     helperTokens: { [helperId]: "<encrypted helper bearer>" }          (optional)
  *   }
@@ -132,6 +133,7 @@ let lastLoggedHelperTokens = -1;
  *   passwords: Map<string, string>,
  *   llmApiKeys: Map<string, Record<string, string>>,
  *   helperTokens: Map<string, string>,
+ *   powerTokens: Map<string, string>,
  * }}
  */
 export function loadSecrets() {
@@ -141,9 +143,11 @@ export function loadSecrets() {
   const llmApiKeys = new Map();
   /** @type {Map<string, string>} */
   const helperTokens = new Map();
+  /** @type {Map<string, string>} */
+  const powerTokens = new Map();
 
   if (!fs.existsSync(SPARKS_SECRETS_PATH)) {
-    return { passwords, llmApiKeys, helperTokens };
+    return { passwords, llmApiKeys, helperTokens, powerTokens };
   }
 
   try {
@@ -236,22 +240,48 @@ export function loadSecrets() {
         );
       }
     }
+
+    const powerEntries = data?.powerTokens || {};
+    if (typeof powerEntries === "object" && powerEntries !== null) {
+      let failed = 0;
+      for (const [id, blob] of Object.entries(powerEntries)) {
+        if (!id || typeof blob !== "string") continue;
+        try {
+          const token = decrypt(blob, key);
+          if (token) powerTokens.set(id, token);
+        } catch {
+          failed += 1;
+          console.error(
+            `[secretsStore] Failed to decrypt power token for ${id} (wrong/missing key?)`
+          );
+        }
+      }
+      if (powerTokens.size > 0) {
+        console.log(`[secretsStore] Loaded ${powerTokens.size} power token(s) from encrypted store`);
+      }
+      if (failed > 0) {
+        console.warn(
+          `[secretsStore] ${failed} power token(s) could not be decrypted — re-enter via Edit Spark`
+        );
+      }
+    }
   } catch (err) {
     console.error(`[secretsStore] Failed to load secrets: ${err.message}`);
   }
 
-  return { passwords, llmApiKeys, helperTokens };
+  return { passwords, llmApiKeys, helperTokens, powerTokens };
 }
 
 /**
- * Persist SSH passwords + per-port LLM API keys (encrypted).
+ * Persist SSH passwords + per-port LLM API keys + power-control tokens (encrypted).
  * Alert channel URLs and helper tokens already on disk are kept.
  * The file is removed only when every namespace is empty.
  *
  * @param {Map<string, string>} passwords
  * @param {Map<string, Record<string, string>>} [llmApiKeys]
+ * @param {Map<string, string>} [powerTokens]
  */
-export function saveSecrets(passwords, llmApiKeys = new Map()) {
+export function saveSecrets(passwords, llmApiKeys = new Map(), powerTokens = new Map()) {
   const alertChannels = readRawSection("alertChannels");
   const helperTokens = readRawSection("helperTokens");
   const hasPasswords = passwords && passwords.size > 0;
@@ -264,10 +294,12 @@ export function saveSecrets(passwords, llmApiKeys = new Map()) {
       }
     }
   }
+  const hasPowerTokens = powerTokens && powerTokens.size > 0;
 
   if (
     !hasPasswords &&
     !hasKeys &&
+    !hasPowerTokens &&
     Object.keys(alertChannels).length === 0 &&
     Object.keys(helperTokens).length === 0
   ) {
@@ -297,11 +329,21 @@ export function saveSecrets(passwords, llmApiKeys = new Map()) {
     }
   }
 
-  writeSecretsFile({ secrets, llmApiKeys: llmOut, alertChannels, helperTokens });
+  /** @type {Record<string, string>} */
+  const powerOut = {};
+  if (powerTokens) {
+    for (const [id, token] of powerTokens.entries()) {
+      if (token) powerOut[id] = encrypt(String(token), key);
+    }
+  }
+
+  writeSecretsFile({ secrets, llmApiKeys: llmOut, powerTokens: powerOut, alertChannels, helperTokens });
   const keyCount = Object.keys(llmOut).length;
+  const powerCount = Object.keys(powerOut).length;
   console.log(
     `[secretsStore] Saved ${Object.keys(secrets).length} SSH password(s)` +
-      (keyCount ? `, ${keyCount} LLM API key bundle(s)` : "")
+      (keyCount ? `, ${keyCount} LLM API key bundle(s)` : "") +
+      (powerCount ? `, ${powerCount} power token(s)` : "")
   );
 }
 
@@ -320,10 +362,12 @@ export function saveHelperTokens(helperTokens) {
   let secrets;
   let llmApiKeys;
   let alertChannels;
+  let powerTokens;
   try {
     secrets = readRawSection("secrets");
     llmApiKeys = readRawSection("llmApiKeys");
     alertChannels = readRawSection("alertChannels");
+    powerTokens = readRawSection("powerTokens");
   } catch (err) {
     throw new Error(`secrets file is corrupt: ${err.message}`);
   }
@@ -336,12 +380,13 @@ export function saveHelperTokens(helperTokens) {
     Object.keys(secrets).length === 0 &&
     Object.keys(llmApiKeys).length === 0 &&
     Object.keys(alertChannels).length === 0 &&
+    Object.keys(powerTokens).length === 0 &&
     Object.keys(helpers).length === 0
   ) {
     clearSecretsFile();
     return;
   }
-  writeSecretsFile({ secrets, llmApiKeys, alertChannels, helperTokens: helpers });
+  writeSecretsFile({ secrets, llmApiKeys, powerTokens, alertChannels, helperTokens: helpers });
 }
 
 // ─── File sections ───────────────────────────────────────
@@ -383,9 +428,10 @@ function clearSecretsFile() {
   }
 }
 
-/** Write every section. Empty alertChannels and helperTokens sections are left out of the file. */
-function writeSecretsFile({ secrets, llmApiKeys, alertChannels, helperTokens }) {
+/** Write every section; empty optional sections are left out of the file. */
+function writeSecretsFile({ secrets, llmApiKeys, powerTokens, alertChannels, helperTokens }) {
   const body = { version: 2, secrets, llmApiKeys };
+  if (powerTokens && Object.keys(powerTokens).length > 0) body.powerTokens = powerTokens;
   if (alertChannels && Object.keys(alertChannels).length > 0) body.alertChannels = alertChannels;
   if (helperTokens && Object.keys(helperTokens).length > 0) body.helperTokens = helperTokens;
   atomicWrite(SPARKS_SECRETS_PATH, JSON.stringify(body, null, 2) + "\n", 0o644);
@@ -442,6 +488,7 @@ export function saveAlertChannelUrls(urls, opts = {}) {
   const secrets = readRawSection("secrets");
   const llmApiKeys = readRawSection("llmApiKeys");
   const helperTokens = readRawSection("helperTokens");
+  const powerTokens = readRawSection("powerTokens");
   const existing = readRawSection("alertChannels");
   /** @type {Record<string, string>} */
   const alertChannels = {};
@@ -461,11 +508,12 @@ export function saveAlertChannelUrls(urls, opts = {}) {
   if (
     Object.keys(secrets).length === 0 &&
     Object.keys(llmApiKeys).length === 0 &&
+    Object.keys(powerTokens).length === 0 &&
     Object.keys(alertChannels).length === 0 &&
     Object.keys(helperTokens).length === 0
   ) {
     clearSecretsFile();
     return;
   }
-  writeSecretsFile({ secrets, llmApiKeys, alertChannels, helperTokens });
+  writeSecretsFile({ secrets, llmApiKeys, powerTokens, alertChannels, helperTokens });
 }

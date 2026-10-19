@@ -883,7 +883,7 @@ sparkDash/
 | GET | `/api/health` · `/api/auth/status` | Bind / auth mode; whether a token is required and accepted |
 | GET · PUT · DELETE | `/api/sparks/:id/gpu-clock` | GPU clock cap on a Spark unit: status, apply (`maxMHz`, `persist`), remove (see [GPU clock cap](#gpu-clock-cap)) |
 | POST | `/api/sparks/gpu-clock-all` | GPU clock cap on every Spark at once: `{ maxMHz, persist? }`, or `{ reset: true }`; one result per unit (see [GPU clock cap](#gpu-clock-cap)) |
-| POST | `/api/sparks/:id/shutdown` · `/wake` · `/api/sparks/shutdown-all` · `/wake-all` | Power controls (see [Power controls](#power-controls-shutdown--wake-on-lan)) |
+| POST | `/api/sparks/:id/shutdown` · `/wake` · `/api/sparks/shutdown-all` · `/wake-all` | Power controls (see [Power controls](#power-controls-shutdown--wake-on-lan)). Batch routes return `{started:true}` and report progress on the WS `powerAction`; `GET /api/power/state` returns the latest state. |
 | POST | `/api/sparks/:id/refresh/:domain` | Re-poll one domain now (`storage` or `llm` only) |
 | GET/POST/DELETE | `/api/sparks/:id/llm/showcase[/:sessionId]` | Prompt Showcase sessions |
 | GET | `/api/events` | Fleet event log (`limit`, `sparkId`, `sinceId`, `beforeId`; 2000 kept) |
@@ -1105,10 +1105,43 @@ units do not display stale discovered models.
   `HOST_PROC_PATH` mount and `privileged: true` the collectors already need. A
   bare-host install calls `sudo` directly. The helper always resolves against
   the **host** filesystem, so it does not need to exist inside the container.
-- **Wake** / **Wake All** send a UDP magic packet (port 9) to **dedicated GPU hosts** whose NIC and firmware support Wake-on-LAN. The MAC is taken from the **enP7s7** interface while the host is online (persisted as `detectedMacAddress`), or from a **MAC override** in Edit Spark. Broadcast is derived as `/24` from LAN IP, or `255.255.255.255` if LAN IP is missing. **DGX Spark does not wake this way** — the GB10 onboard NIC has no Wake-on-LAN — so the Wake control is not offered on Spark units.
+- **Wake** / **Wake All** first use a configured **power endpoint** (see below) for every unit type, including DGX Sparks. Hosts without a power endpoint fall back to a UDP magic packet (port 9) when their NIC supports Wake-on-LAN. The MAC is taken from the **enP7s7** interface while the host is online (persisted as `detectedMacAddress`), or from a **MAC override** in Edit Spark. Broadcast is derived as `/24` from LAN IP, or `255.255.255.255` if LAN IP is missing.
 - On a **Windows PC** shutdown runs `shutdown.exe /s /t 5` over SSH; Wake-on-LAN needs a MAC address entered by hand.
-- Batch shutdown only targets **online** Sparks; offline nodes are skipped.
+- **Shutdown All** gracefully shuts down online nodes over SSH, waits for each to go offline, then cuts its outlet. Offline nodes with a configured outlet are also powered off. The dashboard host is shut down last and its own outlet is never cut (that would kill the controller mid-flight).
+- **Wake All** powers on every offline node with a configured outlet, waits for the nodes to come online, then re-activates the recipe that was active before the last shutdown. The recipe id is captured in `config/power-state.json` at shutdown time.
 - Power APIs are mutations: with `SPARKDASH_TOKEN` set they require it; without it they are open on loopback (local trust) **and** on a remote bind, unless `SPARKDASH_ALLOW_OPEN_REMOTE=0` makes that bind fail closed.
+
+#### Generic power endpoints
+
+SparkDash does not hardcode Kasa or any other controller. Each Spark can carry a
+`powerControl` object in Edit Spark:
+
+```json
+"powerControl": {
+  "onUrl": "http://kasa-mcp:8812/outlets/on",
+  "offUrl": "http://kasa-mcp:8812/outlets/off",
+  "target": "1",
+  "method": "POST",
+  "timeoutMs": 10000
+}
+```
+
+- `onUrl` / `offUrl` are **batch** endpoints. SparkDash groups Sparks that share
+  the same endpoint and sends one request with
+  `{"targets": ["1", "2", "3"]}` instead of one request per node.
+- `target` identifies this unit in the batch body. For the Kasa HS300, use the
+  outlet index from `GET /outlets` (the three Sparks in this fleet use outlets
+  **1, 2 and 3**).
+- The bearer token is entered in Edit Spark, stored encrypted in
+  `config/sparks-secrets.json`, and sent as `Authorization: Bearer <token>`.
+  It is never returned by the API. `tokenHeader` / `tokenPrefix` can override
+  the header name and prefix for other controllers.
+- The endpoint answers `{"results": [{"target": "1", "ok": true}, ...]}`. A plain
+  2xx without a `results` array is treated as success for every target in that
+  request.
+- Kasa MCP exposes the batch endpoints at `GET /outlets`, `POST /outlets/on`
+  and `POST /outlets/off`; all except `/healthz` require the same bearer token
+  as `/mcp`.
 
 ### Themes
 

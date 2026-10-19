@@ -144,7 +144,11 @@ function SparkCardImpl({
     setWakeMsg(null);
     try {
       const res = await wakeSpark(spark.id);
-      setWakeMsg(res.success ? "Wake packet sent" : res.error || res.message || "Wake failed");
+      setWakeMsg(
+        res.success
+          ? res.message || (res.method === "power" ? "Power on requested" : "Wake packet sent")
+          : res.error || res.message || "Wake failed"
+      );
     } catch (err) {
       setWakeMsg(err instanceof Error ? err.message : "Wake failed");
     } finally {
@@ -277,7 +281,7 @@ function SparkCardImpl({
       {!online || !gpu ? (
         <div className="ov-sc__off">
           <span>{online ? "Waiting for metrics…" : "Host unreachable"}</span>
-          {!online && spark.kind === "host" ? (
+          {!online && (spark.hasPowerControl || spark.kind === "host") ? (
             <button
               type="button"
               className="btn btn--primary btn--sm"
@@ -285,7 +289,7 @@ function SparkCardImpl({
               onClick={() => void onWake()}
             >
               <PowerOnIcon className="h-3.5 w-3.5" />
-              Wake up
+              {spark.hasPowerControl ? "Power on" : "Wake up"}
             </button>
           ) : null}
           {wakeMsg ? <span className="ov-sc__msg">{wakeMsg}</span> : null}

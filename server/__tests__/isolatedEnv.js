@@ -34,6 +34,11 @@ export const CONFIG_PATH_VARS = [
   "OCCUPANCY_HELPERS_JSON_PATH",
   "MODEL_PRICES_JSON_PATH",
   "MODEL_PRICES_FETCH",
+  "POWER_STATE_JSON_PATH",
+  "RECIPES_JSON_PATH",
+  "RECIPE_SWITCH_HISTORY_JSON_PATH",
+  "MODEL_REGISTRY_JSON_PATH",
+  "MODELS_JSON_PATH",
 ];
 
 /** Variables that point at a directory the server writes into. */

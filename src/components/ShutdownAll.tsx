@@ -24,13 +24,10 @@ export function ShutdownAll({ sparks, className = "" }: { sparks: SparkSnapshot[
     setMsg(null);
     try {
       const res = await shutdownAllSparks();
-      const ok = res.results.filter((r) => r.ok).length;
-      const fail = res.results.filter((r) => !r.ok && !r.skipped).length;
-      const skipped = res.results.filter((r) => r.skipped).length;
-      const parts = [`${ok} shut down`];
-      if (fail) parts.push(`${fail} failed`);
-      if (skipped) parts.push(`${skipped} skipped`);
-      setMsg({ text: parts.join(", "), tone: fail === 0 ? "ok" : "err" });
+      setMsg({
+        text: res.started ? "Shutdown started" : "Shutdown requested",
+        tone: "ok",
+      });
     } catch (err: unknown) {
       setMsg({ text: err instanceof Error ? err.message : "Batch shutdown failed", tone: "err" });
     } finally {
@@ -62,7 +59,7 @@ export function ShutdownAll({ sparks, className = "" }: { sparks: SparkSnapshot[
         onClose={() => setOpen(false)}
         onConfirm={run}
         title="Shutdown All"
-        description={`Gracefully shut down all ${onlineCount} online Spark${onlineCount === 1 ? "" : "s"}? Offline nodes will be skipped.`}
+        description={`Gracefully shut down all ${onlineCount} online Spark${onlineCount === 1 ? "" : "s"}, then power off every node with a configured outlet. The active recipe is remembered and re-activated on Wake all.`}
         confirmLabel="Shut down all"
         warnings={shutdownWarnings(sparks)}
       />

@@ -194,9 +194,111 @@ export function normalizeSshPort(value) {
   return n;
 }
 
+const POWER_METHODS = new Set(["GET", "POST", "PUT", "PATCH"]);
+const HEADER_NAME_RE = /^[A-Za-z0-9!#$%&'*+.^_`|~-]+$/;
+
+/** Validate one power-control URL: http(s), no credentials, allowed host. */
+function validatePowerUrl(value, label) {
+  if (value == null || value === "") return null;
+  if (typeof value !== "string") return `${label} must be a string`;
+  let url;
+  try {
+    url = new URL(value);
+  } catch {
+    return `${label} is not a valid URL`;
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    return `${label} must use http or https`;
+  }
+  if (url.username || url.password) {
+    return `${label} must not contain credentials`;
+  }
+  if (!isAllowedTargetHost(url.hostname)) {
+    return `${label} host is not allowed: ${url.hostname}`;
+  }
+  return null;
+}
+
+/**
+ * Validate the optional generic power-control config. SparkDash only speaks
+ * HTTP; the endpoint is whatever the operator points it at (Kasa MCP, a relay,
+ * a custom script). Returns null if ok, else an error message.
+ * @param {unknown} powerControl
+ */
+export function validatePowerControl(powerControl) {
+  if (powerControl == null) return null;
+  if (typeof powerControl !== "object" || Array.isArray(powerControl)) {
+    return "powerControl must be an object";
+  }
+  const onErr = validatePowerUrl(powerControl.onUrl, "powerControl.onUrl");
+  if (onErr) return onErr;
+  const offErr = validatePowerUrl(powerControl.offUrl, "powerControl.offUrl");
+  if (offErr) return offErr;
+  if (!powerControl.onUrl && !powerControl.offUrl) {
+    return "powerControl needs onUrl or offUrl";
+  }
+  if (
+    powerControl.target != null &&
+    typeof powerControl.target !== "string" &&
+    typeof powerControl.target !== "number"
+  ) {
+    return "powerControl.target must be a string or number";
+  }
+  if (powerControl.target != null && String(powerControl.target).length > 64) {
+    return "powerControl.target is too long";
+  }
+  if (
+    powerControl.method != null &&
+    !POWER_METHODS.has(String(powerControl.method).toUpperCase())
+  ) {
+    return "powerControl.method must be GET, POST, PUT or PATCH";
+  }
+  if (powerControl.headers != null) {
+    if (typeof powerControl.headers !== "object" || Array.isArray(powerControl.headers)) {
+      return "powerControl.headers must be an object";
+    }
+    const entries = Object.entries(powerControl.headers);
+    if (entries.length > 20) return "powerControl.headers has too many entries";
+    let bytes = 0;
+    for (const [name, value] of entries) {
+      if (!HEADER_NAME_RE.test(name)) return `Invalid powerControl header name: ${name}`;
+      if (typeof value !== "string") return `powerControl header ${name} must be a string`;
+      bytes += name.length + value.length;
+    }
+    if (bytes > 8192) return "powerControl.headers is too large";
+  }
+  if (powerControl.body != null) {
+    const body =
+      typeof powerControl.body === "string"
+        ? powerControl.body
+        : JSON.stringify(powerControl.body);
+    if (body.length > 65536) return "powerControl.body is too large";
+  }
+  if (powerControl.timeoutMs != null) {
+    const n = Number(powerControl.timeoutMs);
+    if (!Number.isInteger(n) || n < 1000 || n > 60000) {
+      return "powerControl.timeoutMs must be 1000–60000";
+    }
+  }
+  if (
+    powerControl.tokenHeader != null &&
+    (typeof powerControl.tokenHeader !== "string" ||
+      !HEADER_NAME_RE.test(powerControl.tokenHeader))
+  ) {
+    return "powerControl.tokenHeader is not a valid header name";
+  }
+  if (powerControl.tokenPrefix != null && typeof powerControl.tokenPrefix !== "string") {
+    return "powerControl.tokenPrefix must be a string";
+  }
+  if (powerControl.tokenPrefix != null && powerControl.tokenPrefix.length > 32) {
+    return "powerControl.tokenPrefix is too long";
+  }
+  return null;
+}
+
 /**
  * Validate fields used for SSH/LLM probes. Returns null if ok, else error message.
- * @param {{ lanIp?: string, llmHost?: string, ssh?: { host?: string, user?: string, port?: unknown } }} body
+ * @param {{ lanIp?: string, llmHost?: string, ssh?: { host?: string, user?: string, port?: unknown }, powerControl?: unknown, powerToken?: unknown }} body
  */
 export function validateSparkTarget(body) {
   const user = body?.ssh?.user;
@@ -224,6 +326,14 @@ export function validateSparkTarget(body) {
     if (raw != null && raw !== "" && normalizeSshPort(raw) == null) {
       return "SSH port must be an integer from 1 to 65535";
     }
+  }
+  const powerError = validatePowerControl(body?.powerControl);
+  if (powerError) return powerError;
+  if (body?.powerToken != null && typeof body.powerToken !== "string") {
+    return "powerToken must be a string";
+  }
+  if (typeof body?.powerToken === "string" && body.powerToken.length > 4096) {
+    return "powerToken is too long";
   }
   return null;
 }

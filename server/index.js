@@ -65,6 +65,9 @@ import { createAlertsRuntime, registerAlertRoutes } from "./alerts/runtime.js";
 import { RecipeRegistry } from "./collectors/RecipeRegistry.js";
 import { ModelRegistry } from "./collectors/ModelRegistry.js";
 import { switchRecipe, isSwitchInFlight, RecipeSwitchError } from "./collectors/recipeActions.js";
+import { createPowerOrchestrator } from "./power/powerOrchestrator.js";
+import * as powerClient from "./power/powerClient.js";
+import * as powerState from "./power/powerState.js";
 import { FleetEnergyTracker } from "./energy/FleetEnergyTracker.js";
 import { EventLog } from "./events/EventLog.js";
 import { UnitHistory } from "./metrics/UnitHistory.js";
@@ -309,6 +312,8 @@ const recipeRegistry = new RecipeRegistry(registry);
 const modelRegistry = new ModelRegistry(registry);
 /** Latest recipe-switch progress, broadcast to every WS client and served to late joiners. */
 let recipeSwitchState = null;
+/** Latest shutdown-all / wake-all progress, broadcast to every WS client. */
+let powerActionState = null;
 const fleetEnergyTracker = new FleetEnergyTracker({
   nodeIds: registry.sparkIds,
   filePath: FLEET_ENERGY_JSON_PATH,
@@ -674,7 +679,9 @@ app.patch("/api/sparks/:id", (req, res) => {
       body.isLocal != null ||
       body.ssh?.host != null ||
       body.ssh?.user != null ||
-      body.ssh?.port != null
+      body.ssh?.port != null ||
+      body.powerControl !== undefined ||
+      body.powerToken !== undefined
     ) {
       const existing = registry.getSpark(req.params.id);
       if (!existing) return res.status(404).json({ error: "Spark not found" });
@@ -683,6 +690,9 @@ app.patch("/api/sparks/:id", (req, res) => {
         lanIp: body.lanIp ?? existing.lanIp,
         llmHost: body.llmHost ?? existing.llmHost,
         ssh: { ...existing.ssh, ...(body.ssh || {}) },
+        powerControl:
+          body.powerControl !== undefined ? body.powerControl : existing.powerControl,
+        powerToken: body.powerToken,
       };
       const validationError = validateSparkTarget(merged);
       if (validationError) {
@@ -2084,72 +2094,75 @@ function noteWake(spark) {
   });
 }
 
-/** Batch routes first so they never collide with /:id/* if routing changes. */
-app.post("/api/sparks/shutdown-all", async (_req, res) => {
-  const results = [];
-  // Remotes first, local last — shutting down the dashboard host mid-loop would
-  // skip remaining Sparks.
-  const ordered = [
-    ...registry.sparks.filter((s) => !s.isLocal),
-    ...registry.sparks.filter((s) => s.isLocal),
-  ];
-  for (const spark of ordered) {
-    const monitor = monitors.get(spark.id);
-    if (!monitor?.online) {
-      results.push({ id: spark.id, ok: false, skipped: true, error: "Offline — skipped" });
-      continue;
-    }
-    try {
-      // Local dashboard host: acknowledge before power-off kills this process.
-      if (spark.isLocal) {
-        results.push({ id: spark.id, ok: true, message: "Shutdown initiated" });
-        setImmediate(() => {
-          void initiateSparkShutdown(spark).catch((err) => {
-            console.error(`[shutdown-all] local ${spark.id}:`, err.message);
-          });
-        });
-        continue;
-      }
-      await initiateSparkShutdown(spark);
-      results.push({ id: spark.id, ok: true });
-    } catch (err) {
-      results.push({ id: spark.id, ok: false, error: err.message || String(err) });
-    }
+/** WoL fallback for hosts without a power endpoint. */
+async function wakeSparkWol(spark) {
+  const cleanMac = effectiveMac(spark);
+  if (!cleanMac) {
+    throw new Error("No MAC address (enP7s7 not seen yet; set override in Edit Spark)");
   }
-  res.json({ success: true, results });
+  const broadcast = broadcastForLanIp(spark.lanIp);
+  const sent = await sendWol(cleanMac, broadcast);
+  noteWake(spark);
+  return sent;
+}
+
+const powerOrchestrator = createPowerOrchestrator({
+  registry,
+  getOnline: (id) => Boolean(monitors.get(id)?.online),
+  checkOnlineNow: async (id) => {
+    const monitor = monitors.get(id);
+    if (monitor?.checkOnlineNow) await monitor.checkOnlineNow();
+  },
+  recipeRegistry,
+  modelRegistry,
+  powerClient,
+  powerState,
+  shutdownSpark: initiateSparkShutdown,
+  wakeSpark: wakeSparkWol,
+  switchRecipe,
+  isSwitchInFlight,
+  onProgress: (state) => {
+    powerActionState = { ...state, updatedAt: Date.now() };
+    forceBroadcast();
+  },
+  recordEvent,
 });
 
-app.post("/api/sparks/wake-all", async (_req, res) => {
-  const results = [];
-  for (const spark of registry.sparks) {
-    if (spark.kind !== "host") {
-      results.push({
-        id: spark.id,
-        ok: false,
-        skipped: true,
-        error: "DGX Spark does not support Wake-on-LAN",
-      });
-      continue;
-    }
-    const cleanMac = effectiveMac(spark);
-    if (!cleanMac) {
-      results.push({
-        id: spark.id,
-        ok: false,
-        error: "No MAC address (enP7s7 not seen yet; set override in Edit Spark)",
-      });
-      continue;
-    }
-    try {
-      const broadcast = broadcastForLanIp(spark.lanIp);
-      const sent = await sendWol(cleanMac, broadcast);
-      noteWake(spark);
-      results.push({ id: spark.id, ok: true, mac: sent.mac, broadcast: sent.broadcast });
-    } catch (err) {
-      results.push({ id: spark.id, ok: false, error: err.message || String(err) });
-    }
+/** Batch routes first so they never collide with /:id/* if routing changes. */
+app.post("/api/sparks/shutdown-all", (req, res) => {
+  if (!allowDestructive(principalKey(req)) || !allowGlobalDestructive(clientKey(req))) {
+    return rejectLimited(res, "Too many power requests; try again shortly");
   }
-  res.json({ success: true, results });
+  if (powerOrchestrator.isInFlight()) {
+    return res.status(409).json({ error: "A power action is already in progress" });
+  }
+  if (isSwitchInFlight()) {
+    return res.status(409).json({ error: "A recipe switch is in progress" });
+  }
+  res.json({ success: true, started: true });
+  powerOrchestrator.shutdownAll().catch((err) => {
+    console.error("[shutdown-all]", err.message);
+  });
+});
+
+app.post("/api/sparks/wake-all", (req, res) => {
+  if (!allowDestructive(principalKey(req)) || !allowGlobalDestructive(clientKey(req))) {
+    return rejectLimited(res, "Too many power requests; try again shortly");
+  }
+  if (powerOrchestrator.isInFlight()) {
+    return res.status(409).json({ error: "A power action is already in progress" });
+  }
+  if (isSwitchInFlight()) {
+    return res.status(409).json({ error: "A recipe switch is in progress" });
+  }
+  res.json({ success: true, started: true });
+  powerOrchestrator.wakeAll().catch((err) => {
+    console.error("[wake-all]", err.message);
+  });
+});
+
+app.get("/api/power/state", (_req, res) => {
+  res.json({ action: powerActionState });
 });
 
 app.post("/api/sparks/:id/shutdown", async (req, res) => {
@@ -2212,9 +2225,32 @@ app.post("/api/sparks/:id/wake", async (req, res) => {
   try {
     const spark = registry.getSpark(req.params.id);
     if (!spark) return res.status(404).json({ error: "Spark not found" });
+
+    // A configured power endpoint works for every unit type, including DGX
+    // Sparks whose onboard NIC has no Wake-on-LAN.
+    if (powerClient.hasPowerControl(spark)) {
+      const [result] = await powerClient.powerOn([spark]);
+      if (!result?.ok) {
+        return res.status(502).json({ error: result?.error || "Power on failed" });
+      }
+      recordEvent({
+        type: "power.on",
+        severity: "info",
+        sparkId: spark.id,
+        sparkName: spark.name,
+        message: `Power on requested for ${spark.name || spark.id}`,
+      });
+      return res.json({
+        success: true,
+        method: "power",
+        message: `Power on requested for ${spark.name || spark.id}`,
+      });
+    }
+
     if (spark.kind !== "host") {
       return res.status(400).json({
-        error: "DGX Spark does not support Wake-on-LAN. The onboard NIC does not wake from a magic packet.",
+        error:
+          "No power endpoint configured, and DGX Spark does not support Wake-on-LAN. The onboard NIC does not wake from a magic packet.",
       });
     }
 
@@ -2525,6 +2561,7 @@ function buildSnapshotPayload(sparks = orderedSnapshots()) {
     sparks,
     refreshInterval: getSettings().pollIntervalMs,
     recipeSwitch: recipeSwitchState,
+    powerAction: powerActionState,
   };
   // Only while alerts are on: the key's absence tells the UI to derive its own.
   const alerts = alertsRuntime.snapshotBlock();

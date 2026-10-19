@@ -1,8 +1,15 @@
 import { useEffect, useMemo, useState } from "react";
-import type { AlertInstance, SparkSnapshot } from "../../api/types";
+import type {
+  AlertInstance,
+  PowerActionState,
+  RecipeSwitchState,
+  SparkSnapshot,
+} from "../../api/types";
 import { isWorkerSpark } from "../../api/sparkRole";
 import { updateAllHermes, wakeAllSparks } from "../../api/client";
 import { ShutdownAll } from "../ShutdownAll";
+import { ConfirmShutdownDialog } from "../ConfirmShutdownDialog";
+import { PowerActionBanner } from "../PowerActionBanner";
 import { FleetEnergyCard } from "./FleetEnergyCard";
 import { FleetAlertStrip } from "./FleetAlertStrip";
 import { FleetTokenTotals } from "./FleetTokenTotals";
@@ -39,6 +46,10 @@ interface OverviewPageProps {
   /** VRAM bar split by engine / system / free, judged by headroom. On by default. */
   showVramBreakdown?: boolean;
   temperatureUnit?: "celsius" | "fahrenheit";
+  /** Live shutdown-all / wake-all progress from the WS snapshot. */
+  powerAction?: PowerActionState | null;
+  /** Live recipe-switch progress (shown while wake-all re-activates a recipe). */
+  recipeSwitch?: RecipeSwitchState | null;
   onSelectSpark?: (id: string) => void;
   /** Open a dedicated page (Token totals, Fleet energy, Activity). */
   onNavigate?: (id: string) => void;
@@ -59,6 +70,8 @@ export function OverviewPage({
   kpis,
   showVramBreakdown = true,
   temperatureUnit = "celsius",
+  powerAction = null,
+  recipeSwitch = null,
   onSelectSpark,
   onNavigate,
 }: OverviewPageProps) {
@@ -96,6 +109,7 @@ export function OverviewPage({
   const hiddenWorkerCount = hideWorkers ? sparks.filter(isWorkerSpark).length : 0;
   const [batchLoading, setBatchLoading] = useState(false);
   const [batchMsg, setBatchMsg] = useState<{ text: string; tone: "ok" | "err" } | null>(null);
+  const [wakeAllOpen, setWakeAllOpen] = useState(false);
   /** Spark ids we started a batch Hermes update on; drives the live progress bar. */
   const [batchRun, setBatchRun] = useState<string[] | null>(null);
 
@@ -169,16 +183,14 @@ export function OverviewPage({
     }
   }
 
-  async function handleWakeAll() {
+  async function runWakeAll() {
     setBatchLoading(true);
     setBatchMsg(null);
     try {
       const res = await wakeAllSparks();
-      const ok = res.results.filter((r) => r.ok).length;
-      const fail = res.results.filter((r) => !r.ok).length;
       setBatchMsg({
-        text: fail === 0 ? `${ok} wake packet(s) sent` : `${ok} sent, ${fail} failed`,
-        tone: fail === 0 ? "ok" : "err",
+        text: res.started ? "Wake started" : "Wake requested",
+        tone: "ok",
       });
     } catch (err: unknown) {
       setBatchMsg({
@@ -276,12 +288,12 @@ export function OverviewPage({
                   )}
                 </button>
               )}
-              {sparks.some((spark) => spark.kind === "host") && (
+              {sparks.some((spark) => spark.hasPowerControl || spark.kind === "host") && (
                 <button
                   type="button"
-                  onClick={() => void handleWakeAll()}
-                  disabled={batchLoading}
-                  title="Wake dedicated GPU hosts that have a MAC configured. DGX Spark has no Wake-on-LAN."
+                  onClick={() => setWakeAllOpen(true)}
+                  disabled={batchLoading || Boolean(powerAction && powerAction.phase !== "done" && powerAction.phase !== "failed")}
+                  title="Power on every offline node with a configured outlet, then re-activate the last active recipe. Hosts without an outlet fall back to Wake-on-LAN."
                   className="btn"
                 >
                   <PowerOnIcon className="h-3.5 w-3.5" />
@@ -291,6 +303,7 @@ export function OverviewPage({
               <ShutdownAll sparks={sparks} className="ov-shutdown" />
             </>
           )}
+          <PowerActionBanner action={powerAction} recipeSwitch={recipeSwitch} />
         </div>
       </div>
 
@@ -361,6 +374,18 @@ export function OverviewPage({
         </div>
         ) : null}
       </div>
+
+      <ConfirmShutdownDialog
+        open={wakeAllOpen}
+        onClose={() => setWakeAllOpen(false)}
+        onConfirm={runWakeAll}
+        title="Wake All"
+        description={`Power on every offline node with a configured outlet and re-activate the last active recipe? Hosts without an outlet fall back to Wake-on-LAN.`}
+        confirmLabel="Wake all"
+        tone="default"
+        warningTitle="This powers on hardware."
+        warningDetail="Nodes will boot, then the recipe that was active before the last shutdown is re-activated automatically."
+      />
     </div>
   );
 }
