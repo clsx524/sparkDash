@@ -1055,13 +1055,13 @@ declares `tp` and `requiredNodes` separately from its launcher commands:
 
 | Recipe | TP | Required physical nodes |
 |--------|----|-------------------------|
-| GLM-5.3-Flash EXL3 | 2 | Head (spark1), worker (spark2) |
-| Qwen3.8-Flash-Next | 2 | Head (spark1), worker (spark2) |
-| MiniMax H3 | 1 | Worker (spark2) |
-| DeepSeek-V4.1-Flash | 3 | Head (spark1), worker (spark2), Atom |
+| GLM-5.3-Flash EXL3 | 2 | Head (`spark-1`), worker (`spark-2`) |
+| Qwen3.8-Flash-Next | 2 | Head (`spark-1`), worker (`spark-2`) |
+| MiniMax H3 | 1 | Worker (`spark-2`) |
+| DeepSeek-V4.1-Flash | 3 | Head (`spark-1`), worker (`spark-2`), Atom (`atom`) |
 
 The shipped fleet definitions use explicit Spark IDs for both dependencies and
-launcher targets: `spark1`, `spark2`, and `atom`. Multiple nodes can therefore have
+launcher targets: `spark-1`, `spark-2`, and `atom`. Multiple nodes can therefore have
 the `worker` role without changing which machines a recipe wakes or starts.
 Custom definitions may use a role selector only when it resolves to exactly one
 Spark. Every selector must resolve uniquely, and the unique dependency count
