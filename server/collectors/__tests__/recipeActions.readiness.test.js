@@ -1,6 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { registerHooks } from "node:module";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { RecipeSessionStore } from "../../recipes/RecipeSessionStore.js";
 
 // Resolve transport/progress dependencies before importing the real state machine.
 // No regression in this file can reach a real SSH host or write switch history.
@@ -316,4 +320,81 @@ test("explicit sync with an already-verified copy still skips transport", async 
   );
   assert.equal(verified, 1);
   assert.deepEqual(h.commands, []);
+});
+
+test("persisted Apply stages include wake and boot wait only for offline dependencies", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "recipe-dynamic-stages-"));
+  try {
+    const store = new RecipeSessionStore({ dir });
+    for (const needsWake of [false, true]) {
+      const h = setup(t, { online: needsWake ? ["spark1"] : ["spark1", "spark2"] });
+      h.options.wakeNodes = async (targets) => {
+        h.wakes.push(targets.map((spark) => spark.id));
+        for (const spark of targets) h.onlineIds.add(spark.id);
+      };
+      const session = store.start({
+        targetId: h.recipe.id, label: h.recipe.label, tp: h.recipe.tp,
+        requiredNodes: h.sparks.slice(0, 2).map(({ id, name }) => ({ id, name })),
+      });
+      await switchRecipe(h.registry, null, h.recipe.id,
+        (state) => store.recordProgress(session.id, state), {
+          ...h.options, onLog: (line) => store.appendLog(session.id, line),
+        });
+      const saved = store.get(session.id);
+      const phases = saved.stages.map((stage) => stage.phase);
+      assert.equal(saved.status, "succeeded");
+      assert.equal(phases.includes("powering-on"), needsWake);
+      assert.equal(phases.includes("waiting-online"), needsWake);
+      assert.ok(phases.indexOf("checking-nodes") < phases.indexOf("starting"));
+      if (needsWake) {
+        assert.ok(phases.indexOf("waiting-online") < phases.indexOf("starting"));
+        assert.deepEqual(saved.stages.find((stage) => stage.phase === "waiting-online").pendingNodes, []);
+      }
+    }
+    store.flush();
+    assert.equal(new RecipeSessionStore({ dir }).list().length, 2);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("failed launcher session retains node output, exit context and failed stage", async (t) => {
+  const h = setup(t);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "recipe-failed-stage-"));
+  const store = new RecipeSessionStore({ dir });
+  const session = store.start({
+    targetId: h.recipe.id, label: h.recipe.label, tp: h.recipe.tp,
+    requiredNodes: h.sparks.slice(0, 2).map(({ id, name }) => ({ id, name })),
+  });
+  const original = globalThis.recipeTestSsh;
+  globalThis.recipeTestSsh = async (spark, command, options) => {
+    if (command === "cd ~/recipe && start") {
+      options.onOutput?.({ stream: "stdout", text: "Loading rank 0" });
+      options.onOutput?.({ stream: "stderr", text: "CUDA allocation failed" });
+      const err = new Error("CUDA allocation failed");
+      err.exitCode = 7;
+      throw err;
+    }
+    return original(spark, command, options);
+  };
+  try {
+    await assert.rejects(switchRecipe(h.registry, null, h.recipe.id,
+      (state) => store.recordProgress(session.id, state), {
+        ...h.options, onLog: (line) => store.appendLog(session.id, line),
+      }), /CUDA allocation failed/);
+    const saved = store.get(session.id);
+    const stage = saved.stages.find((entry) => entry.phase === "starting");
+    assert.equal(saved.status, "failed");
+    assert.equal(stage.status, "failed");
+    assert.ok(stage.logs.some((line) =>
+      line.stream === "stdout" && line.nodeId === "spark1" && line.text.includes("Loading rank 0")));
+    assert.ok(stage.logs.some((line) =>
+      line.stream === "stderr" && line.nodeId === "spark1" && line.text.includes("CUDA allocation failed")));
+    assert.ok(stage.logs.some((line) => line.text.includes("exit 7")));
+    assert.equal(saved.stages.some((entry) => entry.phase === "health-checking"), false);
+    assert.equal(new RecipeSessionStore({ dir }).get(session.id).status, "failed");
+  } finally {
+    store.flush();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });

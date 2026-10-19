@@ -51,6 +51,9 @@ const MODEL_PRICES_FETCH = ["1", "true"].includes(
 const RECIPE_SWITCH_HISTORY_JSON_PATH =
   process.env.RECIPE_SWITCH_HISTORY_JSON_PATH ||
   path.join(ROOT, "config", "recipe-switch-history.json");
+/** Persistent Apply sessions and their stage diagnostics. */
+const RECIPE_SESSIONS_DIR =
+  process.env.RECIPE_SESSIONS_DIR || path.join(ROOT, "config", "recipe-sessions");
 /** Model Registry host + directory designation (gitignored). */
 const MODEL_REGISTRY_JSON_PATH =
   process.env.MODEL_REGISTRY_JSON_PATH || path.join(ROOT, "config", "model-registry.json");
@@ -243,6 +246,7 @@ export {
   MODEL_PRICES_JSON_PATH,
   MODEL_PRICES_FETCH,
   RECIPE_SWITCH_HISTORY_JSON_PATH,
+  RECIPE_SESSIONS_DIR,
   MODEL_REGISTRY_JSON_PATH,
   MODELS_JSON_PATH,
   MODEL_DOWNLOAD_TIMEOUT_MS,

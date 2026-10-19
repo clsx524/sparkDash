@@ -1,6 +1,7 @@
 import crypto from "crypto";
 import { StringDecoder } from "node:string_decoder";
-import { defaultSpawn, LineSplitter } from "../llmlaunch/LauncherManager.js";
+import { defaultSpawn } from "../llmlaunch/LauncherManager.js";
+import { LineSplitter } from "../util/commandOutput.js";
 import {
   exitToken,
   buildAttachProgram,

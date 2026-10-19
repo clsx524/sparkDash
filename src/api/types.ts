@@ -924,30 +924,53 @@ export interface RecipeSwitchProgress {
   source: "log" | "estimate";
 }
 
-export interface RecipeSwitchState {
-  phase:
-    | "checking-nodes"
-    | "powering-on"
-    | "waiting-online"
-    | "checking-current-state"
-    | "stopping"
-    | "confirming-stopped"
-    | "clearing-conflicts"
-    | "syncing-model"
-    | "starting"
-    | "health-checking"
-    | "done"
-    | "failed";
+export type RecipeSessionStatus = "running" | "succeeded" | "failed" | "interrupted";
+export type RecipeStageStatus = RecipeSessionStatus | "skipped";
+
+export interface RecipeSessionSummary {
+  id: string;
   targetId: string;
-  from?: string | null;
-  error?: string;
-  /** Resolved names of all nodes required by the target recipe. */
-  requiredNodes?: string[];
-  /** Required nodes still awaiting power-on or online readiness. */
-  pendingNodes?: string[];
-  /** Only present during "health-checking" — how far the cold model load has gotten. */
-  progress?: RecipeSwitchProgress;
+  label: string;
+  tp: number;
+  requiredNodes: { id: string; name: string }[];
+  status: RecipeSessionStatus;
+  phase: string | null;
+  startedAt: number;
   updatedAt: number;
+  finishedAt: number | null;
+  error: string | null;
+  version: number;
+  lastSeq: number;
+  logsTruncated: boolean;
+  storageError: string | null;
+}
+
+export interface RecipeSessionLog {
+  seq: number;
+  ts: number;
+  stream: "action" | "stdout" | "stderr";
+  nodeId?: string;
+  nodeName?: string;
+  text: string;
+}
+
+export interface RecipeSessionStage {
+  id: string;
+  phase: string;
+  status: RecipeStageStatus;
+  startedAt: number;
+  updatedAt: number;
+  finishedAt: number | null;
+  pendingNodes: string[];
+  progress: RecipeSwitchProgress | null;
+  message: string | null;
+  logs: RecipeSessionLog[];
+}
+
+export interface RecipeSessionDetail extends RecipeSessionSummary {
+  /** Oldest retained log sequence; removes evicted output from live caches. */
+  firstSeq: number;
+  stages: RecipeSessionStage[];
 }
 
 export interface RecipeListResponse {
@@ -955,7 +978,7 @@ export interface RecipeListResponse {
   activeId: string | null;
   conflict: boolean;
   conflictIds: string[];
-  switch: RecipeSwitchState | null;
+  session: RecipeSessionSummary | null;
 }
 
 /** Progress of a fleet shutdown-all / wake-all (WS `powerAction`). */
@@ -990,6 +1013,7 @@ export interface PowerActionState {
 export interface RecipeActivateResponse {
   started: boolean;
   targetId: string;
+  sessionId: string;
 }
 
 // ─── WebSocket envelope ───────────────────────────────────
@@ -1001,7 +1025,7 @@ export interface WsSnapshot {
   refreshInterval: number;
   /** Alert notifications' firing set — present only while `alertsEnabled` is on. */
   alerts?: { active: AlertInstance[] };
-  recipeSwitch?: RecipeSwitchState | null;
+  recipeSession?: RecipeSessionSummary | null;
   powerAction?: PowerActionState | null;
 }
 

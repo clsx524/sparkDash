@@ -41,6 +41,7 @@ function Probe() {
         last: snapshot.lastValidSnapshotAt,
         count: snapshot.sparks.length,
         alerts: snapshot.serverAlerts?.map((a) => a.key) ?? null,
+        recipeSession: snapshot.recipeSession,
       })}
     </pre>
   );
@@ -103,6 +104,25 @@ describe("useSnapshot connection lifecycle", () => {
     await flush();
     expect(readProbe()).toMatchObject({ connected: true, error: null });
     expect(readProbe().last).toBeGreaterThanOrEqual(50_000);
+  });
+
+  it("exposes the compact persisted Apply summary across reconnect", async () => {
+    render(<Probe />);
+    const session = {
+      id: "apply-one", targetId: "glm", label: "GLM", tp: 2, requiredNodes: [],
+      status: "running", phase: "starting", startedAt: 1000, updatedAt: 2000,
+      finishedAt: null, error: null, version: 2, lastSeq: 3,
+      logsTruncated: false, storageError: null,
+    };
+    act(() => MockSocket.instances[0].emit({ type: "snapshot", sparks: [], recipeSession: session }));
+    await flush();
+    expect(readProbe().recipeSession).toEqual(session);
+    act(() => MockSocket.instances[0].close());
+    act(() => vi.advanceTimersByTime(2000));
+    const terminal = { ...session, status: "interrupted", version: 3, finishedAt: 3000 };
+    act(() => MockSocket.instances[1].emit({ type: "snapshot", sparks: [], recipeSession: terminal }));
+    await flush();
+    expect(readProbe().recipeSession).toEqual(terminal);
   });
 
   it("exposes the server's alerts only while the snapshot carries them", async () => {
