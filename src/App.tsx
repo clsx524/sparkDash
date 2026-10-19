@@ -181,6 +181,7 @@ function DashboardApp() {
     activeSpark: liveActive,
     connected,
     recipeSession,
+    lastActiveRecipe,
     powerAction,
     lastValidSnapshotAt,
     snapshotError,
@@ -620,6 +621,9 @@ function DashboardApp() {
                   showVramBreakdown={settings?.showVramBreakdown ?? true}
                   temperatureUnit={settings?.temperatureUnit ?? "celsius"}
                   powerAction={powerAction}
+                  lastActiveRecipe={lastActiveRecipe}
+                  recipeSession={recipeSession}
+                  onOpenRecipes={() => setShowRecipes(true)}
                   onSelectSpark={navigate}
                   onNavigate={navigate}
                 />

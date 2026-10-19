@@ -49,7 +49,7 @@ beforeEach(() => {
   localStorage.clear();
   vi.useFakeTimers();
   vi.mocked(fetchRecipes).mockResolvedValue({
-    recipes: [glm, deepseek], activeId: null, conflict: false, conflictIds: [], session: null,
+    recipes: [glm, deepseek], activeId: null, conflict: false, conflictIds: [], session: null, lastActiveRecipe: null,
   });
   vi.mocked(fetchCurrentRecipeSession).mockResolvedValue({ session: null });
   vi.mocked(fetchRecipeSessions).mockResolvedValue({ sessions: [] });
@@ -172,7 +172,7 @@ describe("persistent recipe Apply views", () => {
   });
 
   it("handles completion before the POST returns and retains same-target Refresh", async () => {
-    vi.mocked(fetchRecipes).mockResolvedValue({ recipes: [glm], activeId: "glm", conflict: false, conflictIds: [], session: null });
+    vi.mocked(fetchRecipes).mockResolvedValue({ recipes: [glm], activeId: "glm", conflict: false, conflictIds: [], session: null, lastActiveRecipe: null });
     const post = deferred<RecipeActivateResponse>();
     vi.mocked(activateRecipe).mockReturnValue(post.promise);
     const { container, root } = render(<RecipesDialog open onClose={onClose} recipeSession={null} />);

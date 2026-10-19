@@ -1,7 +1,9 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   AlertInstance,
+  LastActiveRecipe,
   PowerActionState,
+  RecipeSessionSummary,
   SparkSnapshot,
 } from "../../api/types";
 import { isWorkerSpark } from "../../api/sparkRole";
@@ -47,6 +49,10 @@ interface OverviewPageProps {
   temperatureUnit?: "celsius" | "fahrenheit";
   /** Live shutdown-all / wake-all progress from the WS snapshot. */
   powerAction?: PowerActionState | null;
+  lastActiveRecipe?: LastActiveRecipe | null;
+  recipeSession?: RecipeSessionSummary | null;
+  /** Open the persistent Current Apply view after Wake all starts a recipe session. */
+  onOpenRecipes?: () => void;
   onSelectSpark?: (id: string) => void;
   /** Open a dedicated page (Token totals, Fleet energy, Activity). */
   onNavigate?: (id: string) => void;
@@ -68,6 +74,9 @@ export function OverviewPage({
   showVramBreakdown = true,
   temperatureUnit = "celsius",
   powerAction = null,
+  lastActiveRecipe = null,
+  recipeSession = null,
+  onOpenRecipes,
   onSelectSpark,
   onNavigate,
 }: OverviewPageProps) {
@@ -106,6 +115,12 @@ export function OverviewPage({
   const [batchLoading, setBatchLoading] = useState(false);
   const [batchMsg, setBatchMsg] = useState<{ text: string; tone: "ok" | "err" } | null>(null);
   const [wakeAllOpen, setWakeAllOpen] = useState(false);
+  const wakePending = useRef(false);
+  const wakeBlocked = batchLoading || recipeSession?.status === "running"
+    || Boolean(powerAction && powerAction.phase !== "done" && powerAction.phase !== "failed");
+  const wakeDescription = lastActiveRecipe
+    ? `Activate “${lastActiveRecipe.label}” using the same Apply workflow as Deployment recipes. Only its required nodes will be woken; other nodes stay as they are.`
+    : "No recipe has been remembered yet. Power on every offline node with a configured outlet; hosts without an outlet fall back to Wake-on-LAN. This is power-only: no recipe will be applied.";
   /** Spark ids we started a batch Hermes update on; drives the live progress bar. */
   const [batchRun, setBatchRun] = useState<string[] | null>(null);
 
@@ -180,26 +195,32 @@ export function OverviewPage({
   }
 
   async function runWakeAll() {
+    if (wakePending.current || wakeBlocked) return;
+    wakePending.current = true;
     setBatchLoading(true);
     setBatchMsg(null);
     try {
       const res = await wakeAllSparks();
-      setBatchMsg({
-        text: res.started ? "Wake started" : "Wake requested",
-        tone: "ok",
-      });
+      if (res.sessionId) {
+        onOpenRecipes?.();
+      } else {
+        setBatchMsg({
+          text: res.started ? "Power-only fleet wake started" : "Power-only fleet wake requested",
+          tone: "ok",
+        });
+      }
     } catch (err: unknown) {
       setBatchMsg({
         text: err instanceof Error ? err.message : "Batch wake failed",
         tone: "err",
       });
     } finally {
+      wakePending.current = false;
       setBatchLoading(false);
-      setTimeout(() => setBatchMsg(null), 6000);
     }
   }
 
-  if (withoutWorkers.length === 0 || (hideOffline && withoutWorkers.every((spark) => !spark.online))) {
+  if (!lastActiveRecipe && (withoutWorkers.length === 0 || (hideOffline && withoutWorkers.every((spark) => !spark.online)))) {
     const allWorkersHidden = hideWorkers && sparks.length > 0 && withoutWorkers.length === 0;
     const allOffline = hideOffline && withoutWorkers.length > 0;
     const title = allWorkersHidden
@@ -262,7 +283,7 @@ export function OverviewPage({
               </div>
             </div>
           )}
-          {sparks.length > 0 && (
+          {(sparks.length > 0 || lastActiveRecipe) && (
             <>
               {hermesMonitoredCount > 0 && (
                 <button
@@ -284,17 +305,25 @@ export function OverviewPage({
                   )}
                 </button>
               )}
-              {sparks.some((spark) => spark.hasPowerControl || spark.kind === "host") && (
+              {(lastActiveRecipe || sparks.some((spark) => spark.hasPowerControl || spark.kind === "host")) && (
                 <button
                   type="button"
                   onClick={() => setWakeAllOpen(true)}
-                  disabled={batchLoading || Boolean(powerAction && powerAction.phase !== "done" && powerAction.phase !== "failed")}
-                  title="Power on every offline node with a configured outlet. Hosts without an outlet fall back to Wake-on-LAN. No recipes are applied."
+                  disabled={wakeBlocked}
+                  title={wakeDescription}
                   className="btn"
                 >
                   <PowerOnIcon className="h-3.5 w-3.5" />
                   Wake all
                 </button>
+              )}
+              {lastActiveRecipe && (
+                <span className="ov-batchmsg">
+                  Last active recipe: {lastActiveRecipe.label}
+                  {lastActiveRecipe.storageError && (
+                    <span className="is-err" role="status"> — Not saved to disk: {lastActiveRecipe.storageError}</span>
+                  )}
+                </span>
               )}
               <ShutdownAll sparks={sparks} className="ov-shutdown" />
             </>
@@ -375,12 +404,15 @@ export function OverviewPage({
         open={wakeAllOpen}
         onClose={() => setWakeAllOpen(false)}
         onConfirm={runWakeAll}
+        disabled={wakeBlocked}
         title="Wake All"
-        description="Power on every offline node with a configured outlet? Hosts without an outlet fall back to Wake-on-LAN."
+        description={wakeDescription}
         confirmLabel="Wake all"
         tone="default"
-        warningTitle="This powers on hardware."
-        warningDetail="Waits for woken nodes to come online. No recipes are applied or restored; use Deployment recipes to apply one."
+        warningTitle={lastActiveRecipe ? `Apply ${lastActiveRecipe.label}` : "Power-only fleet wake"}
+        warningDetail={lastActiveRecipe
+          ? "Required nodes may take up to five minutes to become ready. Apply replaces the running deployment without checksum verification. Progress and history appear in Current Apply."
+          : "Waits for woken nodes to come online. No recipes are applied or restored; use Deployment recipes to apply one."}
       />
     </div>
   );

@@ -823,7 +823,7 @@ sparkDash/
 | DELETE | `/api/llm-token-totals` | Reset Token totals (all Sparks, or one with `?sparkId=`) |
 | GET | `/api/health` · `/api/auth/status` | Bind / auth mode; whether a token is required and accepted |
 | GET · PUT · DELETE | `/api/sparks/:id/gpu-clock` | GPU clock cap on a Spark unit: status, apply (`maxMHz`, `persist`), remove (see [GPU clock cap](#gpu-clock-cap)) |
-| POST | `/api/sparks/:id/shutdown` · `/wake` · `/api/sparks/shutdown-all` · `/wake-all` | Power controls (see [Power controls](#power-controls-shutdown--wake-on-lan)). Batch routes return `{started:true}` and report progress on the WS `powerAction`; `GET /api/power/state` returns the latest state. |
+| POST | `/api/sparks/:id/shutdown` · `/wake` · `/api/sparks/shutdown-all` · `/wake-all` | Power controls (see [Power controls](#power-controls-shutdown--wake-on-lan)). Wake All applies the remembered recipe and returns `{started:true,targetId,sessionId}`, with persistent Apply progress. Shutdown All and power-only Wake All report WS `powerAction`; `GET /api/power/state` returns that state. |
 | POST | `/api/sparks/:id/refresh/:domain` | Re-poll one domain now (`storage` or `llm` only) |
 | GET/POST/DELETE | `/api/sparks/:id/llm/showcase[/:sessionId]` | Prompt Showcase sessions |
 | GET | `/api/events` | Fleet event log (`limit`, `sparkId`, `sinceId`, `beforeId`; 2000 kept) |
@@ -1011,7 +1011,9 @@ units do not display stale discovered models.
 - **Wake** / **Wake All** first use a configured **power endpoint** (see below) for every unit type, including DGX Sparks. Hosts without a power endpoint fall back to a UDP magic packet (port 9) when their NIC supports Wake-on-LAN. The MAC is taken from the **enP7s7** interface while the host is online (persisted as `detectedMacAddress`), or from a **MAC override** in Edit Spark. Broadcast is derived as `/24` from LAN IP, or `255.255.255.255` if LAN IP is missing.
 - On a **Windows PC** shutdown runs `shutdown.exe /s /t 5` over SSH; Wake-on-LAN needs a MAC address entered by hand.
 - **Shutdown All** gracefully shuts down online remote nodes over SSH concurrently and waits for their offline checks in parallel, then sends one power-off batch per endpoint for eligible outlets. A node whose shutdown fails or whose offline check fails or times out is excluded from power-off. Offline nodes with a configured outlet are also powered off. The dashboard host is shut down last and its own outlet is never cut (that would kill the controller mid-flight).
-- **Wake All** powers on offline nodes and waits for them to come online. It never applies a recipe, restores a previous recipe, or reads saved recipe state. Choose a recipe explicitly from **Recipes → Activate**.
+- **Wake All** activates the last remembered recipe through the same **Apply** workflow as Recipes → Activate/Refresh: wake only its required offline nodes, wait up to five minutes for all dependencies, then deploy with the normal fast model path and health checks. Other nodes stay as they are. Confirmation names the recipe; accepted requests open **Current Apply** with persistent progress and history. Even if all required nodes are online, this performs the normal recipe refresh.
+- With no remembered or uniquely detected active recipe, **Wake All** falls back to power-only fleet wake; the popup explicitly says no recipe will be applied. A remembered recipe removed from configuration returns an error instead of choosing another recipe or powering the fleet.
+- The last active recipe is saved after successful Apply and when the recipe list or Shutdown All detects one unambiguous live deployment. Offline nodes, conflicts, and failed/interrupted Apply attempts do not erase it. Existing installations seed the pointer from their latest retained successful Apply. The remembered pointer is not proof that a recipe is currently serving; live status still determines active state.
 - Power APIs are mutations: with `SPARKDASH_TOKEN` set they require it; without it they are open on loopback (local trust) **and** on a remote bind, unless `SPARKDASH_ALLOW_OPEN_REMOTE=0` makes that bind fail closed.
 
 #### Generic power endpoints
@@ -1125,6 +1127,13 @@ line, and marks truncation explicitly. Stage outcomes and final errors remain
 available after output eviction. Start, stage transitions, and completion persist
 immediately; output/progress updates are batched for up to 500 ms and flushed on
 graceful shutdown. An abrupt crash can lose the last unflushed output batch.
+
+The last active recipe is stored separately as
+`config/recipe-sessions/last-active-recipe.json` (also under `RECIPE_SESSIONS_DIR`,
+private 0600). It survives server restart and terminal-session eviction. A failed
+write leaves the latest identity in memory and displays a persistence warning;
+graceful shutdown retries pending writes. `GET /api/recipes` and WS snapshots expose
+`lastActiveRecipe` (`id`, `label`, `storageError`) independently of the current session.
 
 A server restart marks unfinished sessions **interrupted** without replaying
 commands. Remote launchers may still be running, so the recorded outcome is
