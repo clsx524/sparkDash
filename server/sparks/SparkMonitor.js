@@ -898,20 +898,31 @@ export class SparkMonitor {
 
   // ─── Liveness ─────────────────────────────────────────────
   /**
-   * Force a liveness check now, bypassing the widening backoff. Used by the
-   * power orchestrator after a wake so a node that just booted is noticed
-   * without waiting for the next scheduled probe.
+   * Force a fresh liveness check, bypassing backoff and joining an existing
+   * probe. Returns SSH/host reachability, not the grace-period cached status.
    */
   async checkOnlineNow() {
     this._nextLivenessAt = 0;
-    await this._checkOnline();
+    return this._checkOnline();
   }
 
-  async _checkOnline() {
-    if (!this._running || this._inflight.online) return;
+  _checkOnline() {
+    if (this._onlineCheckGeneration === this._runGeneration && this._onlineCheckPromise) {
+      return this._onlineCheckPromise;
+    }
+    this._onlineCheckGeneration = this._runGeneration;
+    const pending = this._runOnlineCheck().finally(() => {
+      if (this._onlineCheckPromise === pending) this._onlineCheckPromise = null;
+    });
+    this._onlineCheckPromise = pending;
+    return pending;
+  }
+
+  async _runOnlineCheck() {
+    if (!this._running || this._inflight.online) return false;
     // Backoff gate: a unit that keeps refusing us is probed on a widening
     // schedule (see _scheduleNextLiveness) instead of every 5 seconds forever.
-    if (Date.now() < this._nextLivenessAt) return;
+    if (Date.now() < this._nextLivenessAt) return false;
     const runGeneration = this._runGeneration;
     const checkToken = Symbol("online");
     this._inflight.online = checkToken;
@@ -922,7 +933,7 @@ export class SparkMonitor {
     try {
       if (local) {
         await this.collector.pingHost();
-        if (!isCurrentRun()) return;
+        if (!isCurrentRun()) return false;
         this.online = true;
         this.lastOnlineOk = Date.now();
         // Non-fatal — uptime stays at its previous value or null
@@ -939,7 +950,7 @@ export class SparkMonitor {
         uptimeSeconds = await this._readUptime();
         // The generation gate below (after the await) is the commit guard.
       }
-      if (!isCurrentRun()) return;
+      if (!isCurrentRun()) return false;
       this.online = true;
       this.offlineReason = null;
       this._livenessFailures = 0;
@@ -947,8 +958,9 @@ export class SparkMonitor {
       this.lastOnlineOk = Date.now();
       this._uptimeSeconds = uptimeSeconds;
       this._noteOnline(true);
+      return true;
     } catch (err) {
-      if (!isCurrentRun()) return;
+      if (!isCurrentRun()) return false;
       this._livenessFailures += 1;
       const reason = livenessReason(err);
       this.offlineReason =
@@ -962,6 +974,7 @@ export class SparkMonitor {
         this._invalidateSshMetrics();
         this._noteOnline(false);
       }
+      return false;
     } finally {
       if (this._inflight.online === checkToken) {
         this._inflight.online = false;

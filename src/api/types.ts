@@ -902,10 +902,14 @@ export interface RecipeNodeStatus {
   detail: string;
 }
 
+export type RecipeRequiredNode = { role: "head" | "worker" } | { sparkId: string };
+
 export interface RecipeInfo {
   id: string;
   label: string;
   group: string;
+  tp: number;
+  requiredNodes: RecipeRequiredNode[];
   nodes: { role: string; workdir: string }[];
   active: boolean;
   nodeStatus: RecipeNodeStatus[];
@@ -922,6 +926,9 @@ export interface RecipeSwitchProgress {
 
 export interface RecipeSwitchState {
   phase:
+    | "checking-nodes"
+    | "powering-on"
+    | "waiting-online"
     | "checking-current-state"
     | "stopping"
     | "confirming-stopped"
@@ -934,6 +941,10 @@ export interface RecipeSwitchState {
   targetId: string;
   from?: string | null;
   error?: string;
+  /** Resolved names of all nodes required by the target recipe. */
+  requiredNodes?: string[];
+  /** Required nodes still awaiting power-on or online readiness. */
+  pendingNodes?: string[];
   /** Only present during "health-checking" — how far the cold model load has gotten. */
   progress?: RecipeSwitchProgress;
   updatedAt: number;
@@ -952,13 +963,11 @@ export interface PowerActionState {
   action: "shutdown-all" | "wake-all";
   phase:
     | "starting"
-    | "capturing-recipe"
     | "shutting-down"
     | "waiting-offline"
     | "powering-off"
     | "powering-on"
     | "waiting-online"
-    | "reactivating-recipe"
     | "done"
     | "failed";
   startedAt: number;
@@ -966,8 +975,6 @@ export interface PowerActionState {
   total: number;
   completed: number;
   current?: string | null;
-  recipeId?: string | null;
-  recipeIds?: string[];
   error?: string | null;
   message?: string | null;
   results: Array<{
@@ -978,8 +985,6 @@ export interface PowerActionState {
     error?: string | null;
     message?: string | null;
   }>;
-  /** Recipe-switch progress while `phase === "reactivating-recipe"`. */
-  recipeSwitch?: RecipeSwitchState | null;
 }
 
 export interface RecipeActivateResponse {

@@ -127,7 +127,7 @@ export function ConfirmShutdownDialog({
               {warningDetail ||
                 (danger
                   ? "Running containers and sessions will stop. The host powers off after a graceful stop."
-                  : "Nodes will boot and the last active recipe will be re-activated.")}
+                  : "Nodes will boot. No recipes are applied or restored.")}
             </span>
           </div>
         </div>

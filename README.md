@@ -1107,8 +1107,8 @@ units do not display stale discovered models.
   the **host** filesystem, so it does not need to exist inside the container.
 - **Wake** / **Wake All** first use a configured **power endpoint** (see below) for every unit type, including DGX Sparks. Hosts without a power endpoint fall back to a UDP magic packet (port 9) when their NIC supports Wake-on-LAN. The MAC is taken from the **enP7s7** interface while the host is online (persisted as `detectedMacAddress`), or from a **MAC override** in Edit Spark. Broadcast is derived as `/24` from LAN IP, or `255.255.255.255` if LAN IP is missing.
 - On a **Windows PC** shutdown runs `shutdown.exe /s /t 5` over SSH; Wake-on-LAN needs a MAC address entered by hand.
-- **Shutdown All** gracefully shuts down online nodes over SSH, waits for each to go offline, then cuts its outlet. Offline nodes with a configured outlet are also powered off. The dashboard host is shut down last and its own outlet is never cut (that would kill the controller mid-flight).
-- **Wake All** powers on every offline node with a configured outlet, waits for the nodes to come online, then re-activates the recipe that was active before the last shutdown. The recipe id is captured in `config/power-state.json` at shutdown time.
+- **Shutdown All** gracefully shuts down online remote nodes over SSH concurrently and waits for their offline checks in parallel, then sends one power-off batch per endpoint for eligible outlets. A node whose shutdown fails or whose offline check fails or times out is excluded from power-off. Offline nodes with a configured outlet are also powered off. The dashboard host is shut down last and its own outlet is never cut (that would kill the controller mid-flight).
+- **Wake All** powers on offline nodes and waits for them to come online. It never applies a recipe, restores a previous recipe, or reads saved recipe state. Choose a recipe explicitly from **Recipes → Activate**.
 - Power APIs are mutations: with `SPARKDASH_TOKEN` set they require it; without it they are open on loopback (local trust) **and** on a remote bind, unless `SPARKDASH_ALLOW_OPEN_REMOTE=0` makes that bind fail closed.
 
 #### Generic power endpoints
@@ -1130,8 +1130,9 @@ SparkDash does not hardcode Kasa or any other controller. Each Spark can carry a
   the same endpoint and sends one request with
   `{"targets": ["1", "2", "3"]}` instead of one request per node.
 - `target` identifies this unit in the batch body. For the Kasa HS300, use the
-  outlet index from `GET /outlets` (the three Sparks in this fleet use outlets
-  **1, 2 and 3**).
+  **zero-based** outlet index and label returned by `GET /outlets`, not the
+  printed socket number. Physical sockets 1, 2 and 3 normally correspond to
+  API targets **0, 1 and 2**; verify the labels before configuring or switching.
 - The bearer token is entered in Edit Spark, stored encrypted in
   `config/sparks-secrets.json`, and sent as `Authorization: Bearer <token>`.
   It is never returned by the API. `tokenHeader` / `tokenPrefix` can override
@@ -1142,6 +1143,48 @@ SparkDash does not hardcode Kasa or any other controller. Each Spark can carry a
 - Kasa MCP exposes the batch endpoints at `GET /outlets`, `POST /outlets/on`
   and `POST /outlets/off`; all except `/healthz` require the same bearer token
   as `/mcp`.
+
+### Recipe activation and node readiness
+
+**Recipes → Activate** (or **Refresh** for the active recipe) can be used while
+compute nodes are offline. Each definition in `server/config/recipes.json`
+declares `tp` and `requiredNodes` separately from its launcher commands:
+
+| Recipe | TP | Required physical nodes |
+|--------|----|-------------------------|
+| GLM-5.3-Flash EXL3 | 2 | Head (spark1), worker (spark2) |
+| Qwen3.8-Flash-Next | 2 | Head (spark1), worker (spark2) |
+| MiniMax H3 | 1 | Worker (spark2) |
+| DeepSeek-V4.1-Flash | 3 | Head (spark1), worker (spark2), Atom |
+
+Dependency selectors use `{"role":"head"}`, `{"role":"worker"}`, or an explicit
+Spark ID such as `{"sparkId":"atom"}`. Each selector must resolve to exactly one
+configured Spark, and the unique dependency count must equal `tp`. The shipped
+DeepSeek recipe expects Atom's Spark ID to be `atom`; change that selector if
+your main-server configuration uses a different ID. Override definitions via
+`RECIPES_JSON_PATH` must include this metadata too.
+
+- Activation checks every required node over SSH, wakes only offline dependencies
+  through their configured batch power-on endpoint (or host Wake-on-LAN), then
+  polls all dependencies every two seconds for up to five minutes. It proceeds
+  as soon as all are reachable; it does not wait a fixed five minutes.
+- Missing dependencies, failed wake requests, or a readiness timeout fail the
+  activation without running stop, cleanup, model-sync or start commands. Progress
+  identifies pending nodes. A final reachability check before starting catches
+  a dependency that dropped during the switch.
+- GLM does not wake or wait for Atom. Unrelated offline nodes are excluded from
+  recipe-status probes and container cleanup. Fleet power actions and recipe
+  activation cannot run concurrently.
+- Apply skips **all SHA256 verification**. If manifest-listed model files are
+  already present and nonempty on the target, a quick target-only check skips
+  registry access and transfer entirely, allowing GLM with a powered-off Atom
+  registry. Missing files (or a missing manifest) retain the normal rsync
+  quick-check/transfer, which requires the registry host to be reachable.
+  Stage weights beforehand through **Model Registry → Sync** to avoid that
+  dependency; explicit Sync still performs checksum verification.
+- The fast path checks presence, not integrity. Normal stop/conflict cleanup,
+  launcher commands, and model-server health checks remain in place; model loading
+  still takes the time required by the model and hardware.
 
 ### Themes
 

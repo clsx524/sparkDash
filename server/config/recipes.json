@@ -3,6 +3,8 @@
     "id": "glm53-exl3",
     "label": "GLM-5.3-Flash EXL3 (TP2, TensorFold)",
     "group": "dual-text-gen",
+    "tp": 2,
+    "requiredNodes": [{ "role": "head" }, { "role": "worker" }],
     "nodes": [
       {
         "role": "head",
@@ -21,6 +23,8 @@
     "id": "qwen38-flash-next",
     "label": "Qwen3.8-Flash-Next (TP2+EP+MTP3)",
     "group": "dual-text-gen",
+    "tp": 2,
+    "requiredNodes": [{ "role": "head" }, { "role": "worker" }],
     "nodes": [
       {
         "role": "head",
@@ -38,6 +42,8 @@
     "id": "minimax-h3",
     "label": "MiniMax H3 (single-node, worker)",
     "group": "single-node",
+    "tp": 1,
+    "requiredNodes": [{ "role": "worker" }],
     "nodes": [
       {
         "role": "worker",
@@ -55,6 +61,8 @@
     "id": "deepseek-v41-lakyfx-tp3",
     "label": "DeepSeek-V4.1-Flash 1017 (EXL3 3.5bpw TensorFold, TP3)",
     "group": "multi-node",
+    "tp": 3,
+    "requiredNodes": [{ "role": "head" }, { "role": "worker" }, { "sparkId": "atom" }],
     "nodes": [
       {
         "role": "head",

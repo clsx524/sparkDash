@@ -20,6 +20,11 @@
  * against — no manifest means "already there" can't be told apart from
  * "silently incomplete", so that case still requires a real sync.
  *
+ * Apply Recipe opts out of hashing: it first checks only that every manifest-listed
+ * file is nonempty on the target, so already-staged weights need no registry connection
+ * (the registry can be offline). This is a presence check, not an integrity guarantee;
+ * explicit Sync retains SHA256 verification. Missing files or no manifest use rsync.
+ *
  * The sync command always runs FROM the target host, pulling FROM the
  * registry — never
  * the reverse. This is a hard-won, fleet-proven constraint: some networks
@@ -115,10 +120,12 @@ async function listSyncFiles(host, dir) {
  * @param {import("./ModelRegistry.js").ModelRegistry} modelRegistry
  * @param {object} model - tracked model entry (id, subfolder, manifest, ...)
  * @param {object} targetSpark - full SparkConfig (with secrets) of the host to sync onto
- * @param {{timeoutMs?: number}} [options]
+ * @param {{timeoutMs?: number, verify?: boolean}} [options] - verify defaults to true;
+ *   Apply Recipe uses false for target-only presence checks and rsync without hashing.
  * @returns {Promise<{destDir: string, skipped?: boolean}>}
  */
 export async function syncModelToSpark(modelRegistry, model, targetSpark, options = {}) {
+  const verify = options.verify !== false;
   const registryHost = modelRegistry.registryHost();
   if (!registryHost) throw new Error("No Model Registry host configured");
   const registryConfig = modelRegistry.getRegistryConfig();
@@ -129,7 +136,7 @@ export async function syncModelToSpark(modelRegistry, model, targetSpark, option
   // rsync entirely; just confirm what's already there is still intact.
   if (targetSpark.id === registryHost.id) {
     const destDir = joinRemotePath(registryConfig.directory, model.subfolder);
-    if (Array.isArray(model.manifest) && model.manifest.length > 0) {
+    if (verify && Array.isArray(model.manifest) && model.manifest.length > 0) {
       const mismatches = await modelRegistry.verifyFilesOnHost(targetSpark, destDir, model.manifest);
       if (mismatches.length > 0) {
         throw new Error(
@@ -147,10 +154,24 @@ export async function syncModelToSpark(modelRegistry, model, targetSpark, option
   const sourceDir = joinRemotePath(registryConfig.directory, model.subfolder);
   const destDir = joinRemotePath(targetSpark.modelFolder, model.subfolder);
 
+  if (!verify && Array.isArray(model.manifest) && model.manifest.length > 0) {
+    const fileArgs = model.manifest.map((entry) => shQuote(entry.path)).join(" ");
+    try {
+      const present = await sshExec(
+        targetSpark,
+        `cd ${shQuotePath(destDir)} && for file in ${fileArgs}; do test -s "$file" || exit 1; done && printf '__PRESENT__'`,
+        { timeoutMs: PREFLIGHT_TIMEOUT_MS }
+      );
+      if (present === "__PRESENT__") return { destDir, skipped: true };
+    } catch {
+      // Missing/incomplete staging falls through to the existing rsync transfer.
+    }
+  }
+
   // Already correct on the target? Skip the registry host entirely — see
   // the module doc comment above for why this must come before the
   // reachability preflight, not after it.
-  if (Array.isArray(model.manifest) && model.manifest.length > 0) {
+  if (verify && Array.isArray(model.manifest) && model.manifest.length > 0) {
     const mismatches = await modelRegistry.verifyFilesOnHost(targetSpark, destDir, model.manifest);
     if (mismatches.length === 0) {
       return { destDir, skipped: true };
@@ -223,7 +244,7 @@ export async function syncModelToSpark(modelRegistry, model, targetSpark, option
     }
   }
 
-  if (Array.isArray(model.manifest) && model.manifest.length > 0) {
+  if (verify && Array.isArray(model.manifest) && model.manifest.length > 0) {
     const mismatches = await modelRegistry.verifyFilesOnHost(targetSpark, destDir, model.manifest);
     if (mismatches.length > 0) {
       throw new Error(

@@ -1,24 +1,22 @@
 /**
- * RecipeRegistry — named *deployment recipes* for the two-Spark pair, as opposed to the
- * physical-node config SparkRegistry already owns. A recipe is one of the mutually exclusive
- * ways this cluster's combined GPU memory can be occupied: one TP2 model across both nodes
- * (`dual-text-gen` group), or one model on a single node with the other Spark idle
- * (`single-node` group — e.g. MiniMax H3 on the worker; DeepSeek-V4-Flash-0731's matching
- * single-node head recipe is intentionally not wired in here: ansible still keeps its repo
- * checked out on the head for a cheap re-enable later, but nothing in this file can start it
- * or trigger its weight download — see tasks/deepseek-single.yml).
+ * RecipeRegistry — named deployment recipes, separate from SparkRegistry's physical
+ * hosts. Recipes share compute nodes and are mutually exclusive serving deployments:
+ * TP2 on head+worker, TP3 on head+worker+Atom, or a single-node worker deployment.
  *
  * Deliberately config, not code: server/config/recipes.json lists every recipe's nodes,
  * start/stop/status commands, and health-check port. Adding a sixth recipe later means
  * editing that file, not this class.
+ * Required `tp` and `requiredNodes` metadata describe the complete compute topology,
+ * independent of `nodes` (launcher/status/health commands). A required-node selector
+ * contains exactly one `role` or `sparkId`; each must resolve uniquely.
  *
  * One more OPTIONAL per-node field ties a recipe into Model Registry orchestration (see
  * recipeActions.js's syncModelsForRecipe):
  *   - `modelIds`: array of ids tracked in ModelRegistry (config/models.json). When set,
- *     switchRecipe pulls each one onto this node's own `modelFolder` (checksum-verified,
- *     one at a time) before starting it. A node needing more than one tracked model (e.g.
- *     a weight tree plus a separately-sourced component) lists more than one id — omit
- *     entirely for a node that provisions its weights another way.
+ *     switchRecipe pulls each one onto this node's own `modelFolder` (using rsync's
+ *     quick check, one at a time) before starting it. Explicit model sync still verifies
+ *     SHA256. A node needing a weight tree plus a separately-sourced component lists
+ *     multiple ids; omit entirely for a node that provisions its weights another way.
  * Not assumed present — a recipe with no model tracked yet works exactly as before,
  * unchanged. Everything else about a node's files (.env, checked-out repo, patches) is
  * ansible's job, applied by the relevant playbook run ahead of any activate — switchRecipe
@@ -78,9 +76,50 @@ export class RecipeRegistry {
     return [...new Set(this._recipes.map((r) => r.group))];
   }
 
-  /** Find the live Spark for a recipe node by role ("head" | "worker"). */
+  /** Resolve explicit compute dependencies; launcher nodes are not the TP topology. */
+  resolveRequiredNodes(recipe) {
+    if (!Number.isInteger(recipe.tp) || recipe.tp < 1 ||
+        !Array.isArray(recipe.requiredNodes) || recipe.requiredNodes.length === 0) {
+      throw new Error(`Recipe ${recipe.id} requires tp and requiredNodes metadata`);
+    }
+    const sparks = recipe.requiredNodes.map((selector) => {
+      if (!selector || typeof selector !== "object" || Array.isArray(selector) ||
+          Object.keys(selector).length !== 1 ||
+          !["role", "sparkId"].includes(Object.keys(selector)[0])) {
+        throw new Error(`Recipe ${recipe.id} has an invalid requiredNodes selector`);
+      }
+      const key = selector.sparkId !== undefined ? "sparkId" : "role";
+      const value = selector[key];
+      if (typeof value !== "string" || !value.trim()) {
+        throw new Error(`Recipe ${recipe.id} has an invalid requiredNodes ${key}`);
+      }
+      const matches = this.sparkRegistry.sparks.filter(
+        (spark) => key === "sparkId" ? spark.id === value : spark.role === value
+      );
+      if (matches.length !== 1) {
+        throw new Error(`Recipe ${recipe.id} required node ${key}=${value}: ${matches.length ? "ambiguous" : "no Spark configured"}`);
+      }
+      return matches[0];
+    });
+    if (new Set(sparks.map((spark) => spark.id)).size !== sparks.length ||
+        sparks.length !== recipe.tp) {
+      throw new Error(`Recipe ${recipe.id} TP${recipe.tp} does not match its unique required nodes`);
+    }
+    for (const node of recipe.nodes) {
+      const spark = this._sparkForNode(node);
+      if (!spark || !sparks.some((required) => required.id === spark.id)) {
+        throw new Error(`Recipe ${recipe.id} launcher node is missing, ambiguous, or not a required node`);
+      }
+    }
+    return sparks;
+  }
+
+  /** Resolve a launcher node without guessing when configuration is ambiguous. */
   _sparkForNode(node) {
-    return this.sparkRegistry.sparks.find((s) => s.role === node.role) || null;
+    const matches = this.sparkRegistry.sparks.filter(
+      (spark) => node.sparkId ? spark.id === node.sparkId : spark.role === node.role
+    );
+    return matches.length === 1 ? matches[0] : null;
   }
 
   /**
@@ -89,10 +128,13 @@ export class RecipeRegistry {
    * not-running status output.
    * @returns {Promise<{ role: string, running: boolean, detail: string }>}
    */
-  async _probeNode(node) {
+  async _probeNode(node, { getOnline } = {}) {
     const spark = this._sparkForNode(node);
     if (!spark) {
       return { role: node.role, running: false, detail: `no Spark configured for role ${node.role}` };
+    }
+    if (getOnline && getOnline(spark.id) !== true) {
+      return { role: node.role, running: false, detail: "node offline" };
     }
     try {
       const out = await sshExec(spark, `cd ${node.workdir} && ${node.statusCmd}`, {
@@ -111,8 +153,28 @@ export class RecipeRegistry {
    * transition, not a usable serving state.
    * @returns {Promise<{ id: string, active: boolean, nodes: Array }>}
    */
-  async probeRecipe(recipe) {
-    const nodes = await Promise.all(recipe.nodes.map((n) => this._probeNode(n)));
+  async probeRecipe(recipe, options = {}) {
+    if (options.getOnline) {
+      // A launcher's status command may itself SSH to the other TP ranks. Do not
+      // invoke it when a dependency is offline (including unrelated recipes).
+      let detail;
+      try {
+        const required = this.resolveRequiredNodes(recipe);
+        if (required.some((spark) => options.getOnline(spark.id) !== true)) {
+          detail = "required node offline";
+        }
+      } catch (err) {
+        detail = err.message;
+      }
+      if (detail) {
+        return {
+          id: recipe.id,
+          active: false,
+          nodes: recipe.nodes.map((node) => ({ role: node.role, running: false, detail })),
+        };
+      }
+    }
+    const nodes = await Promise.all(recipe.nodes.map((n) => this._probeNode(n, options)));
     return { id: recipe.id, active: nodes.length > 0 && nodes.every((n) => n.running), nodes };
   }
 
@@ -124,14 +186,16 @@ export class RecipeRegistry {
    * exact GPU-memory coexistence hang the qwen38-flash-next recipe's own README warns about.
    * @returns {Promise<{ recipes: Array, activeId: string | null, conflict: boolean }>}
    */
-  async list() {
-    const probed = await Promise.all(this._recipes.map((r) => this.probeRecipe(r)));
+  async list(options = {}) {
+    const probed = await Promise.all(this._recipes.map((r) => this.probeRecipe(r, options)));
     const activeOnes = probed.filter((p) => p.active);
     return {
       recipes: this._recipes.map((r, i) => ({
         id: r.id,
         label: r.label,
         group: r.group,
+        tp: r.tp,
+        requiredNodes: r.requiredNodes,
         nodes: r.nodes.map((n) => ({ role: n.role, workdir: n.workdir })),
         active: probed[i].active,
         nodeStatus: probed[i].nodes,

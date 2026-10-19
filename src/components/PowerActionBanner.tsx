@@ -1,11 +1,9 @@
 import { useState } from "react";
-import type { PowerActionState, RecipeSwitchState } from "../api/types";
+import type { PowerActionState } from "../api/types";
 import { RotateIcon } from "./ui/icons";
 
 interface PowerActionBannerProps {
   action: PowerActionState | null;
-  /** Fallback recipe-switch progress when the action state does not carry it. */
-  recipeSwitch?: RecipeSwitchState | null;
 }
 
 function phaseLabel(action: PowerActionState): string {
@@ -13,8 +11,6 @@ function phaseLabel(action: PowerActionState): string {
   switch (action.phase) {
     case "starting":
       return "Starting…";
-    case "capturing-recipe":
-      return "Capturing the active recipe…";
     case "shutting-down":
       return `Shutting down${current || " nodes"}…`;
     case "waiting-offline":
@@ -25,8 +21,6 @@ function phaseLabel(action: PowerActionState): string {
       return `Powering on${current || " nodes"}…`;
     case "waiting-online":
       return "Waiting for nodes to come online…";
-    case "reactivating-recipe":
-      return `Re-activating recipe ${action.recipeId ?? ""}…`;
     case "done":
       return action.message ? `Done: ${action.message}` : "Done";
     case "failed":
@@ -39,19 +33,15 @@ function phaseLabel(action: PowerActionState): string {
 /**
  * Progress banner for shutdown-all / wake-all. The batch endpoints return
  * immediately; the long-running work (graceful shutdown, outlet power-off,
- * boot wait, recipe re-activation) arrives on the WS `powerAction` state.
+ * boot wait) arrives on the WS `powerAction` state.
  */
-export function PowerActionBanner({ action, recipeSwitch = null }: PowerActionBannerProps) {
+export function PowerActionBanner({ action }: PowerActionBannerProps) {
   const [dismissedFor, setDismissedFor] = useState<number | null>(null);
   if (!action || dismissedFor === action.startedAt) return null;
 
   const finished = action.phase === "done" || action.phase === "failed";
   const pct =
     action.total > 0 ? Math.min(100, Math.round((action.completed / action.total) * 100)) : 0;
-  const recipePct =
-    action.recipeSwitch?.progress?.percent ?? recipeSwitch?.progress?.percent;
-  const showRecipeProgress =
-    action.phase === "reactivating-recipe" && typeof recipePct === "number";
 
   return (
     <div className={`ov-prog${action.phase === "failed" ? " is-err" : ""}`} role="status">
@@ -80,7 +70,7 @@ export function PowerActionBanner({ action, recipeSwitch = null }: PowerActionBa
         <div className="ov-prog__track">
           <div
             className={`ov-prog__fill${action.phase === "failed" ? " is-err" : ""}`}
-            style={{ width: `${showRecipeProgress ? recipePct : pct}%` }}
+            style={{ width: `${pct}%` }}
           />
         </div>
       )}

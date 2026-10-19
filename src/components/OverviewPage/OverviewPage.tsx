@@ -2,7 +2,6 @@ import { useEffect, useMemo, useState } from "react";
 import type {
   AlertInstance,
   PowerActionState,
-  RecipeSwitchState,
   SparkSnapshot,
 } from "../../api/types";
 import { isWorkerSpark } from "../../api/sparkRole";
@@ -48,8 +47,6 @@ interface OverviewPageProps {
   temperatureUnit?: "celsius" | "fahrenheit";
   /** Live shutdown-all / wake-all progress from the WS snapshot. */
   powerAction?: PowerActionState | null;
-  /** Live recipe-switch progress (shown while wake-all re-activates a recipe). */
-  recipeSwitch?: RecipeSwitchState | null;
   onSelectSpark?: (id: string) => void;
   /** Open a dedicated page (Token totals, Fleet energy, Activity). */
   onNavigate?: (id: string) => void;
@@ -71,7 +68,6 @@ export function OverviewPage({
   showVramBreakdown = true,
   temperatureUnit = "celsius",
   powerAction = null,
-  recipeSwitch = null,
   onSelectSpark,
   onNavigate,
 }: OverviewPageProps) {
@@ -293,7 +289,7 @@ export function OverviewPage({
                   type="button"
                   onClick={() => setWakeAllOpen(true)}
                   disabled={batchLoading || Boolean(powerAction && powerAction.phase !== "done" && powerAction.phase !== "failed")}
-                  title="Power on every offline node with a configured outlet, then re-activate the last active recipe. Hosts without an outlet fall back to Wake-on-LAN."
+                  title="Power on every offline node with a configured outlet. Hosts without an outlet fall back to Wake-on-LAN. No recipes are applied."
                   className="btn"
                 >
                   <PowerOnIcon className="h-3.5 w-3.5" />
@@ -303,7 +299,7 @@ export function OverviewPage({
               <ShutdownAll sparks={sparks} className="ov-shutdown" />
             </>
           )}
-          <PowerActionBanner action={powerAction} recipeSwitch={recipeSwitch} />
+          <PowerActionBanner action={powerAction} />
         </div>
       </div>
 
@@ -380,11 +376,11 @@ export function OverviewPage({
         onClose={() => setWakeAllOpen(false)}
         onConfirm={runWakeAll}
         title="Wake All"
-        description={`Power on every offline node with a configured outlet and re-activate the last active recipe? Hosts without an outlet fall back to Wake-on-LAN.`}
+        description="Power on every offline node with a configured outlet? Hosts without an outlet fall back to Wake-on-LAN."
         confirmLabel="Wake all"
         tone="default"
         warningTitle="This powers on hardware."
-        warningDetail="Nodes will boot, then the recipe that was active before the last shutdown is re-activated automatically."
+        warningDetail="Waits for woken nodes to come online. No recipes are applied or restored; use Deployment recipes to apply one."
       />
     </div>
   );

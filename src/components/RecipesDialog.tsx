@@ -21,6 +21,9 @@ function useEscape(onClose: () => void) {
 }
 
 const PHASE_LABEL: Record<RecipeSwitchState["phase"], string> = {
+  "checking-nodes": "Checking required nodes…",
+  "powering-on": "Waking required nodes…",
+  "waiting-online": "Waiting for required nodes to come online…",
   "checking-current-state": "Checking current state…",
   stopping: "Stopping current recipe…",
   "confirming-stopped": "Confirming it stopped…",
@@ -43,19 +46,11 @@ function formatEtaSeconds(sec: number | null | undefined): string | null {
 }
 
 const GROUP_LABEL: Record<string, string> = {
-  "dual-text-gen": "Dual-node text generation (TP2, one at a time)",
-  "single-node": "Single-node (other Spark idle)",
+  "dual-text-gen": "Distributed text generation",
+  "single-node": "Single-node",
 };
 
-/**
- * The already-active recipe's button is never disabled or dead-ended at "Active" — the
- * backend's switchRecipe() already treats same-target activation as a full
- * stop-clear-resync-restart cycle, not a no-op (see recipeActions.js's doc comment), so the
- * button just needs to expose that: "Refresh" instead of "Activate" once a recipe is already
- * live, useful when the recipe's own files/pin changed and the running instance won't pick
- * that up on its own. Only an in-flight switch (any recipe) disables it, matching the single
- * `_switchInFlight` lock the backend enforces.
- */
+/** Same-target activation refreshes the deployment; only an in-flight switch disables it. */
 export function activateButtonState(
   isActive: boolean,
   switchInFlight: boolean,
@@ -132,8 +127,8 @@ export function RecipesDialog({ open, onClose, recipeSwitch }: RecipesDialogProp
       <div className="settings-panel w-full max-w-lg p-6">
         <h2 className="mb-1 shrink-0 text-sm font-semibold text-text-strong">Deployment recipes</h2>
         <p className="mb-4 shrink-0 text-[10px] text-muted">
-          Exactly one of these runs across the pair at a time. Status is probed live over SSH on
-          every open — never a stored flag.
+          One recipe runs at a time. Applying wakes only its required offline nodes and waits up
+          to five minutes for all required nodes to come online before deployment.
         </p>
 
         <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
@@ -153,12 +148,23 @@ export function RecipesDialog({ open, onClose, recipeSwitch }: RecipesDialogProp
                   ? "bg-accent-soft text-accent"
                   : "bg-surface-elevated text-text"
             }`}
+            role="status"
           >
             <div className="font-medium">
               {PHASE_LABEL[recipeSwitch.phase]} — target: {recipeSwitch.targetId}
             </div>
             {recipeSwitch.from && (
               <div className="mt-0.5 text-[10px] text-muted">from: {recipeSwitch.from}</div>
+            )}
+            {recipeSwitch.requiredNodes && (
+              <div className="mt-0.5 text-[10px] text-muted">
+                Required nodes: {recipeSwitch.requiredNodes.join(", ")}
+              </div>
+            )}
+            {recipeSwitch.pendingNodes && recipeSwitch.pendingNodes.length > 0 && (
+              <div className="mt-0.5 text-[10px] text-muted">
+                Pending nodes: {recipeSwitch.pendingNodes.join(", ")}
+              </div>
             )}
             {recipeSwitch.progress && (
               <div className="mt-2 space-y-1">
@@ -202,6 +208,9 @@ export function RecipesDialog({ open, onClose, recipeSwitch }: RecipesDialogProp
                     <div>
                       <div className="flex items-center gap-2">
                         <span className="text-xs font-medium text-text-strong">{recipe.label}</span>
+                        <span className="rounded bg-surface px-1.5 py-0.5 text-[10px] font-medium text-muted">
+                          TP{recipe.tp}
+                        </span>
                         {isActive && (
                           <span className="rounded bg-accent-soft px-1.5 py-0.5 text-[10px] font-medium text-accent">
                             active
@@ -210,6 +219,11 @@ export function RecipesDialog({ open, onClose, recipeSwitch }: RecipesDialogProp
                       </div>
                       <div className="mt-0.5 text-[10px] text-muted">
                         {GROUP_LABEL[recipe.group] ?? recipe.group}
+                      </div>
+                      <div className="mt-0.5 text-[10px] text-muted">
+                        Required nodes: {recipe.requiredNodes.map((node) =>
+                          "sparkId" in node ? node.sparkId : node.role
+                        ).join(", ")}
                       </div>
                       <div className="mt-1 space-y-0.5">
                         {recipe.nodeStatus.map((n) => (
@@ -226,7 +240,7 @@ export function RecipesDialog({ open, onClose, recipeSwitch }: RecipesDialogProp
                       type="button"
                       disabled={disabled}
                       onClick={() => handleActivate(recipe)}
-                      title={isActive ? "Stop, resync, and restart this recipe fresh — picks up any recipe/config changes the running instance hasn't" : undefined}
+                      title={isActive ? "Stop and restart this recipe with the latest recipe/config files" : undefined}
                       className="shrink-0 rounded bg-accent px-3 py-1.5 text-xs font-medium text-white hover:bg-accent-hover disabled:opacity-50"
                     >
                       {label}

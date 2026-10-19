@@ -14,7 +14,6 @@ const TMPDIR = fs.mkdtempSync(path.join(os.tmpdir(), "sparkdash-power-config-"))
 process.env.SPARKS_JSON_PATH = path.join(TMPDIR, "sparks.json");
 process.env.SPARKS_SECRETS_PATH = path.join(TMPDIR, "sparks-secrets.json");
 process.env.SECRETS_KEY_PATH = path.join(TMPDIR, ".secrets-key");
-process.env.POWER_STATE_JSON_PATH = path.join(TMPDIR, "power-state.json");
 
 const { SparkRegistry } = await import("../SparkRegistry.js");
 const { loadSecrets } = await import("../../secretsStore.js");

@@ -612,7 +612,6 @@ function DashboardApp() {
                   showVramBreakdown={settings?.showVramBreakdown ?? true}
                   temperatureUnit={settings?.temperatureUnit ?? "celsius"}
                   powerAction={powerAction}
-                  recipeSwitch={recipeSwitch}
                   onSelectSpark={navigate}
                   onNavigate={navigate}
                 />
