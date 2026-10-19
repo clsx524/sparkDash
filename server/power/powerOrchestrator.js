@@ -26,6 +26,7 @@ export function createPowerOrchestrator({
   shutdownSpark,
   wakeSpark,
   isSwitchInFlight,
+  beforeShutdown = null,
   onProgress,
   recordEvent = () => {},
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
@@ -88,6 +89,8 @@ export function createPowerOrchestrator({
     const emit = makeEmitter(state);
 
     try {
+      emit({ phase: "starting" });
+      await beforeShutdown?.();
       const sparks = registry.sparks;
       const remotes = sparks.filter((s) => !s.isLocal);
       const local = sparks.find((s) => s.isLocal) || null;

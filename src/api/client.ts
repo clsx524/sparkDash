@@ -574,8 +574,10 @@ export interface PowerResult {
 
 export interface BatchPowerResult {
   success: boolean;
-  /** Batch actions are asynchronous; progress arrives on the WS `powerAction`. */
+  /** Progress arrives on `recipeSession` for recipe activation, otherwise `powerAction`. */
   started?: boolean;
+  targetId?: string;
+  sessionId?: string;
   results?: {
     id: string;
     ok: boolean;
@@ -601,7 +603,7 @@ export function shutdownAllSparks(): Promise<BatchPowerResult> {
   return apiFetch("/api/sparks/shutdown-all", { method: "POST" });
 }
 
-/** Send WoL to all registered Sparks that have a MAC configured. */
+/** Activate the last active recipe, or power on the fleet when no recipe is remembered. */
 export function wakeAllSparks(): Promise<BatchPowerResult> {
   return apiFetch("/api/sparks/wake-all", { method: "POST" });
 }

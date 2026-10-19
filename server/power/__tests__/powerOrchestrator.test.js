@@ -12,6 +12,7 @@ function makeHarness({
   switchInFlight = false,
   stayOffline = false,
   shutdown = null,
+  beforeShutdown = null,
   checkOnlineNow = async () => {},
   onPowerOff = async () => {},
   sleep = async () => {},
@@ -56,6 +57,7 @@ function makeHarness({
       if (!stayOffline) state[spark.id] = true;
     },
     isSwitchInFlight: () => switchInFlight,
+    beforeShutdown,
     onProgress: (s) => calls.progress.push(s),
     recordEvent: (e) => calls.events.push(e),
     sleep,
@@ -101,6 +103,27 @@ test("shutdown-all shuts down remotes, powers off, and skips the local outlet", 
   assert.deepEqual(calls.powerOff, [["a", "b"]], "one batch request for the shared endpoint");
   assert.equal(calls.powerOff.flat().includes("nas"), false, "local dashboard host is never power-cut");
   assert.equal(calls.progress.at(-1).phase, "done");
+});
+
+test("shutdown-all captures active recipe metadata before any node is shut down", async () => {
+  const captured = deferred();
+  const { orchestrator, calls } = makeHarness({
+    sparks: [remote("a"), remote("b")],
+    online: { a: true, b: true },
+    beforeShutdown: () => captured.promise,
+  });
+  const running = orchestrator.shutdownAll();
+  try {
+    await nextTurn();
+    assert.equal(orchestrator.isInFlight(), "shutdown-all");
+    assert.deepEqual(calls.shutdown, []);
+    assert.deepEqual(calls.powerOff, []);
+  } finally {
+    captured.resolve();
+    await running;
+  }
+  assert.deepEqual(calls.shutdown, ["a", "b"]);
+  assert.deepEqual(calls.powerOff, [["a", "b"]]);
 });
 
 test("shutdown-all dispatches remote SSH concurrently and waits for the batch before shutting down locally", async () => {

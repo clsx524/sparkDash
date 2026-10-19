@@ -42,6 +42,7 @@ function Probe() {
         count: snapshot.sparks.length,
         alerts: snapshot.serverAlerts?.map((a) => a.key) ?? null,
         recipeSession: snapshot.recipeSession,
+        lastActiveRecipe: snapshot.lastActiveRecipe,
       })}
     </pre>
   );
@@ -123,6 +124,30 @@ describe("useSnapshot connection lifecycle", () => {
     act(() => MockSocket.instances[1].emit({ type: "snapshot", sparks: [], recipeSession: terminal }));
     await flush();
     expect(readProbe().recipeSession).toEqual(terminal);
+  });
+
+  it("propagates last active recipe metadata across reconnect and clears absent or null metadata", async () => {
+    render(<Probe />);
+    const saved = { id: "glm", label: "GLM", storageError: null };
+    const first = MockSocket.instances[0];
+    act(() => first.emit({ type: "snapshot", sparks: [], lastActiveRecipe: saved }));
+    await flush();
+    expect(readProbe().lastActiveRecipe).toEqual(saved);
+    act(() => first.close());
+    act(() => vi.advanceTimersByTime(2000));
+    expect(readProbe().lastActiveRecipe).toEqual(saved);
+    const next = MockSocket.instances[1];
+    const unsaved = { ...saved, storageError: "Disk unavailable" };
+    act(() => next.emit({ type: "snapshot", sparks: [], lastActiveRecipe: unsaved }));
+    await flush();
+    expect(readProbe().lastActiveRecipe).toEqual(unsaved);
+    act(() => next.emit({ type: "snapshot", sparks: [], lastActiveRecipe: null }));
+    await flush();
+    expect(readProbe().lastActiveRecipe).toBeNull();
+    act(() => next.emit({ type: "snapshot", sparks: [], lastActiveRecipe: saved }));
+    act(() => next.emit({ type: "snapshot", sparks: [] }));
+    await flush();
+    expect(readProbe().lastActiveRecipe).toBeNull();
   });
 
   it("exposes the server's alerts only while the snapshot carries them", async () => {

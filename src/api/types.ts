@@ -973,12 +973,19 @@ export interface RecipeSessionDetail extends RecipeSessionSummary {
   stages: RecipeSessionStage[];
 }
 
+export interface LastActiveRecipe {
+  id: string;
+  label: string;
+  storageError: string | null;
+}
+
 export interface RecipeListResponse {
   recipes: RecipeInfo[];
   activeId: string | null;
   conflict: boolean;
   conflictIds: string[];
   session: RecipeSessionSummary | null;
+  lastActiveRecipe: LastActiveRecipe | null;
 }
 
 /** Progress of a fleet shutdown-all / wake-all (WS `powerAction`). */
@@ -1026,6 +1033,7 @@ export interface WsSnapshot {
   /** Alert notifications' firing set — present only while `alertsEnabled` is on. */
   alerts?: { active: AlertInstance[] };
   recipeSession?: RecipeSessionSummary | null;
+  lastActiveRecipe?: LastActiveRecipe | null;
   powerAction?: PowerActionState | null;
 }
 

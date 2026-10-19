@@ -19,6 +19,7 @@ interface ConfirmShutdownDialogProps {
   tone?: "danger" | "default";
   warningTitle?: string;
   warningDetail?: string;
+  disabled?: boolean;
 }
 
 function useEscape(enabled: boolean, onClose: () => void) {
@@ -48,6 +49,7 @@ export function ConfirmShutdownDialog({
   tone = "danger",
   warningTitle,
   warningDetail,
+  disabled = false,
 }: ConfirmShutdownDialogProps) {
   const [submitting, setSubmitting] = useState(false);
   const titleId = useId();
@@ -72,7 +74,7 @@ export function ConfirmShutdownDialog({
     };
   }, [mounted]);
 
-  const canConfirm = !submitting;
+  const canConfirm = !submitting && !disabled;
   const danger = tone === "danger";
   const Icon = danger ? PowerOffIcon : PowerOnIcon;
 

@@ -66,6 +66,7 @@ import { RecipeRegistry } from "./collectors/RecipeRegistry.js";
 import { ModelRegistry } from "./collectors/ModelRegistry.js";
 import { switchRecipe, isSwitchInFlight, RecipeSwitchError } from "./collectors/recipeActions.js";
 import { RecipeSessionStore, isValidRecipeSessionId } from "./recipes/RecipeSessionStore.js";
+import { LastActiveRecipeStore } from "./recipes/LastActiveRecipeStore.js";
 import { createPowerOrchestrator } from "./power/powerOrchestrator.js";
 import * as powerClient from "./power/powerClient.js";
 import { FleetEnergyTracker } from "./energy/FleetEnergyTracker.js";
@@ -315,6 +316,31 @@ const recipeSessions = new RecipeSessionStore({
   onChange: queueRecipeSessionBroadcast,
 });
 let recipeSessionBroadcastTimer = null;
+const lastActiveRecipe = new LastActiveRecipeStore({
+  file: path.join(RECIPE_SESSIONS_DIR, "last-active-recipe.json"),
+});
+if (!lastActiveRecipe.get()) {
+  const succeeded = recipeSessions.list().find((session) => session.status === "succeeded");
+  if (succeeded) lastActiveRecipe.remember(succeeded.targetId, succeeded.finishedAt);
+}
+
+function lastActiveRecipeInfo() {
+  const remembered = lastActiveRecipe.get();
+  if (!remembered) return null;
+  return {
+    id: remembered.id,
+    label: recipeRegistry.get(remembered.id)?.label || remembered.id,
+    storageError: remembered.storageError,
+  };
+}
+
+function rememberUniqueActiveRecipe(snapshot, observedAt) {
+  const latest = recipeSessions.summary();
+  if (latest?.status === "succeeded" && latest.finishedAt > observedAt) return;
+  if (!isSwitchInFlight() && snapshot.activeId && !snapshot.conflict) {
+    lastActiveRecipe.remember(snapshot.activeId, observedAt);
+  }
+}
 
 function queueRecipeSessionBroadcast() {
   if (recipeSessionBroadcastTimer) return;
@@ -2162,6 +2188,13 @@ const powerOrchestrator = createPowerOrchestrator({
   shutdownSpark: initiateSparkShutdown,
   wakeSpark: wakeSparkWol,
   isSwitchInFlight,
+  beforeShutdown: async () => {
+    const observedAt = Date.now();
+    const snapshot = await recipeRegistry.list({
+      getOnline: (id) => Boolean(monitors.get(id)?.online),
+    });
+    rememberUniqueActiveRecipe(snapshot, observedAt);
+  },
   onProgress: (state) => {
     powerActionState = { ...state, updatedAt: Date.now() };
     forceBroadcast();
@@ -2186,7 +2219,7 @@ app.post("/api/sparks/shutdown-all", (req, res) => {
   });
 });
 
-app.post("/api/sparks/wake-all", (req, res) => {
+app.post("/api/sparks/wake-all", async (req, res) => {
   if (!allowDestructive(principalKey(req)) || !allowGlobalDestructive(clientKey(req))) {
     return rejectLimited(res, "Too many power requests; try again shortly");
   }
@@ -2195,6 +2228,29 @@ app.post("/api/sparks/wake-all", (req, res) => {
   }
   if (isSwitchInFlight()) {
     return res.status(409).json({ error: "A recipe switch is in progress" });
+  }
+  if (!lastActiveRecipe.get()) {
+    try {
+      const observedAt = Date.now();
+      const snapshot = await recipeRegistry.list({
+        getOnline: (id) => Boolean(monitors.get(id)?.online),
+      });
+      rememberUniqueActiveRecipe(snapshot, observedAt);
+    } catch (err) {
+      return res.status(500).json({ error: `Cannot determine the active recipe: ${err.message}` });
+    }
+    if (powerOrchestrator.isInFlight() || isSwitchInFlight()) {
+      return res.status(409).json({ error: "A power action or recipe switch is already in progress" });
+    }
+  }
+  const remembered = lastActiveRecipe.get();
+  if (remembered) {
+    try {
+      const accepted = startRecipeApply(remembered.id);
+      return res.json({ success: true, ...accepted });
+    } catch (err) {
+      return res.status(err.status || 500).json({ error: err.message, sessionId: err.sessionId });
+    }
   }
   res.json({ success: true, started: true });
   powerOrchestrator.wakeAll().catch((err) => {
@@ -2332,10 +2388,12 @@ app.post("/api/sparks/:id/wake", async (req, res) => {
 // See RecipeRegistry.js — active state is never trusted from a stored flag.
 app.get("/api/recipes", async (_req, res) => {
   try {
+    const observedAt = Date.now();
     const snapshot = await recipeRegistry.list({
       getOnline: (id) => Boolean(monitors.get(id)?.online),
     });
-    res.json({ ...snapshot, session: recipeSessions.summary() });
+    rememberUniqueActiveRecipe(snapshot, observedAt);
+    res.json({ ...snapshot, session: recipeSessions.summary(), lastActiveRecipe: lastActiveRecipeInfo() });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -2372,18 +2430,17 @@ app.get("/api/recipes/sessions/:id", (req, res) => {
  * many minutes and is reported through persisted Apply sessions and WS `recipeSession`,
  * not in this response.
  */
-app.post("/api/recipes/:id/activate", (req, res) => {
-  if (!recipeRegistry.get(req.params.id)) {
-    return res.status(404).json({ error: "Recipe not found" });
+function startRecipeApply(recipeId) {
+  const recipe = recipeRegistry.get(recipeId);
+  if (!recipe) {
+    throw Object.assign(new RecipeSwitchError(`Recipe not found: ${recipeId}`), { status: 404 });
   }
   if (isSwitchInFlight()) {
-    return res.status(409).json({ error: "A recipe switch is already in progress" });
+    throw Object.assign(new RecipeSwitchError("A recipe switch is already in progress"), { status: 409 });
   }
   if (powerOrchestrator.isInFlight()) {
-    return res.status(409).json({ error: "A power action is already in progress" });
+    throw Object.assign(new RecipeSwitchError("A power action is already in progress"), { status: 409 });
   }
-
-  const recipe = recipeRegistry.get(req.params.id);
   let requiredNodes = [];
   let configurationError = null;
   try {
@@ -2402,18 +2459,21 @@ app.post("/api/recipes/:id/activate", (req, res) => {
       requiredNodes: requiredNodes.map((spark) => ({ id: spark.id, name: spark.name || spark.id })),
     }, { secrets });
   } catch (err) {
-    return res.status(500).json({ error: `Cannot persist Apply session: ${err.message}` });
+    throw new Error(`Cannot persist Apply session: ${err.message}`);
   }
   const onLog = (line) => recipeSessions.appendLog(session.id, line);
-  const onProgress = (state) => recipeSessions.recordProgress(session.id, state);
+  const onProgress = (state) => {
+    recipeSessions.recordProgress(session.id, state);
+    if (state.phase === "done") lastActiveRecipe.remember(recipe.id);
+  };
   if (configurationError) {
     onProgress({ phase: "checking-nodes" });
     onProgress({ phase: "failed", error: configurationError.message });
-    return res.status(400).json({
-      error: recipeSessions.summary().error, sessionId: session.id,
+    throw Object.assign(new RecipeSwitchError(recipeSessions.summary().error), {
+      status: 400, sessionId: session.id,
     });
   }
-  const applying = switchRecipe(recipeRegistry, modelRegistry, req.params.id, onProgress, {
+  const applying = switchRecipe(recipeRegistry, modelRegistry, recipeId, onProgress, {
     getOnline: (id) => Boolean(monitors.get(id)?.online),
     checkOnlineNow: async (id) => {
       const monitor = monitors.get(id);
@@ -2423,7 +2483,6 @@ app.post("/api/recipes/:id/activate", (req, res) => {
     isPowerActionInFlight: () => Boolean(powerOrchestrator.isInFlight()),
     onLog,
   });
-  res.json({ started: true, targetId: req.params.id, sessionId: session.id });
   applying.catch((err) => {
     if (recipeSessions.get(session.id)?.status === "running") {
       onProgress({ phase: "failed", error: err.message });
@@ -2433,11 +2492,20 @@ app.post("/api/recipes/:id/activate", (req, res) => {
     // (unknown recipe id, switch already in flight — the isSwitchInFlight() check above
     // makes the latter a race rather than the common case).
     if (err instanceof RecipeSwitchError) {
-      console.warn(`[recipes] switch to ${req.params.id} failed: ${err.message}`);
+      console.warn(`[recipes] switch to ${recipeId} failed: ${err.message}`);
     } else {
-      console.error(`[recipes] switch to ${req.params.id} failed unexpectedly:`, err);
+      console.error(`[recipes] switch to ${recipeId} failed unexpectedly:`, err);
     }
   });
+  return { started: true, targetId: recipeId, sessionId: session.id };
+}
+
+app.post("/api/recipes/:id/activate", (req, res) => {
+  try {
+    res.json(startRecipeApply(req.params.id));
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message, sessionId: err.sessionId });
+  }
 });
 
 // ─── Model Registry (generic model tracking/sync) ─────────
@@ -2671,6 +2739,7 @@ function buildSnapshotPayload(sparks = orderedSnapshots()) {
     sparks,
     refreshInterval: getSettings().pollIntervalMs,
     recipeSession: recipeSessions.summary(),
+    lastActiveRecipe: lastActiveRecipeInfo(),
     powerAction: powerActionState,
   };
   // Only while alerts are on: the key's absence tells the UI to derive its own.
@@ -2838,6 +2907,7 @@ async function shutdown(signal) {
   try {
     clearTimeout(recipeSessionBroadcastTimer);
     recipeSessions.flush();
+    lastActiveRecipe.flush();
   } catch (err) {
     console.error("[sparkDash] failed to flush recipe sessions:", err.message);
   }
