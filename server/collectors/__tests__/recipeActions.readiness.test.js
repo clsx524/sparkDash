@@ -393,16 +393,18 @@ test("failed launcher session retains node output, exit context and failed stage
   }
 });
 
-test("shipped fleet recipes apply with spark2 and Atom both configured as workers", async (t) => {
+test("shipped recipes apply with registered spark-1, spark-2 and atom IDs and two workers", async (t) => {
   const definitions = JSON.parse(fs.readFileSync(new URL("../../config/recipes.json", import.meta.url), "utf8"));
   const expected = {
-    "glm53-exl3": { required: ["spark1", "spark2"], launcher: "spark1" },
-    "qwen38-flash-next": { required: ["spark1", "spark2"], launcher: "spark1" },
-    "minimax-h3": { required: ["spark2"], launcher: "spark2" },
-    "deepseek-v41-lakyfx-tp3": { required: ["spark1", "spark2", "atom"], launcher: "spark1" },
+    "glm53-exl3": { required: ["spark-1", "spark-2"], launcher: "spark-1" },
+    "qwen38-flash-next": { required: ["spark-1", "spark-2"], launcher: "spark-1" },
+    "minimax-h3": { required: ["spark-2"], launcher: "spark-2" },
+    "deepseek-v41-lakyfx-tp3": { required: ["spark-1", "spark-2", "atom"], launcher: "spark-1" },
   };
   for (const definition of definitions) {
     const h = setup(t, { online: [] });
+    h.sparks[0].id = "spark-1";
+    h.sparks[1].id = "spark-2";
     h.registry._recipes = [definition];
     h.options.wakeNodes = async (targets) => {
       h.wakes.push(targets.map((spark) => spark.id));
