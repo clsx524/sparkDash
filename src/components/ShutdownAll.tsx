@@ -59,7 +59,7 @@ export function ShutdownAll({ sparks, className = "" }: { sparks: SparkSnapshot[
         onClose={() => setOpen(false)}
         onConfirm={run}
         title="Shutdown All"
-        description={`Gracefully shut down all ${onlineCount} online Spark${onlineCount === 1 ? "" : "s"}, then power off every node with a configured outlet. The active recipe is remembered and re-activated on Wake all.`}
+        description={`Gracefully shut down all ${onlineCount} online Spark${onlineCount === 1 ? "" : "s"}, then power off every node with a configured outlet.`}
         confirmLabel="Shut down all"
         warnings={shutdownWarnings(sparks)}
       />

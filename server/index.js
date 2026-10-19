@@ -62,7 +62,6 @@ import { ModelRegistry } from "./collectors/ModelRegistry.js";
 import { switchRecipe, isSwitchInFlight, RecipeSwitchError } from "./collectors/recipeActions.js";
 import { createPowerOrchestrator } from "./power/powerOrchestrator.js";
 import * as powerClient from "./power/powerClient.js";
-import * as powerState from "./power/powerState.js";
 import { FleetEnergyTracker } from "./energy/FleetEnergyTracker.js";
 import { EventLog } from "./events/EventLog.js";
 import { UnitHistory } from "./metrics/UnitHistory.js";
@@ -2065,6 +2064,27 @@ async function wakeSparkWol(spark) {
   return sent;
 }
 
+/** Wake only the recipe dependencies selected by the activation state machine. */
+async function wakeRecipeNodes(sparks) {
+  const powered = sparks.filter((spark) => powerClient.hasPowerControl(spark));
+  const results = await powerClient.powerOn(powered);
+  const failed = results.filter((result) => !result.ok).map((result) => {
+    const spark = sparks.find((node) => node.id === result.id);
+    return `${spark?.name || result.id}: ${result.error || "power-on failed"}`;
+  });
+  await Promise.all(sparks.filter((spark) => !powerClient.hasPowerControl(spark)).map(async (spark) => {
+    try {
+      if (spark.kind !== "host") throw new Error("No power-on endpoint configured");
+      await wakeSparkWol(spark);
+    } catch (err) {
+      failed.push(`${spark.name || spark.id}: ${err.message}`);
+    }
+  }));
+  if (failed.length > 0) {
+    throw new RecipeSwitchError(`Could not wake required nodes: ${failed.join("; ")}`);
+  }
+}
+
 const powerOrchestrator = createPowerOrchestrator({
   registry,
   getOnline: (id) => Boolean(monitors.get(id)?.online),
@@ -2072,13 +2092,9 @@ const powerOrchestrator = createPowerOrchestrator({
     const monitor = monitors.get(id);
     if (monitor?.checkOnlineNow) await monitor.checkOnlineNow();
   },
-  recipeRegistry,
-  modelRegistry,
   powerClient,
-  powerState,
   shutdownSpark: initiateSparkShutdown,
   wakeSpark: wakeSparkWol,
-  switchRecipe,
   isSwitchInFlight,
   onProgress: (state) => {
     powerActionState = { ...state, updatedAt: Date.now() };
@@ -2237,7 +2253,9 @@ app.post("/api/sparks/:id/wake", async (req, res) => {
 // See RecipeRegistry.js — active state is never trusted from a stored flag.
 app.get("/api/recipes", async (_req, res) => {
   try {
-    const snapshot = await recipeRegistry.list();
+    const snapshot = await recipeRegistry.list({
+      getOnline: (id) => Boolean(monitors.get(id)?.online),
+    });
     res.json({ ...snapshot, switch: recipeSwitchState });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -2246,7 +2264,7 @@ app.get("/api/recipes", async (_req, res) => {
 
 /**
  * Switch the cluster to a different recipe. Responds immediately once the switch has started;
- * the operation itself (stop current → confirm stopped → start target → health-check) can take
+ * the operation itself (wake required nodes → wait online → stop current → start → health-check) can take
  * many minutes and is reported over the WebSocket via `recipeSwitch` in the snapshot payload,
  * not in this response.
  */
@@ -2257,12 +2275,23 @@ app.post("/api/recipes/:id/activate", (req, res) => {
   if (isSwitchInFlight()) {
     return res.status(409).json({ error: "A recipe switch is already in progress" });
   }
+  if (powerOrchestrator.isInFlight()) {
+    return res.status(409).json({ error: "A power action is already in progress" });
+  }
 
   res.json({ started: true, targetId: req.params.id });
 
   switchRecipe(recipeRegistry, modelRegistry, req.params.id, (state) => {
     recipeSwitchState = { ...state, updatedAt: Date.now() };
     forceBroadcast();
+  }, {
+    getOnline: (id) => Boolean(monitors.get(id)?.online),
+    checkOnlineNow: async (id) => {
+      const monitor = monitors.get(id);
+      return monitor ? monitor.checkOnlineNow() : false;
+    },
+    wakeNodes: wakeRecipeNodes,
+    isPowerActionInFlight: () => Boolean(powerOrchestrator.isInFlight()),
   }).catch((err) => {
     // switchRecipe already emitted a "failed" progress state for real switch failures;
     // this only catches the class of error it throws before entering the state machine

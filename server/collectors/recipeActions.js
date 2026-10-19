@@ -3,7 +3,7 @@
  *
  * Mirrors comfyActions.js's precedent (a recipe-level mutation action living outside the HTTP
  * route handler), scaled up to a multi-node, multi-minute operation: sync each node's model
- * (Model Registry pull + checksum verify), stop whatever recipe is currently live,
+ * (using rsync quick-check, without hashing weights), stop whatever recipe is currently live,
  * confirm it actually stopped, start the target recipe's node(s), then poll each node's own
  * API until it reports healthy. Every phase transition calls `onProgress` so the caller
  * (index.js) can push it over the WebSocket immediately — this can run for many minutes (cold
@@ -38,6 +38,8 @@ const HEALTH_POLL_MS = 5_000;
 const HEALTH_REQUEST_TIMEOUT_MS = 5_000;
 // Model syncs can move hundreds of GB between hosts — hours, not minutes.
 const MODEL_SYNC_PHASE_TIMEOUT_MS = 6 * 60 * 60_000;
+const READINESS_TIMEOUT_MS = 5 * 60_000;
+const READINESS_POLL_MS = 2_000;
 
 export class RecipeSwitchError extends Error {}
 
@@ -103,10 +105,10 @@ export const PERSISTENT_CONTAINER_NAMES = [
 ];
 
 /**
- * Force-stop and remove every running container on every head/worker Spark except the
- * fleet's own persistent infrastructure (PERSISTENT_CONTAINER_NAMES above) —
- * regardless of name, image, or whether probeRecipe's live detection currently believes
- * anything is active there.
+ * Force-stop and remove every running container on online head/worker Sparks and
+ * the target's required compute nodes, except the fleet's persistent infrastructure
+ * (PERSISTENT_CONTAINER_NAMES above), regardless of live recipe detection.
+ * Offline unrelated nodes are skipped, never contacted or woken by this sweep.
  *
  * Exists because that detection can be wrong (a runningPattern that doesn't match a
  * recipe's real status text, a crashed sparkDash losing track, a container started by
@@ -120,14 +122,16 @@ export const PERSISTENT_CONTAINER_NAMES = [
  * containers) when the next switch's start.sh hit "PORT=8888 is already bound" on the head
  * and a worker-container conflict on the other node.
  *
- * Scoped to head/worker Sparks only (never the Model Registry host or any other tracked
- * host) — this fleet's invariant is "exactly one recipe's containers, or none, ever run on
- * a compute Spark at a time" (see RecipeRegistry.js's module doc), so sweeping everything
- * but the known persistent infrastructure there is safe by construction.
+ * The target's explicit dependencies include all TP ranks, even when one head-side
+ * launcher starts the whole cluster. Online head/worker nodes are also swept to
+ * preserve conflict cleanup when moving between single-node and multi-node recipes.
+ * Other tracked hosts (such as an unrelated Model Registry) are never swept.
  */
-async function clearStaleContainers(recipeRegistry) {
+async function clearStaleContainers(recipeRegistry, requiredNodes, getOnline) {
+  const requiredIds = new Set(requiredNodes.map((spark) => spark.id));
   const sparks = recipeRegistry.sparkRegistry.sparks.filter(
-    (s) => s.role === "head" || s.role === "worker"
+    (spark) => (requiredIds.has(spark.id) || spark.role === "head" || spark.role === "worker") &&
+      getOnline(spark.id) === true
   );
   const excludeArgs = PERSISTENT_CONTAINER_NAMES.map((name) => `-e ${JSON.stringify(name)}`).join(" ");
   const sweepCmd = `docker ps --format '{{.Names}}' | grep -vx ${excludeArgs} | xargs -r docker rm -f`;
@@ -140,9 +144,10 @@ async function clearStaleContainers(recipeRegistry) {
 
 /**
  * Sync every node's tied models (recipe node's optional `modelIds` array, each referencing
- * a Model Registry entry) onto that node's own configured model folder, verifying checksums
- * on arrival. A node with no `modelIds` (or an empty one) is left alone — this is opt-in per
- * node, not assumed for every recipe. Synced sequentially, not in parallel, per model — two
+ * a Model Registry entry) onto that node's own configured model folder. Already-staged
+ * manifest files need only a target-side presence check; missing files use rsync's
+ * size/mtime quick-check, never SHA256. Nodes with no modelIds are left alone. Syncs
+ * run sequentially per model — two
  * large concurrent transfers to the same node would split one link's bandwidth across both
  * rather than actually finishing either sooner, and needlessly doubles concurrent SSH
  * connections against modelSync's own MaxStartups-conscious shard count.
@@ -163,7 +168,7 @@ export async function syncModelsForRecipe(recipeRegistry, modelRegistry, recipe)
       if (!model) {
         throw new RecipeSwitchError(`Recipe ${recipe.id} references unknown model ${modelId}`);
       }
-      await syncModelToSpark(modelRegistry, model, spark);
+      await syncModelToSpark(modelRegistry, model, spark, { verify: false });
     }
   }
 }
@@ -193,12 +198,12 @@ async function waitForNodeHealth(recipeRegistry, node) {
 }
 
 /** Poll one recipe's own probeRecipe() until every node reports not-running, or the deadline passes. */
-async function waitForRecipeStopped(recipeRegistry, recipe) {
+async function waitForRecipeStopped(recipeRegistry, recipe, options) {
   const deadline = Date.now() + STOP_CONFIRM_TIMEOUT_MS;
-  let probed = await recipeRegistry.probeRecipe(recipe);
+  let probed = await recipeRegistry.probeRecipe(recipe, options);
   while (probed.active && Date.now() < deadline) {
     await sleep(STOP_CONFIRM_POLL_MS);
-    probed = await recipeRegistry.probeRecipe(recipe);
+    probed = await recipeRegistry.probeRecipe(recipe, options);
   }
   if (probed.active) {
     throw new RecipeSwitchError(
@@ -241,6 +246,55 @@ async function pollSwitchProgress(recipeRegistry, target, startedAt, historicalA
   }
 }
 
+async function checkRequiredNodes(requiredNodes, options) {
+  const online = await Promise.all(requiredNodes.map(async (spark) => {
+    const result = await options.checkOnlineNow(spark.id);
+    return typeof result === "boolean" ? result : options.getOnline(spark.id) === true;
+  }));
+  return requiredNodes.filter((_, index) => !online[index]);
+}
+
+/** Readiness never touches launchers or unrelated outlets, and never wakes twice. */
+async function waitForRequiredNodes(requiredNodes, options, emit) {
+  const now = options.now ?? Date.now;
+  const pause = options.sleep ?? sleep;
+  const timeoutMs = Math.min(options.readinessTimeoutMs ?? READINESS_TIMEOUT_MS, READINESS_TIMEOUT_MS);
+  const pollMs = options.readinessPollMs ?? READINESS_POLL_MS;
+  const deadline = now() + timeoutMs;
+  const names = requiredNodes.map((spark) => spark.name || spark.id);
+  const timeoutMessage = () => `Required nodes did not become online within ${timeoutMs / 1000}s: ${names.join(", ")}`;
+  const bounded = async (operation) => {
+    const remaining = deadline - now();
+    if (remaining <= 0) throw new RecipeSwitchError(timeoutMessage());
+    const result = await withTimeout(Promise.resolve().then(operation), remaining, timeoutMessage());
+    if (now() > deadline) throw new RecipeSwitchError(timeoutMessage());
+    return result;
+  };
+  const checkAll = () => bounded(() => checkRequiredNodes(requiredNodes, options));
+  emit("checking-nodes", { requiredNodes: names });
+  let pending = await checkAll();
+  if (pending.length) {
+    if (typeof options.wakeNodes !== "function") {
+      throw new RecipeSwitchError("Recipe node wake is not configured");
+    }
+    emit("powering-on", {
+      requiredNodes: names,
+      pendingNodes: pending.map((spark) => spark.name || spark.id),
+    });
+    await bounded(() => options.wakeNodes(pending));
+    // Check every dependency again, including nodes that were initially online.
+    pending = await checkAll();
+  }
+  while (pending.length) {
+    emit("waiting-online", {
+      requiredNodes: names,
+      pendingNodes: pending.map((spark) => spark.name || spark.id),
+    });
+    await bounded(() => pause(Math.min(pollMs, deadline - now())));
+    pending = await checkAll();
+  }
+}
+
 let _switchInFlight = false;
 
 /**
@@ -259,9 +313,12 @@ let _switchInFlight = false;
  *   recipes whose nodes have no `modelId` tied to them
  * @param {string} targetId
  * @param {(state: object) => void} onProgress - called on every phase transition
+ * @param {object} options - getOnline(id), checkOnlineNow(id), wakeNodes(sparks),
+ *   isPowerActionInFlight(); optional now/sleep/readinessTimeoutMs/readinessPollMs
+ *   allow deterministic readiness testing (timeout is capped at five minutes).
  * @returns {Promise<void>}
  */
-export async function switchRecipe(recipeRegistry, modelRegistry, targetId, onProgress) {
+export async function switchRecipe(recipeRegistry, modelRegistry, targetId, onProgress, options = {}) {
   if (_switchInFlight) {
     throw new RecipeSwitchError("a recipe switch is already in progress");
   }
@@ -279,8 +336,20 @@ export async function switchRecipe(recipeRegistry, modelRegistry, targetId, onPr
   };
 
   try {
+    if (options.isPowerActionInFlight?.()) {
+      throw new RecipeSwitchError("a fleet power action is already in progress");
+    }
+    const requiredNodes = recipeRegistry.resolveRequiredNodes(target);
+    if (typeof options.getOnline !== "function" || typeof options.checkOnlineNow !== "function") {
+      throw new RecipeSwitchError("Recipe node readiness is not configured");
+    }
+    await waitForRequiredNodes(requiredNodes, options, emit);
+    const requiredIds = new Set(requiredNodes.map((spark) => spark.id));
+    const probeOptions = {
+      getOnline: (id) => requiredIds.has(id) || options.getOnline(id) === true,
+    };
     emit("checking-current-state");
-    const snapshot = await recipeRegistry.list();
+    const snapshot = await recipeRegistry.list(probeOptions);
     if (snapshot.conflict) {
       throw new RecipeSwitchError(
         `Cluster is in a conflicting state — recipes reporting running at once: ${snapshot.conflictIds.join(", ")}. Resolve manually (stop the stray one) before switching.`
@@ -298,12 +367,12 @@ export async function switchRecipe(recipeRegistry, modelRegistry, targetId, onPr
       );
 
       emit("confirming-stopped", { from: current.id });
-      await waitForRecipeStopped(recipeRegistry, current);
+      await waitForRecipeStopped(recipeRegistry, current, probeOptions);
     }
 
     emit("clearing-conflicts", { from: current?.id ?? null });
     await withTimeout(
-      clearStaleContainers(recipeRegistry),
+      clearStaleContainers(recipeRegistry, requiredNodes, probeOptions.getOnline),
       CLEAR_CONTAINERS_TIMEOUT_MS + 10_000,
       "clearing stray containers timed out"
     );
@@ -315,6 +384,16 @@ export async function switchRecipe(recipeRegistry, modelRegistry, targetId, onPr
       `syncing model(s) for ${target.id} timed out`
     );
 
+    // Sync/status work can outlast the readiness poll. Never start a launcher
+    // after one of its dependencies dropped, and never wake a second time.
+    const dropped = await withTimeout(
+      checkRequiredNodes(requiredNodes, options),
+      Math.min(options.readinessTimeoutMs ?? READINESS_TIMEOUT_MS, READINESS_TIMEOUT_MS),
+      "rechecking required nodes timed out"
+    );
+    if (dropped.length) {
+      throw new RecipeSwitchError(`Required nodes went offline before start: ${dropped.map((spark) => spark.name || spark.id).join(", ")}`);
+    }
     emit("starting", { from: current?.id ?? null });
     await withTimeout(
       Promise.all(target.nodes.map((n) => runNodeCommand(recipeRegistry, n, n.startCmd, START_TIMEOUT_MS))),

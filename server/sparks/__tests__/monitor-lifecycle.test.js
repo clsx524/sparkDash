@@ -208,6 +208,46 @@ test("a liveness check from an earlier run cannot commit or clear a restarted ch
   monitor.stop();
 });
 
+test("forced liveness returns fresh failure instead of grace-cached online status", async () => {
+  const monitor = new SparkMonitor({ ...spark(), isLocal: false });
+  monitor._running = true;
+  monitor.online = true;
+  monitor.lastOnlineOk = Date.now();
+  monitor._readUptime = async () => { throw new Error("connection refused"); };
+
+  assert.equal(await monitor.checkOnlineNow(), false);
+  assert.equal(monitor.online, true, "normal dashboard status retains its short grace period");
+
+  monitor._nextLivenessAt = Number.MAX_SAFE_INTEGER;
+  monitor._readUptime = async () => 123;
+  assert.equal(await monitor.checkOnlineNow(), true, "forced readiness checks bypass backoff");
+});
+
+test("forced liveness joins a pending check instead of accepting cached status", async () => {
+  const monitor = new SparkMonitor({ ...spark(), isLocal: false });
+  monitor._running = true;
+  monitor.online = true;
+  let release;
+  let probes = 0;
+  monitor._readUptime = () => {
+    probes += 1;
+    return new Promise((resolve) => { release = resolve; });
+  };
+  const scheduled = monitor._checkOnline();
+  const forced = monitor.checkOnlineNow();
+  let settled = false;
+  forced.then(() => { settled = true; });
+  try {
+    await Promise.resolve();
+    assert.equal(settled, false, "readiness must wait for the actual reachability result");
+    assert.equal(probes, 1, "scheduled and forced checks share one SSH probe");
+  } finally {
+    release(123);
+    await scheduled;
+  }
+  assert.equal(await forced, true);
+});
+
 test("a storage refresh from an earlier run cannot commit or clear a restarted refresh", async (t) => {
   t.mock.method(console, "log", () => {});
   t.mock.method(globalThis, "setInterval", () => Symbol("interval"));

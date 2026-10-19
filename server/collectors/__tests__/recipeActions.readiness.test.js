@@ -1,0 +1,319 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { registerHooks } from "node:module";
+
+// Resolve transport/progress dependencies before importing the real state machine.
+// No regression in this file can reach a real SSH host or write switch history.
+const sshModule = `
+  export const sshExec = (...args) => globalThis.recipeTestSsh(...args);
+  export const copyToSpark = (...args) => globalThis.recipeTestCopy(...args);
+`;
+const progressModule = `
+  export const probeNodeShardProgress = async () => null;
+  export const estimateNodeProgress = () => null;
+  export const combineNodeProgress = () => null;
+  export class RecipeSwitchHistory { averageMs() { return null; } record() {} }
+`;
+const hooks = registerHooks({
+  resolve(specifier, context, nextResolve) {
+    const source = specifier === "./ssh.js" ? sshModule :
+      specifier === "./RecipeLoadProgress.js" ? progressModule : null;
+    if (source && context.parentURL?.includes("/collectors/")) {
+      return { url: `data:text/javascript,${encodeURIComponent(source)}`, shortCircuit: true };
+    }
+    return nextResolve(specifier, context);
+  },
+});
+const { RecipeRegistry } = await import("../RecipeRegistry.js");
+const { switchRecipe, isSwitchInFlight } = await import("../recipeActions.js");
+const { syncModelToSpark } = await import("../modelSync.js");
+hooks.deregister();
+
+function setup(t, { tp = 2, online = ["spark1", "spark2"], sameTarget = false } = {}) {
+  const sparks = [
+    { id: "spark1", name: "Head", role: "head", lanIp: "192.168.1.11", modelFolder: "/models" },
+    { id: "spark2", name: "Worker", role: "worker", lanIp: "192.168.1.12" },
+    { id: "atom", name: "Atom", role: "worker", lanIp: "192.168.1.13" },
+  ];
+  // Atom is identified explicitly; it must not make the normal worker selector ambiguous.
+  sparks[2].role = "atom";
+  const registry = new RecipeRegistry({ sparks });
+  const launcher = { role: "head", workdir: "~/recipe", statusCmd: "status", startCmd: "start", stopCmd: "stop", runningPattern: "running", llmPort: 8888 };
+  const recipe = {
+    id: "target", label: "Target", tp,
+    requiredNodes: [{ role: "head" }, { role: "worker" }, ...(tp === 3 ? [{ sparkId: "atom" }] : [])],
+    nodes: [launcher],
+  };
+  const unrelated = {
+    id: "deepseek", tp: 3,
+    requiredNodes: [{ role: "head" }, { role: "worker" }, { sparkId: "atom" }],
+    nodes: [{ ...launcher, workdir: "~/deepseek" }],
+  };
+  registry._recipes = [recipe, unrelated];
+  const onlineIds = new Set(online);
+  const commands = [];
+  const copies = [];
+  const wakes = [];
+  const checks = [];
+  const phases = [];
+  let now = 0;
+  let active = sameTarget;
+  globalThis.recipeTestSsh = async (spark, command, options) => {
+    commands.push({ id: spark.id, command, options });
+    if (command === "cd ~/recipe && stop") active = false;
+    if (command.includes(" && status")) return command.includes("~/recipe") && active ? "running" : "stopped";
+    if (command.includes("find -L")) return "";
+    return "";
+  };
+  globalThis.recipeTestCopy = async (...args) => copies.push(args);
+  t.mock.method(globalThis, "fetch", async () => ({ ok: true }));
+  const realSetTimeout = globalThis.setTimeout;
+  t.mock.method(globalThis, "setTimeout", (fn, ms, ...args) =>
+    realSetTimeout(fn, ms === 5000 ? 0 : ms, ...args));
+  const options = {
+    getOnline: (id) => onlineIds.has(id),
+    checkOnlineNow: async (id) => { checks.push(id); return onlineIds.has(id); },
+    wakeNodes: async (targets) => { wakes.push(targets.map((spark) => spark.id)); },
+    isPowerActionInFlight: () => false,
+    now: () => now,
+    sleep: async (ms) => { now += ms; },
+  };
+  return {
+    registry, recipe, sparks, commands, copies, wakes, checks, phases, onlineIds, options,
+    apply: (modelRegistry = null) => switchRecipe(registry, modelRegistry, recipe.id, (state) => phases.push(state), options),
+    advance: (ms) => { now += ms; },
+    elapsed: () => now,
+  };
+}
+
+function applyCommands(h) {
+  return h.commands.filter(({ command }) => !command.includes(" && status"));
+}
+
+test("GLM TP2 wakes only worker; offline Atom never blocks status, cleanup or apply", async (t) => {
+  const h = setup(t, { online: ["spark1"] });
+  h.options.sleep = async (ms) => { h.advance(ms); h.onlineIds.add("spark2"); };
+  await h.apply();
+  assert.deepEqual(h.wakes, [["spark2"]]);
+  assert.equal(h.elapsed(), 2000);
+  assert.ok(h.commands.some(({ id, command }) => id === "spark2" && command.includes("docker rm -f")));
+  assert.ok(h.commands.some(({ command }) => command === "cd ~/recipe && start"));
+  assert.ok(h.commands.every(({ id, command }) => id !== "atom" && !command.includes("~/deepseek")));
+  assert.equal(h.phases.at(-1).phase, "done");
+  assert.deepEqual(h.phases.find((state) => state.phase === "waiting-online").pendingNodes, ["Worker"]);
+});
+
+test("TP3 resolves and wakes all three offline dependencies once", async (t) => {
+  const h = setup(t, { tp: 3, online: [] });
+  h.options.wakeNodes = async (targets) => {
+    h.wakes.push(targets.map((spark) => spark.id));
+    targets.forEach((spark) => h.onlineIds.add(spark.id));
+  };
+  await h.apply();
+  assert.deepEqual(h.wakes, [["spark1", "spark2", "atom"]]);
+  assert.equal(h.elapsed(), 0);
+  assert.ok(h.commands.some(({ id, command }) => id === "atom" && command.includes("docker rm -f")));
+});
+
+test("already online applies immediately without waking; same-target still stops and starts", async (t) => {
+  const h = setup(t, { sameTarget: true });
+  await h.apply();
+  assert.deepEqual(h.wakes, []);
+  assert.equal(h.elapsed(), 0);
+  assert.deepEqual(h.checks, ["spark1", "spark2", "spark1", "spark2"]);
+  const stops = h.commands.findIndex(({ command }) => command === "cd ~/recipe && stop");
+  const starts = h.commands.findIndex(({ command }) => command === "cd ~/recipe && start");
+  assert.ok(stops >= 0 && starts > stops);
+});
+
+test("each readiness round rechecks initially-online nodes, without a second wake", async (t) => {
+  const h = setup(t, { online: ["spark1"] });
+  let sleeps = 0;
+  h.options.wakeNodes = async (targets) => {
+    h.wakes.push(targets.map((spark) => spark.id));
+    h.onlineIds.delete("spark1");
+    h.onlineIds.add("spark2");
+  };
+  h.options.sleep = async (ms) => {
+    h.advance(ms);
+    sleeps++;
+    assert.equal(applyCommands(h).length, 0);
+    h.onlineIds.add("spark1");
+  };
+  await h.apply();
+  assert.equal(sleeps, 1);
+  assert.deepEqual(h.wakes, [["spark2"]]);
+  assert.deepEqual(h.phases.find((state) => state.phase === "waiting-online").pendingNodes, ["Head"]);
+  assert.deepEqual(h.checks.slice(0, 6), ["spark1", "spark2", "spark1", "spark2", "spark1", "spark2"]);
+});
+
+test("five-minute timeout never runs status, sync, cleanup or start; releases switch lock", async (t) => {
+  const h = setup(t, { online: [] });
+  await assert.rejects(h.apply(), /did not become online within 300s/);
+  assert.equal(h.elapsed(), 300000);
+  assert.deepEqual(h.wakes, [["spark1", "spark2"]]);
+  assert.deepEqual(h.commands, []);
+  assert.equal(h.phases.at(-1).phase, "failed");
+  assert.equal(isSwitchInFlight(), false);
+});
+
+test("wake failure prevents every apply operation and releases lock", async (t) => {
+  const h = setup(t, { online: [] });
+  h.options.wakeNodes = async () => { throw new Error("outlet missing"); };
+  await assert.rejects(h.apply(), /outlet missing/);
+  assert.deepEqual(h.commands, []);
+  assert.equal(isSwitchInFlight(), false);
+});
+
+test("wake and check operations themselves share the readiness deadline", async (t) => {
+  const h = setup(t, { online: [] });
+  h.options.readinessTimeoutMs = 10;
+  h.options.wakeNodes = async () => { h.advance(11); };
+  await assert.rejects(h.apply(), /did not become online/);
+  assert.deepEqual(h.commands, []);
+  h.options.checkOnlineNow = async () => new Promise(() => {});
+  await assert.rejects(h.apply(), /did not become online/);
+  assert.equal(isSwitchInFlight(), false);
+});
+
+test("fleet power and concurrent recipe locks reject before additional work", async (t) => {
+  const h = setup(t);
+  h.options.isPowerActionInFlight = () => true;
+  await assert.rejects(h.apply(), /fleet power action/);
+  assert.deepEqual(h.checks, []);
+  h.options.isPowerActionInFlight = () => false;
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  h.options.checkOnlineNow = async () => { await gate; return true; };
+  const first = h.apply();
+  assert.equal(isSwitchInFlight(), true);
+  await assert.rejects(h.apply(), /recipe switch is already/);
+  release();
+  await first;
+  assert.equal(isSwitchInFlight(), false);
+});
+
+test("offline dependency discovered just before start fails without a second wake", async (t) => {
+  const h = setup(t);
+  let checks = 0;
+  h.options.checkOnlineNow = async () => ++checks <= 2;
+  await assert.rejects(h.apply(), /went offline before start/);
+  assert.ok(!h.commands.some(({ command }) => command === "cd ~/recipe && start"));
+  assert.deepEqual(h.wakes, []);
+});
+
+test("fresh false liveness overrides stale cached online; void result uses cache", async (t) => {
+  const h = setup(t);
+  h.options.readinessTimeoutMs = 20;
+  h.options.checkOnlineNow = async () => false;
+  await assert.rejects(h.apply(), /did not become online/);
+  assert.deepEqual(h.commands, []);
+  h.options.checkOnlineNow = async () => undefined;
+  await h.apply();
+  assert.equal(h.phases.at(-1).phase, "done");
+});
+
+test("missing readiness/wake configuration never reaches apply", async (t) => {
+  const h = setup(t, { online: [] });
+  h.options.wakeNodes = undefined;
+  await assert.rejects(h.apply(), /wake is not configured/);
+  h.options.checkOnlineNow = undefined;
+  await assert.rejects(h.apply(), /readiness is not configured/);
+  assert.deepEqual(h.commands, []);
+});
+
+test("metadata rejects missing, ambiguous, duplicate and TP-mismatched dependencies before wake", async (t) => {
+  const h = setup(t);
+  const original = structuredClone(h.recipe.requiredNodes);
+  for (const selectors of [undefined, [], [{ role: "missing" }], [{ role: "head" }, { sparkId: "spark1" }], [{ role: "head" }], [{ role: "head", sparkId: "spark1" }]]) {
+    h.recipe.requiredNodes = selectors;
+    await assert.rejects(h.apply(), /metadata|no Spark configured|unique required nodes|invalid requiredNodes/);
+  }
+  h.recipe.requiredNodes = original;
+  h.sparks.push({ id: "duplicate-worker", role: "worker" });
+  await assert.rejects(h.apply(), /ambiguous/);
+  assert.deepEqual(h.wakes, []);
+  assert.deepEqual(h.commands, []);
+});
+
+test("recipe list exposes topology while skipping offline dependency status commands", async (t) => {
+  const h = setup(t);
+  const list = await h.registry.list({ getOnline: h.options.getOnline });
+  assert.equal(list.recipes[0].tp, 2);
+  assert.deepEqual(list.recipes[0].requiredNodes, [{ role: "head" }, { role: "worker" }]);
+  assert.equal(list.recipes[1].active, false);
+  assert.ok(h.commands.every(({ command }) => !command.includes("~/deepseek")));
+});
+
+function modelRegistry(verifyFilesOnHost) {
+  return {
+    registryHost: () => ({ id: "registry", ssh: { user: "op", host: "registry.test" } }),
+    getRegistryConfig: () => ({ directory: "/registry" }),
+    getModel: () => ({ id: "weights", subfolder: "weights", manifest: [{ path: "weight", sha256: "abc" }] }),
+    verifyFilesOnHost,
+  };
+}
+
+test("Apply model sync skips pre/post SHA but retains rsync quick-check and launcher linking", async (t) => {
+  const h = setup(t);
+  h.recipe.nodes[0].modelIds = ["weights"];
+  h.recipe.nodes[0].startCmd = "./link-registry-weights.sh && start";
+  const models = modelRegistry(async () => { assert.fail("Apply must never hash weight files"); });
+  await h.apply(models);
+  assert.ok(h.commands.some(({ command }) => command.includes("rsync -aL ")));
+  assert.ok(h.commands.some(({ command }) => command.includes("./link-registry-weights.sh && start")));
+  assert.ok(h.commands.every(({ command }) => !command.includes("--checksum")));
+});
+
+test("explicit sync retains pre/post verification and rejects post-copy checksum mismatch", async (t) => {
+  const h = setup(t);
+  let verifies = 0;
+  const models = modelRegistry(async () => { verifies++; return ["weight"]; });
+  await assert.rejects(syncModelToSpark(models, models.getModel(), h.sparks[0]), /Post-copy checksum verification failed/);
+  assert.equal(verifies, 2);
+  assert.ok(h.commands.some(({ command }) => command.includes("rsync -aL ")));
+});
+
+test("verify:false skips registry self-sync checksum as well", async (t) => {
+  setup(t);
+  const models = modelRegistry(async () => { assert.fail("fast self-sync must not hash"); });
+  assert.deepEqual(await syncModelToSpark(models, models.getModel(), { id: "registry" }, { verify: false }), { destDir: "/registry/weights" });
+});
+
+test("staged GLM weights never contact offline Atom registry, including preflight", async (t) => {
+  const h = setup(t);
+  h.recipe.nodes[0].modelIds = ["weights"];
+  const models = modelRegistry(async () => { assert.fail("Apply must never hash"); });
+  models.registryHost = () => ({ id: "atom", ssh: { user: "op", host: "atom.test" } });
+  globalThis.recipeTestSsh = async (spark, command) => {
+    h.commands.push({ id: spark.id, command });
+    assert.notEqual(spark.id, "atom", "no registry file listing");
+    assert.ok(!command.includes("atom.test"), "no target-to-registry preflight or transfer");
+    if (command.includes("for file in")) return "__PRESENT__";
+    return "stopped";
+  };
+  await h.apply(models);
+  assert.deepEqual(h.wakes, []);
+  assert.ok(h.commands.some(({ command }) => command.includes("for file in")));
+  assert.ok(h.commands.some(({ command }) => command === "cd ~/recipe && start"));
+});
+
+test("live recipe conflicts still block apply after readiness", async (t) => {
+  const h = setup(t);
+  h.registry.list = async () => ({ conflict: true, conflictIds: ["one", "two"] });
+  await assert.rejects(h.apply(), /conflicting state.*one, two/);
+  assert.deepEqual(h.commands, []);
+  assert.equal(isSwitchInFlight(), false);
+});
+
+test("explicit sync with an already-verified copy still skips transport", async (t) => {
+  const h = setup(t);
+  let verified = 0;
+  const models = modelRegistry(async () => { verified++; return []; });
+  assert.deepEqual(
+    await syncModelToSpark(models, models.getModel(), h.sparks[0]),
+    { destDir: "/models/weights", skipped: true }
+  );
+  assert.equal(verified, 1);
+  assert.deepEqual(h.commands, []);
+});

@@ -1,19 +1,17 @@
 /**
  * Fleet power orchestration.
  *
- * shutdown-all: capture the live recipe, gracefully shut down online nodes
- * over SSH, wait for each to go offline, then cut its outlet. The dashboard
- * host is shut down last and its outlet is never cut (that would kill the
- * controller mid-flight).
+ * shutdown-all: gracefully shut down online remote nodes concurrently over
+ * SSH, wait for them to go offline, then cut their outlets in a batch. The
+ * dashboard host is shut down last and its outlet is never cut.
  *
  * wake-all: power on every offline node that has a power endpoint (the outlet
  * approach works for every unit, not just `kind === "host"`), fall back to
- * Wake-on-LAN for hosts without one, wait for the nodes to come online, then
- * re-activate the recipe captured at shutdown time.
+ * Wake-on-LAN for hosts without one, and wait for the nodes to come online.
+ * Recipe activation is a separate, explicit action.
  *
- * The orchestrator is transport-agnostic: it receives the shutdown/WoL/recipe
- * callbacks and the online predicate, so tests can drive it without SSH, a
- * real Kasa strip, or a real recipe switch.
+ * The orchestrator is transport-agnostic: it receives shutdown/WoL callbacks
+ * and the online predicate, so tests need no SSH or real outlets.
  */
 
 const DEFAULT_ONLINE_TIMEOUT_MS = 5 * 60_000;
@@ -24,13 +22,9 @@ export function createPowerOrchestrator({
   registry,
   getOnline,
   checkOnlineNow = null,
-  recipeRegistry,
-  modelRegistry,
   powerClient,
-  powerState,
   shutdownSpark,
   wakeSpark,
-  switchRecipe,
   isSwitchInFlight,
   onProgress,
   recordEvent = () => {},
@@ -55,11 +49,8 @@ export function createPowerOrchestrator({
       total: 0,
       completed: 0,
       current: null,
-      recipeId: null,
-      recipeIds: [],
       error: null,
       results: [],
-      recipeSwitch: null,
     };
   }
 
@@ -97,13 +88,6 @@ export function createPowerOrchestrator({
     const emit = makeEmitter(state);
 
     try {
-      emit({ phase: "capturing-recipe" });
-      const snapshot = await recipeRegistry.list();
-      const activeIds = snapshot.recipes.filter((r) => r.active).map((r) => r.id);
-      const activeId = snapshot.activeId || null;
-      powerState.recordActiveRecipe(activeId, activeIds);
-      emit({ recipeId: activeId, recipeIds: activeIds });
-
       const sparks = registry.sparks;
       const remotes = sparks.filter((s) => !s.isLocal);
       const local = sparks.find((s) => s.isLocal) || null;
@@ -118,47 +102,60 @@ export function createPowerOrchestrator({
         emit({ completed: completedIds.size });
       };
 
-      /** Nodes whose outlet must be cut, collected so one batch request covers them all. */
-      const toPowerOff = [];
+      /** Collect eligible nodes so one batch request covers them in registry order. */
+      const readyToPowerOff = new Set();
 
-      for (const spark of onlineRemotes) {
-        const name = spark.name || spark.id;
-        emit({ phase: "shutting-down", current: name });
-        try {
-          await shutdownSpark(spark);
+      if (onlineRemotes.length > 0) {
+        emit({ phase: "shutting-down", current: null });
+        let pendingShutdowns = onlineRemotes.length;
+        const outcomes = await Promise.allSettled(onlineRemotes.map(async (spark) => {
+          const name = spark.name || spark.id;
+          try {
+            await shutdownSpark(spark);
+          } finally {
+            pendingShutdowns -= 1;
+            if (pendingShutdowns === 0) {
+              emit({ phase: "waiting-offline", current: null });
+            }
+          }
           addResult(emit, state, { id: spark.id, name, ok: true, message: "Shutdown initiated" });
-        } catch (err) {
-          addResult(emit, state, {
-            id: spark.id,
-            name,
-            ok: false,
-            error: err?.message || String(err),
-          });
-          markCompleted(spark.id);
-          continue;
-        }
 
-        emit({ phase: "waiting-offline", current: name });
-        const offline = await waitFor(
-          () => !getOnline(spark.id),
-          offlineTimeoutMs,
-          checkOnlineNow ? () => checkOnlineNow(spark.id) : null
-        );
-        if (!offline) {
-          addResult(emit, state, {
-            id: spark.id,
-            name,
-            ok: false,
-            error: "Still online after timeout; power-off skipped",
-          });
-          markCompleted(spark.id);
-          continue;
-        }
+          const offline = await waitFor(
+            () => !getOnline(spark.id),
+            offlineTimeoutMs,
+            checkOnlineNow ? () => checkOnlineNow(spark.id) : null
+          );
+          if (!offline) {
+            addResult(emit, state, {
+              id: spark.id,
+              name,
+              ok: false,
+              error: "Still online after timeout; power-off skipped",
+            });
+            markCompleted(spark.id);
+            return false;
+          }
 
-        if (powerClient.hasPowerControl(spark)) {
-          toPowerOff.push(spark);
-        } else {
-          markCompleted(spark.id);
+          return powerClient.hasPowerControl(spark);
+        }));
+
+        // Join every workflow, including polling failures, before cutting power.
+        for (let i = 0; i < outcomes.length; i += 1) {
+          const spark = onlineRemotes[i];
+          const outcome = outcomes[i];
+          if (outcome.status === "rejected") {
+            addResult(emit, state, {
+              id: spark.id,
+              name: spark.name || spark.id,
+              ok: false,
+              error: outcome.reason?.message || String(outcome.reason),
+            });
+            markCompleted(spark.id);
+          } else if (outcome.value) {
+            readyToPowerOff.add(spark.id);
+          } else {
+            markCompleted(spark.id);
+          }
         }
       }
 
@@ -166,7 +163,7 @@ export function createPowerOrchestrator({
       // still be live (crashed node). Cut it when a power endpoint exists.
       for (const spark of offlineRemotes) {
         if (powerClient.hasPowerControl(spark)) {
-          toPowerOff.push(spark);
+          readyToPowerOff.add(spark.id);
         } else {
           addResult(emit, state, {
             id: spark.id,
@@ -178,6 +175,8 @@ export function createPowerOrchestrator({
           markCompleted(spark.id);
         }
       }
+
+      const toPowerOff = remotes.filter((spark) => readyToPowerOff.has(spark.id));
 
       // One batch request per distinct endpoint, not one request per node.
       if (toPowerOff.length > 0) {
@@ -242,7 +241,6 @@ export function createPowerOrchestrator({
       }
 
       emit({ phase: "done" });
-      powerState.recordShutdown();
     } catch (err) {
       emit({ phase: "failed", error: err?.message || String(err) });
       throw err;
@@ -259,10 +257,6 @@ export function createPowerOrchestrator({
     const emit = makeEmitter(state);
 
     try {
-      const stored = powerState.loadPowerState();
-      const recipeId = stored.lastActiveRecipeId || null;
-      emit({ recipeId });
-
       const offline = registry.sparks.filter((s) => !getOnline(s.id));
       emit({ total: offline.length });
 
@@ -363,37 +357,7 @@ export function createPowerOrchestrator({
         }
       }
 
-      if (recipeId) {
-        emit({ phase: "reactivating-recipe", recipeId });
-        const snapshot = await recipeRegistry.list();
-        if (snapshot.conflict) {
-          emit({
-            phase: "failed",
-            error: `Cluster is in a conflicting state: ${snapshot.conflictIds.join(", ")}`,
-          });
-          return;
-        }
-        if (snapshot.activeId === recipeId) {
-          emit({ phase: "done", message: `Recipe ${recipeId} is already active` });
-          powerState.recordWake();
-          return;
-        }
-        if (isSwitchInFlight?.()) {
-          emit({ phase: "failed", error: "A recipe switch is already in progress" });
-          return;
-        }
-        recordEvent({
-          type: "power.recipe.reactivate",
-          severity: "info",
-          message: `Re-activating recipe ${recipeId} after wake-all`,
-        });
-        await switchRecipe(recipeRegistry, modelRegistry, recipeId, (progress) => {
-          emit({ phase: "reactivating-recipe", recipeId, recipeSwitch: progress });
-        });
-      }
-
       emit({ phase: "done" });
-      powerState.recordWake();
     } catch (err) {
       emit({ phase: "failed", error: err?.message || String(err) });
       throw err;

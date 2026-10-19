@@ -1,3 +1,4 @@
+import { act } from "react";
 import { describe, expect, it } from "vitest";
 import { render } from "../testing/render";
 import { PowerActionBanner } from "./PowerActionBanner";
@@ -25,11 +26,16 @@ describe("PowerActionBanner", () => {
     expect(container.textContent).toContain("(1/3)");
   });
 
-  it("shows a done message", () => {
-    const { container } = render(
-      <PowerActionBanner action={action({ phase: "done", message: "Recipe glm53-exl3 is already active" })} />
+  it("dismisses a finished action without hiding the next one", () => {
+    const { container, root } = render(
+      <PowerActionBanner action={action({ phase: "done", message: "All nodes online" })} />
     );
-    expect(container.textContent).toContain("Done: Recipe glm53-exl3 is already active");
+    const dismiss = container.querySelector<HTMLButtonElement>('[aria-label="Dismiss power action status"]');
+    expect(dismiss).not.toBeNull();
+    act(() => dismiss?.click());
+    expect(container.querySelector('[role="status"]')).toBeNull();
+    act(() => root.render(<PowerActionBanner action={action({ startedAt: 3 })} />));
+    expect(container.querySelector('[role="status"]')).not.toBeNull();
   });
 
   it("shows a failure", () => {
