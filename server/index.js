@@ -55,11 +55,12 @@ import {
 import { closeLlmStreamAgent } from "./collectors/LlmStreaming.js";
 import { compareSemver, getLatestRelease } from "./collectors/HermesReleases.js";
 import { createModelPricesHandler } from "./prices/ModelPrices.js";
-import { ALERTS_JSON_PATH, FLEET_ENERGY_JSON_PATH, FLEET_ENERGY_MONTHLY_JSON_PATH, MAX_ACTIVE_BENCH_JOBS, METRICS_HISTORY_JSON_PATH } from "./config.js";
+import { ALERTS_JSON_PATH, FLEET_ENERGY_JSON_PATH, FLEET_ENERGY_MONTHLY_JSON_PATH, MAX_ACTIVE_BENCH_JOBS, METRICS_HISTORY_JSON_PATH, RECIPE_SESSIONS_DIR } from "./config.js";
 import { createAlertsRuntime, registerAlertRoutes } from "./alerts/runtime.js";
 import { RecipeRegistry } from "./collectors/RecipeRegistry.js";
 import { ModelRegistry } from "./collectors/ModelRegistry.js";
 import { switchRecipe, isSwitchInFlight, RecipeSwitchError } from "./collectors/recipeActions.js";
+import { RecipeSessionStore, isValidRecipeSessionId } from "./recipes/RecipeSessionStore.js";
 import { createPowerOrchestrator } from "./power/powerOrchestrator.js";
 import * as powerClient from "./power/powerClient.js";
 import { FleetEnergyTracker } from "./energy/FleetEnergyTracker.js";
@@ -303,8 +304,20 @@ const inferenceActivity = new InferenceActivityStore();
 const recipeRegistry = new RecipeRegistry(registry);
 // ─── Model Registry (generic model tracking/sync, distinct from recipes) ──
 const modelRegistry = new ModelRegistry(registry);
-/** Latest recipe-switch progress, broadcast to every WS client and served to late joiners. */
-let recipeSwitchState = null;
+const recipeSessions = new RecipeSessionStore({
+  dir: RECIPE_SESSIONS_DIR,
+  onChange: queueRecipeSessionBroadcast,
+});
+let recipeSessionBroadcastTimer = null;
+
+function queueRecipeSessionBroadcast() {
+  if (recipeSessionBroadcastTimer) return;
+  recipeSessionBroadcastTimer = setTimeout(() => {
+    recipeSessionBroadcastTimer = null;
+    forceBroadcast();
+  }, 200);
+  recipeSessionBroadcastTimer.unref?.();
+}
 /** Latest shutdown-all / wake-all progress, broadcast to every WS client. */
 let powerActionState = null;
 const fleetEnergyTracker = new FleetEnergyTracker({
@@ -2065,9 +2078,19 @@ async function wakeSparkWol(spark) {
 }
 
 /** Wake only the recipe dependencies selected by the activation state machine. */
-async function wakeRecipeNodes(sparks) {
+async function wakeRecipeNodes(sparks, onLog) {
+  const log = (spark, text) => onLog?.({
+    stream: "action", nodeId: spark.id, nodeName: spark.name || spark.id, text,
+  });
+  for (const spark of sparks) log(spark, "Requesting power-on");
   const powered = sparks.filter((spark) => powerClient.hasPowerControl(spark));
   const results = await powerClient.powerOn(powered);
+  for (const result of results) {
+    const spark = sparks.find((node) => node.id === result.id);
+    if (spark) log(spark, result.ok
+      ? "Power controller accepted the power-on request"
+      : `Power-on failed: ${result.error || "unknown error"}`);
+  }
   const failed = results.filter((result) => !result.ok).map((result) => {
     const spark = sparks.find((node) => node.id === result.id);
     return `${spark?.name || result.id}: ${result.error || "power-on failed"}`;
@@ -2076,7 +2099,9 @@ async function wakeRecipeNodes(sparks) {
     try {
       if (spark.kind !== "host") throw new Error("No power-on endpoint configured");
       await wakeSparkWol(spark);
+      log(spark, "Wake-on-LAN packet sent");
     } catch (err) {
+      log(spark, `Wake failed: ${err.message}`);
       failed.push(`${spark.name || spark.id}: ${err.message}`);
     }
   }));
@@ -2256,16 +2281,41 @@ app.get("/api/recipes", async (_req, res) => {
     const snapshot = await recipeRegistry.list({
       getOnline: (id) => Boolean(monitors.get(id)?.online),
     });
-    res.json({ ...snapshot, switch: recipeSwitchState });
+    res.json({ ...snapshot, session: recipeSessions.summary() });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
+app.get("/api/recipes/sessions", (_req, res) => {
+  res.set("Cache-Control", "no-store").json({ sessions: recipeSessions.list() });
+});
+
+app.get("/api/recipes/sessions/current", (_req, res) => {
+  res.set("Cache-Control", "no-store").json({ session: recipeSessions.current() });
+});
+
+app.get("/api/recipes/sessions/:id", (req, res) => {
+  if (!isValidRecipeSessionId(req.params.id)) {
+    return res.status(400).json({ error: "Invalid Apply session ID" });
+  }
+  const raw = req.query.afterSeq;
+  let afterSeq;
+  if (raw !== undefined) {
+    if (typeof raw !== "string" || !/^[0-9]+$/.test(raw) || !Number.isSafeInteger(Number(raw))) {
+      return res.status(400).json({ error: "afterSeq must be a non-negative integer" });
+    }
+    afterSeq = Number(raw);
+  }
+  const session = recipeSessions.get(req.params.id, { afterSeq });
+  if (!session) return res.status(404).json({ error: "Apply session not found" });
+  res.set("Cache-Control", "no-store").json({ session });
+});
+
 /**
  * Switch the cluster to a different recipe. Responds immediately once the switch has started;
  * the operation itself (wake required nodes → wait online → stop current → start → health-check) can take
- * many minutes and is reported over the WebSocket via `recipeSwitch` in the snapshot payload,
+ * many minutes and is reported through persisted Apply sessions and WS `recipeSession`,
  * not in this response.
  */
 app.post("/api/recipes/:id/activate", (req, res) => {
@@ -2279,20 +2329,51 @@ app.post("/api/recipes/:id/activate", (req, res) => {
     return res.status(409).json({ error: "A power action is already in progress" });
   }
 
-  res.json({ started: true, targetId: req.params.id });
-
-  switchRecipe(recipeRegistry, modelRegistry, req.params.id, (state) => {
-    recipeSwitchState = { ...state, updatedAt: Date.now() };
-    forceBroadcast();
-  }, {
+  const recipe = recipeRegistry.get(req.params.id);
+  let requiredNodes = [];
+  let configurationError = null;
+  try {
+    requiredNodes = recipeRegistry.resolveRequiredNodes(recipe);
+  } catch (err) {
+    configurationError = err;
+  }
+  const secrets = registry.sparks.flatMap((spark) => [
+    spark.ssh?.password, spark.powerToken, ...Object.values(spark.llmApiKeys || {}),
+  ]).filter(Boolean);
+  if (process.env.SPARKDASH_TOKEN) secrets.push(process.env.SPARKDASH_TOKEN);
+  let session;
+  try {
+    session = recipeSessions.start({
+      targetId: recipe.id, label: recipe.label, tp: recipe.tp,
+      requiredNodes: requiredNodes.map((spark) => ({ id: spark.id, name: spark.name || spark.id })),
+    }, { secrets });
+  } catch (err) {
+    return res.status(500).json({ error: `Cannot persist Apply session: ${err.message}` });
+  }
+  const onLog = (line) => recipeSessions.appendLog(session.id, line);
+  const onProgress = (state) => recipeSessions.recordProgress(session.id, state);
+  if (configurationError) {
+    onProgress({ phase: "checking-nodes" });
+    onProgress({ phase: "failed", error: configurationError.message });
+    return res.status(400).json({
+      error: recipeSessions.summary().error, sessionId: session.id,
+    });
+  }
+  const applying = switchRecipe(recipeRegistry, modelRegistry, req.params.id, onProgress, {
     getOnline: (id) => Boolean(monitors.get(id)?.online),
     checkOnlineNow: async (id) => {
       const monitor = monitors.get(id);
       return monitor ? monitor.checkOnlineNow() : false;
     },
-    wakeNodes: wakeRecipeNodes,
+    wakeNodes: (sparks) => wakeRecipeNodes(sparks, onLog),
     isPowerActionInFlight: () => Boolean(powerOrchestrator.isInFlight()),
-  }).catch((err) => {
+    onLog,
+  });
+  res.json({ started: true, targetId: req.params.id, sessionId: session.id });
+  applying.catch((err) => {
+    if (recipeSessions.get(session.id)?.status === "running") {
+      onProgress({ phase: "failed", error: err.message });
+    }
     // switchRecipe already emitted a "failed" progress state for real switch failures;
     // this only catches the class of error it throws before entering the state machine
     // (unknown recipe id, switch already in flight — the isSwitchInFlight() check above
@@ -2535,7 +2616,7 @@ function buildSnapshotPayload(sparks = orderedSnapshots()) {
     generatedAt: Date.now(),
     sparks,
     refreshInterval: getSettings().pollIntervalMs,
-    recipeSwitch: recipeSwitchState,
+    recipeSession: recipeSessions.summary(),
     powerAction: powerActionState,
   };
   // Only while alerts are on: the key's absence tells the UI to derive its own.
@@ -2678,6 +2759,12 @@ async function shutdown(signal) {
     eventLog.flush();
   } catch (err) {
     console.error("[sparkDash] failed to flush event log:", err.message);
+  }
+  try {
+    clearTimeout(recipeSessionBroadcastTimer);
+    recipeSessions.flush();
+  } catch (err) {
+    console.error("[sparkDash] failed to flush recipe sessions:", err.message);
   }
   try {
     unitHistoryRuntime.stop();

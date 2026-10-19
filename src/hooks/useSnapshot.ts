@@ -26,7 +26,7 @@ export function useSnapshot() {
   /** The server's firing alerts; null while it sends none (alert notifications off). */
   const [serverAlerts, setServerAlerts] = useState<AlertInstance[] | null>(null);
   const [activeId, setActiveId] = useState<string | null>(initialActiveId);
-  const [recipeSwitch, setRecipeSwitch] = useState<WsSnapshot["recipeSwitch"]>(null);
+  const [recipeSession, setRecipeSession] = useState<WsSnapshot["recipeSession"]>(null);
   const [powerAction, setPowerAction] = useState<WsSnapshot["powerAction"]>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
@@ -79,7 +79,7 @@ export function useSnapshot() {
           // Feed the central history store (8b) before notifying React state.
           ingestSnapshots(msg.sparks, msg.generatedAt ?? receivedAt);
           setSparks(msg.sparks);
-          setRecipeSwitch(msg.recipeSwitch ?? null);
+          setRecipeSession(msg.recipeSession ?? null);
           setPowerAction(msg.powerAction ?? null);
           setConnected(true);
           receivedSnapshot = true;
@@ -156,7 +156,7 @@ export function useSnapshot() {
     activeId,
     setActiveId,
     activeSpark,
-    recipeSwitch,
+    recipeSession,
     powerAction,
     lastValidSnapshotAt,
     snapshotGeneratedAt,

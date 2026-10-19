@@ -180,7 +180,7 @@ function DashboardApp() {
     setActiveId,
     activeSpark: liveActive,
     connected,
-    recipeSwitch,
+    recipeSession,
     powerAction,
     lastValidSnapshotAt,
     snapshotError,
@@ -213,7 +213,20 @@ function DashboardApp() {
       return next;
     });
   }, []);
-  const [showRecipes, setShowRecipes] = useState(false);
+  const [showRecipes, setShowRecipes] = useState(() => {
+    try {
+      return sessionStorage.getItem("sparkdash.recipes.open") === "1";
+    } catch {
+      return false;
+    }
+  });
+  useEffect(() => {
+    try {
+      sessionStorage.setItem("sparkdash.recipes.open", showRecipes ? "1" : "0");
+    } catch {
+      /* the dialog still works when browser storage is unavailable */
+    }
+  }, [showRecipes]);
   const [showModels, setShowModels] = useState(false);
   const [settings, setSettings] = useState<Settings | null>(null);
   const [authMode, setAuthMode] = useState<AuthMode | null>(null);
@@ -679,7 +692,7 @@ function DashboardApp() {
       <RecipesDialog
         open={showRecipes}
         onClose={() => setShowRecipes(false)}
-        recipeSwitch={recipeSwitch}
+        recipeSession={recipeSession}
       />
       <ModelsDialog open={showModels} onClose={() => setShowModels(false)} />
     </div>

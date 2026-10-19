@@ -35,6 +35,8 @@ import type {
   ModelsListResponse,
   RecipeActivateResponse,
   RecipeListResponse,
+  RecipeSessionDetail,
+  RecipeSessionSummary,
   Settings,
   ShowcaseListResponse,
   ShowcaseSessionState,
@@ -867,9 +869,25 @@ export function fetchRecipes(): Promise<RecipeListResponse> {
   return apiFetch("/api/recipes");
 }
 
-/** Start switching the cluster to a different recipe. Returns immediately; watch `recipeSwitch` on the WS snapshot for progress. */
+/** Start an Apply once; progress is persisted and announced by WS `recipeSession` summaries. */
 export function activateRecipe(id: string): Promise<RecipeActivateResponse> {
   return apiFetch(`/api/recipes/${encodeURIComponent(id)}/activate`, { method: "POST" });
+}
+
+export function fetchRecipeSessions(): Promise<{ sessions: RecipeSessionSummary[] }> {
+  return apiFetch("/api/recipes/sessions");
+}
+
+export function fetchCurrentRecipeSession(): Promise<{ session: RecipeSessionDetail | null }> {
+  return apiFetch("/api/recipes/sessions/current");
+}
+
+export function fetchRecipeSession(
+  id: string,
+  afterSeq?: number
+): Promise<{ session: RecipeSessionDetail }> {
+  const query = afterSeq == null ? "" : `?afterSeq=${encodeURIComponent(afterSeq)}`;
+  return apiFetch(`/api/recipes/sessions/${encodeURIComponent(id)}${query}`);
 }
 
 // ─── Model Registry (generic model tracking/sync) ─────────

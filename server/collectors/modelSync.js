@@ -120,7 +120,7 @@ async function listSyncFiles(host, dir) {
  * @param {import("./ModelRegistry.js").ModelRegistry} modelRegistry
  * @param {object} model - tracked model entry (id, subfolder, manifest, ...)
  * @param {object} targetSpark - full SparkConfig (with secrets) of the host to sync onto
- * @param {{timeoutMs?: number, verify?: boolean}} [options] - verify defaults to true;
+ * @param {{timeoutMs?: number, verify?: boolean, onOutput?: (line: {stream: string, text: string}) => void}} [options] - verify defaults to true;
  *   Apply Recipe uses false for target-only presence checks and rsync without hashing.
  * @returns {Promise<{destDir: string, skipped?: boolean}>}
  */
@@ -215,7 +215,7 @@ export async function syncModelToSpark(modelRegistry, model, targetSpark, option
     await sshExec(
       targetSpark,
       `${mkdirCmd} && rsync -aL -e ${shQuote(fastRsyncSsh)} ${remoteSpec} ${shQuotePath(destDir + "/")}`,
-      { timeoutMs: syncTimeout, multiplex: false }
+      { timeoutMs: syncTimeout, multiplex: false, onOutput: options.onOutput }
     );
   } else {
     await sshExec(targetSpark, mkdirCmd, { timeoutMs: PREFLIGHT_TIMEOUT_MS});
@@ -232,7 +232,7 @@ export async function syncModelToSpark(modelRegistry, model, targetSpark, option
           sshExec(
             targetSpark,
             `rsync -aL --files-from=${shQuotePath(listPaths[idx])} -e ${shQuote(fastRsyncSsh)} ${remoteSpec} ${shQuotePath(destDir + "/")}`,
-            { timeoutMs: syncTimeout, multiplex: false }
+            { timeoutMs: syncTimeout, multiplex: false, onOutput: options.onOutput }
           )
         )
       );

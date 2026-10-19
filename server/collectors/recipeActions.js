@@ -24,6 +24,7 @@ import {
   RecipeSwitchHistory,
 } from "./RecipeLoadProgress.js";
 import { RECIPE_SWITCH_HISTORY_JSON_PATH } from "../config.js";
+import { setTimeout as delay } from "node:timers/promises";
 
 const STOP_TIMEOUT_MS = 60_000;
 // Cold model loads on these recipes are measured in minutes (DeepSeek DSpark ~9 minutes,
@@ -63,11 +64,30 @@ async function withTimeout(promise, ms, message) {
   }
 }
 
+function report(options, spark, text, stream = "action") {
+  try {
+    options.onLog?.({ stream, nodeId: spark?.id, nodeName: spark?.name || spark?.id, text });
+  } catch {
+    /* diagnostic subscribers cannot change deployment behavior */
+  }
+}
+
 /** Run one recipe node's start/stop command over its own SSH connection. */
-async function runNodeCommand(recipeRegistry, node, cmd, timeoutMs) {
+async function runNodeCommand(recipeRegistry, node, cmd, timeoutMs, options, action) {
   const spark = recipeRegistry._sparkForNode(node);
   if (!spark) throw new RecipeSwitchError(`no Spark configured for role ${node.role}`);
-  return sshExec(spark, `cd ${node.workdir} && ${cmd}`, { timeoutMs});
+  report(options, spark, `${action} from ${node.workdir}`);
+  try {
+    const result = await sshExec(spark, `cd ${node.workdir} && ${cmd}`, {
+      timeoutMs,
+      onOutput: options.onLog ? (line) => report(options, spark, line.text, line.stream) : undefined,
+    });
+    report(options, spark, `${action} command completed (exit 0)`);
+    return result;
+  } catch (err) {
+    report(options, spark, `${action} failed${err.exitCode != null ? ` (exit ${err.exitCode})` : ""}: ${err.message}`);
+    throw err;
+  }
 }
 
 const CLEAR_CONTAINERS_TIMEOUT_MS = 30_000;
@@ -127,7 +147,7 @@ export const PERSISTENT_CONTAINER_NAMES = [
  * preserve conflict cleanup when moving between single-node and multi-node recipes.
  * Other tracked hosts (such as an unrelated Model Registry) are never swept.
  */
-async function clearStaleContainers(recipeRegistry, requiredNodes, getOnline) {
+async function clearStaleContainers(recipeRegistry, requiredNodes, getOnline, options) {
   const requiredIds = new Set(requiredNodes.map((spark) => spark.id));
   const sparks = recipeRegistry.sparkRegistry.sparks.filter(
     (spark) => (requiredIds.has(spark.id) || spark.role === "head" || spark.role === "worker") &&
@@ -136,9 +156,14 @@ async function clearStaleContainers(recipeRegistry, requiredNodes, getOnline) {
   const excludeArgs = PERSISTENT_CONTAINER_NAMES.map((name) => `-e ${JSON.stringify(name)}`).join(" ");
   const sweepCmd = `docker ps --format '{{.Names}}' | grep -vx ${excludeArgs} | xargs -r docker rm -f`;
   await Promise.all(
-    sparks.map((spark) =>
-      sshExec(spark, sweepCmd, { timeoutMs: CLEAR_CONTAINERS_TIMEOUT_MS})
-    )
+    sparks.map(async (spark) => {
+      report(options, spark, "Clearing conflicting containers; preserving standalone services");
+      await sshExec(spark, sweepCmd, {
+        timeoutMs: CLEAR_CONTAINERS_TIMEOUT_MS,
+        onOutput: options.onLog ? (line) => report(options, spark, line.text, line.stream) : undefined,
+      });
+      report(options, spark, "Container cleanup completed");
+    })
   );
 }
 
@@ -152,7 +177,7 @@ async function clearStaleContainers(recipeRegistry, requiredNodes, getOnline) {
  * rather than actually finishing either sooner, and needlessly doubles concurrent SSH
  * connections against modelSync's own MaxStartups-conscious shard count.
  */
-export async function syncModelsForRecipe(recipeRegistry, modelRegistry, recipe) {
+export async function syncModelsForRecipe(recipeRegistry, modelRegistry, recipe, options = {}) {
   for (const node of recipe.nodes) {
     const modelIds = Array.isArray(node.modelIds) ? node.modelIds : [];
     if (modelIds.length === 0) continue;
@@ -168,13 +193,20 @@ export async function syncModelsForRecipe(recipeRegistry, modelRegistry, recipe)
       if (!model) {
         throw new RecipeSwitchError(`Recipe ${recipe.id} references unknown model ${modelId}`);
       }
-      await syncModelToSpark(modelRegistry, model, spark, { verify: false });
+      report(options, spark, `Checking staged files for ${modelId} (no checksum pass)`);
+      const result = await syncModelToSpark(modelRegistry, model, spark, {
+        verify: false,
+        onOutput: options.onLog ? (line) => report(options, spark, line.text, line.stream) : undefined,
+      });
+      report(options, spark, result.skipped
+        ? `${modelId}: files already staged; registry access and transfer skipped`
+        : `${modelId}: model files ready`);
     }
   }
 }
 
 /** Poll one recipe node's health endpoint until it responds 200 or the deadline passes. */
-async function waitForNodeHealth(recipeRegistry, node) {
+async function waitForNodeHealth(recipeRegistry, node, options) {
   const spark = recipeRegistry._sparkForNode(node);
   if (!spark) throw new RecipeSwitchError(`no Spark configured for role ${node.role}`);
   const host = llmProbeHost(spark);
@@ -184,13 +216,22 @@ async function waitForNodeHealth(recipeRegistry, node) {
   const url = `http://${host}:${node.llmPort}/health`;
   const deadline = Date.now() + HEALTH_TIMEOUT_MS;
   let lastError = "no attempt made";
+  let reportedError = null;
+  report(options, spark, `Waiting for serving health at ${url}`);
   while (Date.now() < deadline) {
     try {
       const res = await fetch(url, { signal: AbortSignal.timeout(HEALTH_REQUEST_TIMEOUT_MS) });
-      if (res.ok) return;
+      if (res.ok) {
+        report(options, spark, "Serving health passed (HTTP 200)");
+        return;
+      }
       lastError = `HTTP ${res.status}`;
     } catch (err) {
       lastError = err.message;
+    }
+    if (lastError !== reportedError) {
+      report(options, spark, `Serving health not ready: ${lastError}`);
+      reportedError = lastError;
     }
     await sleep(HEALTH_POLL_MS);
   }
@@ -225,7 +266,7 @@ async function waitForRecipeStopped(recipeRegistry, recipe, options) {
  * @param {(progress: object) => void} onProgress
  * @param {() => boolean} isStopped
  */
-async function pollSwitchProgress(recipeRegistry, target, startedAt, historicalAverageMs, onProgress, isStopped) {
+async function pollSwitchProgress(recipeRegistry, target, startedAt, historicalAverageMs, onProgress, isStopped, signal) {
   while (!isStopped()) {
     const nodeEstimates = await Promise.all(
       target.nodes.map(async (node) => {
@@ -242,7 +283,11 @@ async function pollSwitchProgress(recipeRegistry, target, startedAt, historicalA
     if (isStopped()) return;
     const combined = combineNodeProgress(nodeEstimates);
     if (combined) onProgress(combined);
-    await sleep(HEALTH_POLL_MS);
+    try {
+      await delay(HEALTH_POLL_MS, undefined, { signal });
+    } catch (error) {
+      if (error.name !== "AbortError") throw error;
+    }
   }
 }
 
@@ -271,8 +316,20 @@ async function waitForRequiredNodes(requiredNodes, options, emit) {
     return result;
   };
   const checkAll = () => bounded(() => checkRequiredNodes(requiredNodes, options));
+  const lastOnline = new Map();
+  const reportNodes = (pending) => {
+    const offlineIds = new Set(pending.map((spark) => spark.id));
+    for (const spark of requiredNodes) {
+      const online = !offlineIds.has(spark.id);
+      if (lastOnline.get(spark.id) !== online) {
+        report(options, spark, online ? "Node is online over SSH" : "Node is offline; waiting for SSH");
+        lastOnline.set(spark.id, online);
+      }
+    }
+  };
   emit("checking-nodes", { requiredNodes: names });
   let pending = await checkAll();
+  reportNodes(pending);
   if (pending.length) {
     if (typeof options.wakeNodes !== "function") {
       throw new RecipeSwitchError("Recipe node wake is not configured");
@@ -284,6 +341,11 @@ async function waitForRequiredNodes(requiredNodes, options, emit) {
     await bounded(() => options.wakeNodes(pending));
     // Check every dependency again, including nodes that were initially online.
     pending = await checkAll();
+    emit("waiting-online", {
+      requiredNodes: names,
+      pendingNodes: pending.map((spark) => spark.name || spark.id),
+    });
+    reportNodes(pending);
   }
   while (pending.length) {
     emit("waiting-online", {
@@ -292,6 +354,11 @@ async function waitForRequiredNodes(requiredNodes, options, emit) {
     });
     await bounded(() => pause(Math.min(pollMs, deadline - now())));
     pending = await checkAll();
+    reportNodes(pending);
+    emit("waiting-online", {
+      requiredNodes: names,
+      pendingNodes: pending.map((spark) => spark.name || spark.id),
+    });
   }
 }
 
@@ -336,6 +403,7 @@ export async function switchRecipe(recipeRegistry, modelRegistry, targetId, onPr
   };
 
   try {
+    emit("checking-nodes");
     if (options.isPowerActionInFlight?.()) {
       throw new RecipeSwitchError("a fleet power action is already in progress");
     }
@@ -361,31 +429,35 @@ export async function switchRecipe(recipeRegistry, modelRegistry, targetId, onPr
     if (current) {
       emit("stopping", { from: current.id });
       await withTimeout(
-        Promise.all(current.nodes.map((n) => runNodeCommand(recipeRegistry, n, n.stopCmd, STOP_TIMEOUT_MS))),
+        Promise.all(current.nodes.map((n) => runNodeCommand(recipeRegistry, n, n.stopCmd, STOP_TIMEOUT_MS, options, "Stop recipe"))),
         STOP_TIMEOUT_MS + 10_000,
         `stopping ${current.id} timed out`
       );
 
       emit("confirming-stopped", { from: current.id });
       await waitForRecipeStopped(recipeRegistry, current, probeOptions);
+      report(options, null, `Previous recipe ${current.id} confirmed stopped`);
     }
 
     emit("clearing-conflicts", { from: current?.id ?? null });
     await withTimeout(
-      clearStaleContainers(recipeRegistry, requiredNodes, probeOptions.getOnline),
+      clearStaleContainers(recipeRegistry, requiredNodes, probeOptions.getOnline, options),
       CLEAR_CONTAINERS_TIMEOUT_MS + 10_000,
       "clearing stray containers timed out"
     );
 
-    emit("syncing-model", { from: current?.id ?? null });
-    await withTimeout(
-      syncModelsForRecipe(recipeRegistry, modelRegistry, target),
-      MODEL_SYNC_PHASE_TIMEOUT_MS,
-      `syncing model(s) for ${target.id} timed out`
-    );
+    if (target.nodes.some((node) => node.modelIds?.length)) {
+      emit("syncing-model", { from: current?.id ?? null });
+      await withTimeout(
+        syncModelsForRecipe(recipeRegistry, modelRegistry, target, options),
+        MODEL_SYNC_PHASE_TIMEOUT_MS,
+        `syncing model(s) for ${target.id} timed out`
+      );
+    }
 
     // Sync/status work can outlast the readiness poll. Never start a launcher
     // after one of its dependencies dropped, and never wake a second time.
+    emit("rechecking-nodes", { from: current?.id ?? null });
     const dropped = await withTimeout(
       checkRequiredNodes(requiredNodes, options),
       Math.min(options.readinessTimeoutMs ?? READINESS_TIMEOUT_MS, READINESS_TIMEOUT_MS),
@@ -396,7 +468,7 @@ export async function switchRecipe(recipeRegistry, modelRegistry, targetId, onPr
     }
     emit("starting", { from: current?.id ?? null });
     await withTimeout(
-      Promise.all(target.nodes.map((n) => runNodeCommand(recipeRegistry, n, n.startCmd, START_TIMEOUT_MS))),
+      Promise.all(target.nodes.map((n) => runNodeCommand(recipeRegistry, n, n.startCmd, START_TIMEOUT_MS, options, "Start recipe"))),
       START_TIMEOUT_MS + 10_000,
       `starting ${target.id} timed out`
     );
@@ -406,18 +478,21 @@ export async function switchRecipe(recipeRegistry, modelRegistry, targetId, onPr
     const loadStartedAt = Date.now();
     const historicalAverageMs = switchHistory.averageMs(target.id);
     const progressStopped = { value: false };
+    const progressStop = new AbortController();
     const progressLoop = pollSwitchProgress(
       recipeRegistry,
       target,
       loadStartedAt,
       historicalAverageMs,
       (progress) => emit("health-checking", { from: current?.id ?? null, progress }),
-      () => progressStopped.value
+      () => progressStopped.value,
+      progressStop.signal
     );
     try {
-      await Promise.all(target.nodes.map((n) => waitForNodeHealth(recipeRegistry, n)));
+      await Promise.all(target.nodes.map((n) => waitForNodeHealth(recipeRegistry, n, options)));
     } finally {
       progressStopped.value = true;
+      progressStop.abort();
       await progressLoop;
     }
     switchHistory.record(target.id, Date.now() - loadStartedAt);

@@ -97,6 +97,9 @@
 .settings-panel {
   max-width: 34rem;
 }
+.settings-panel.recipes-panel {
+  max-width: 72rem;
+}
 @media (min-width: 640px) {
   .modal-sheet,
   .bench-sheet,

@@ -1,48 +1,13 @@
-import { useEffect, useState } from "react";
-import { activateRecipe, fetchRecipes } from "../api/client";
-import type { RecipeInfo, RecipeListResponse, RecipeSwitchState } from "../api/types";
+import { useEffect } from "react";
+import type { RecipeSessionSummary } from "../api/types";
 import { useModalPresence } from "../hooks/useModalPresence";
+import { useRecipeSessions } from "../hooks/useRecipeSessions";
+import { RecipeSessionDetails } from "./RecipeSessionDetails";
 
 interface RecipesDialogProps {
   open: boolean;
   onClose: () => void;
-  /** Live switch progress from the WS snapshot; null when nothing is in flight. */
-  recipeSwitch: RecipeSwitchState | null | undefined;
-}
-
-function useEscape(onClose: () => void) {
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    document.addEventListener("keydown", handler);
-    return () => document.removeEventListener("keydown", handler);
-  }, [onClose]);
-}
-
-const PHASE_LABEL: Record<RecipeSwitchState["phase"], string> = {
-  "checking-nodes": "Checking required nodes…",
-  "powering-on": "Waking required nodes…",
-  "waiting-online": "Waiting for required nodes to come online…",
-  "checking-current-state": "Checking current state…",
-  stopping: "Stopping current recipe…",
-  "confirming-stopped": "Confirming it stopped…",
-  "clearing-conflicts": "Clearing stray containers…",
-  "syncing-model": "Syncing model files…",
-  starting: "Starting target recipe…",
-  "health-checking": "Waiting for health…",
-  done: "Done",
-  failed: "Failed",
-};
-
-function formatEtaSeconds(sec: number | null | undefined): string | null {
-  if (sec == null || !Number.isFinite(sec) || sec < 0) return null;
-  if (sec < 60) return `~${Math.round(sec)}s`;
-  const m = Math.floor(sec / 60);
-  const s = Math.round(sec % 60);
-  if (m < 60) return s ? `~${m}m ${s}s` : `~${m}m`;
-  const h = Math.floor(m / 60);
-  return `~${h}h ${m % 60}m`;
+  recipeSession: RecipeSessionSummary | null | undefined;
 }
 
 const GROUP_LABEL: Record<string, string> = {
@@ -50,221 +15,102 @@ const GROUP_LABEL: Record<string, string> = {
   "single-node": "Single-node",
 };
 
-/** Same-target activation refreshes the deployment; only an in-flight switch disables it. */
+/** Same-target activation refreshes the deployment; pending requests also lock the button. */
 export function activateButtonState(
   isActive: boolean,
-  switchInFlight: boolean,
-  busy: boolean
+  sessionRunning: boolean,
+  busy: boolean,
 ): { disabled: boolean; label: string } {
   return {
-    disabled: switchInFlight,
-    label: busy ? "Switching…" : isActive ? "Refresh" : "Activate",
+    disabled: sessionRunning || busy,
+    label: busy ? "Applying…" : isActive ? "Refresh" : "Activate",
   };
 }
 
-export function RecipesDialog({ open, onClose, recipeSwitch }: RecipesDialogProps) {
-  const [data, setData] = useState<RecipeListResponse | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [activatingId, setActivatingId] = useState<string | null>(null);
-
-  useEscape(onClose);
+export function RecipesDialog({ open, onClose, recipeSession }: RecipesDialogProps) {
+  const sessions = useRecipeSessions(open, recipeSession);
+  const { data, current, history, selectedId, selected, selectionError, loading, ready, error, pendingId, running } = sessions;
   const { mounted, visible } = useModalPresence(open);
-
-  const load = () => {
-    setLoading(true);
-    setError(null);
-    fetchRecipes()
-      .then(setData)
-      .catch((err: Error) => setError(err.message))
-      .finally(() => setLoading(false));
-  };
-
-  useEffect(() => {
-    if (!open) {
-      setData(null);
-      setError(null);
-      setActivatingId(null);
-      return;
-    }
-    load();
-  }, [open]);
-
-  // Re-poll the live recipe list whenever a switch finishes (done/failed), so the
-  // active badge and per-node status reflect reality instead of the pre-switch snapshot.
   useEffect(() => {
     if (!open) return;
-    if (recipeSwitch?.phase === "done" || recipeSwitch?.phase === "failed") {
-      load();
-      setActivatingId(null);
-    }
-  }, [open, recipeSwitch?.phase, recipeSwitch?.updatedAt]);
-
-  const switchInFlight = recipeSwitch != null && recipeSwitch.phase !== "done" && recipeSwitch.phase !== "failed";
-
-  const handleActivate = async (recipe: RecipeInfo) => {
-    setError(null);
-    setActivatingId(recipe.id);
-    try {
-      await activateRecipe(recipe.id);
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : String(err));
-      setActivatingId(null);
-    }
-  };
-
+    const handler = (event: KeyboardEvent) => { if (event.key === "Escape") onClose(); };
+    document.addEventListener("keydown", handler);
+    return () => document.removeEventListener("keydown", handler);
+  }, [open, onClose]);
   if (!mounted) return null;
 
   return (
-    <div
-      className={`settings-overlay fixed inset-0 z-50 flex items-center justify-center bg-black/55 p-4${
-        visible ? " is-open" : ""
-      }`}
-      onClick={(e) => {
-        if (e.target === e.currentTarget) onClose();
-      }}
-    >
-      <div className="settings-panel w-full max-w-lg p-6">
-        <h2 className="mb-1 shrink-0 text-sm font-semibold text-text-strong">Deployment recipes</h2>
+    <div className={`settings-overlay fixed inset-0 z-50 flex items-center justify-center bg-black/55 p-3 sm:p-4${visible ? " is-open" : ""}`}
+      onClick={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+      <div role="dialog" aria-modal="true" aria-labelledby="recipes-title" className="settings-panel recipes-panel w-full p-4 sm:p-6">
+        <h2 id="recipes-title" className="mb-1 shrink-0 text-sm font-semibold text-text-strong">Deployment recipes</h2>
         <p className="mb-4 shrink-0 text-[10px] text-muted">
-          One recipe runs at a time. Applying wakes only its required offline nodes and waits up
-          to five minutes for all required nodes to come online before deployment.
+          One recipe runs at a time. Applying wakes only its required offline nodes and waits up to five minutes for all required nodes to come online before deployment.
         </p>
-
         <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
-        {data?.conflict && (
-          <div className="mb-3 rounded bg-danger/20 px-3 py-2 text-xs text-danger">
-            Conflicting state: {data.conflictIds.join(", ")} all report running at once. Stop the
-            stray one by hand before switching.
+          {error && <div role="alert" className="mb-3 rounded bg-danger/20 px-3 py-2 text-xs text-danger">
+            {error} <button type="button" onClick={sessions.retry} className="underline">Retry loading</button>
+          </div>}
+          {loading && <p className="mb-3 text-xs text-muted">Loading persisted Apply sessions…</p>}
+          <div className="grid min-w-0 gap-4 lg:grid-cols-2">
+            <section aria-label="Current Apply" className="min-w-0 rounded border border-border p-3">
+              <h3 className="mb-2 text-xs font-semibold text-text-strong">Current Apply</h3>
+              <p className="mb-2 text-[10px] text-muted">Latest session; stays here until the next Apply.</p>
+              {current ? <RecipeSessionDetails key={current.id} session={current} /> : <p className="text-xs text-muted">No Apply session recorded.</p>}
+            </section>
+            <section aria-label="Apply History" className="min-w-0 rounded border border-border p-3">
+              <h3 className="mb-2 text-xs font-semibold text-text-strong">Apply History</h3>
+              <p className="mb-2 text-[10px] text-muted">Prior completed, failed, and interrupted sessions. Details are read-only.</p>
+              {history.length === 0 && <p className="text-xs text-muted">No prior sessions.</p>}
+              <ul className="mb-3 max-h-48 space-y-1 overflow-y-auto" aria-label="Prior Apply sessions">
+                {history.map((session) => <li key={session.id}>
+                  <button type="button" aria-pressed={selectedId === session.id} onClick={() => sessions.selectHistory(session.id)}
+                    className={`flex w-full flex-wrap justify-between gap-1 rounded border p-2 text-left text-[10px] ${selectedId === session.id ? "border-accent bg-accent-soft" : "border-border bg-surface-elevated"}`}>
+                    <span>{session.label} · TP{session.tp}</span>
+                    <span>{session.status} · {new Date(session.startedAt).toLocaleString()} · {Math.max(0, Math.round(((session.finishedAt ?? session.updatedAt) - session.startedAt) / 1000))}s</span>
+                  </button>
+                </li>)}
+              </ul>
+              {selectedId && <div className="border-t border-border pt-3" data-testid="history-detail">
+                {selectionError && <p role="alert" className="mb-2 text-xs text-danger">Selected session unavailable: {selectionError} <button type="button" className="underline" onClick={sessions.retry}>Retry loading</button></p>}
+                {selected ? <RecipeSessionDetails key={selected.id} session={selected} /> : !selectionError && <p className="text-xs text-muted">Loading selected session…</p>}
+              </div>}
+            </section>
           </div>
-        )}
-
-        {recipeSwitch && (
-          <div
-            className={`mb-3 rounded px-3 py-2 text-xs ${
-              recipeSwitch.phase === "failed"
-                ? "bg-danger/20 text-danger"
-                : recipeSwitch.phase === "done"
-                  ? "bg-accent-soft text-accent"
-                  : "bg-surface-elevated text-text"
-            }`}
-            role="status"
-          >
-            <div className="font-medium">
-              {PHASE_LABEL[recipeSwitch.phase]} — target: {recipeSwitch.targetId}
-            </div>
-            {recipeSwitch.from && (
-              <div className="mt-0.5 text-[10px] text-muted">from: {recipeSwitch.from}</div>
-            )}
-            {recipeSwitch.requiredNodes && (
-              <div className="mt-0.5 text-[10px] text-muted">
-                Required nodes: {recipeSwitch.requiredNodes.join(", ")}
-              </div>
-            )}
-            {recipeSwitch.pendingNodes && recipeSwitch.pendingNodes.length > 0 && (
-              <div className="mt-0.5 text-[10px] text-muted">
-                Pending nodes: {recipeSwitch.pendingNodes.join(", ")}
-              </div>
-            )}
-            {recipeSwitch.progress && (
-              <div className="mt-2 space-y-1">
-                <div className="flex items-baseline justify-between gap-2 text-[10px] text-muted">
-                  <span>
-                    {recipeSwitch.progress.percent}% loaded
-                    {recipeSwitch.progress.source === "estimate" ? (
-                      <span className="ml-1 opacity-70">(estimated)</span>
-                    ) : null}
-                  </span>
-                  {formatEtaSeconds(recipeSwitch.progress.etaSeconds) && (
-                    <span>{formatEtaSeconds(recipeSwitch.progress.etaSeconds)} remaining</span>
-                  )}
-                </div>
-                <div className="h-1.5 overflow-hidden rounded-full bg-border">
-                  <div
-                    className="h-full rounded-full bg-accent transition-[width] duration-300"
-                    style={{ width: `${Math.min(100, Math.max(0, recipeSwitch.progress.percent))}%` }}
-                  />
-                </div>
-              </div>
-            )}
-            {recipeSwitch.error && <div className="mt-0.5">{recipeSwitch.error}</div>}
-          </div>
-        )}
-
-        {loading && <p className="text-xs text-muted">Loading…</p>}
-
-        {data && !loading && (
-          <div className="space-y-2">
-            {data.recipes.map((recipe) => {
-              const isActive = data.activeId === recipe.id;
-              const busy = switchInFlight && activatingId === recipe.id;
-              const { disabled, label } = activateButtonState(isActive, switchInFlight, busy);
-              return (
-                <div
-                  key={recipe.id}
-                  className="rounded border border-border bg-surface-elevated p-3"
-                >
+          <section aria-label="Choose recipe" className="mt-4">
+            <h3 className="mb-2 text-xs font-semibold text-text-strong">Choose recipe</h3>
+            {data?.conflict && <div className="mb-3 rounded bg-danger/20 px-3 py-2 text-xs text-danger">
+              Conflicting state: {data.conflictIds.join(", ")} all report running at once. Stop the stray one by hand before switching.
+            </div>}
+            <div className="grid gap-2 md:grid-cols-2">
+              {data?.recipes.map((recipe) => {
+                const isActive = data.activeId === recipe.id;
+                const { disabled, label } = activateButtonState(isActive, running || pendingId != null || !ready, pendingId === recipe.id);
+                return <div key={recipe.id} className="rounded border border-border bg-surface-elevated p-3">
                   <div className="flex items-start justify-between gap-3">
                     <div>
-                      <div className="flex items-center gap-2">
+                      <div className="flex flex-wrap items-center gap-2">
                         <span className="text-xs font-medium text-text-strong">{recipe.label}</span>
-                        <span className="rounded bg-surface px-1.5 py-0.5 text-[10px] font-medium text-muted">
-                          TP{recipe.tp}
-                        </span>
-                        {isActive && (
-                          <span className="rounded bg-accent-soft px-1.5 py-0.5 text-[10px] font-medium text-accent">
-                            active
-                          </span>
-                        )}
+                        <span className="rounded bg-surface px-1.5 py-0.5 text-[10px] font-medium text-muted">TP{recipe.tp}</span>
+                        {isActive && <span className="rounded bg-accent-soft px-1.5 py-0.5 text-[10px] font-medium text-accent">active</span>}
                       </div>
-                      <div className="mt-0.5 text-[10px] text-muted">
-                        {GROUP_LABEL[recipe.group] ?? recipe.group}
-                      </div>
-                      <div className="mt-0.5 text-[10px] text-muted">
-                        Required nodes: {recipe.requiredNodes.map((node) =>
-                          "sparkId" in node ? node.sparkId : node.role
-                        ).join(", ")}
-                      </div>
-                      <div className="mt-1 space-y-0.5">
-                        {recipe.nodeStatus.map((n) => (
-                          <div key={n.role} className="text-[10px] text-muted">
-                            <span className="font-mono">{n.role}</span>:{" "}
-                            <span className={n.running ? "text-accent" : "text-muted"}>
-                              {n.running ? "running" : "not running"}
-                            </span>
-                          </div>
-                        ))}
-                      </div>
+                      <div className="mt-0.5 text-[10px] text-muted">{GROUP_LABEL[recipe.group] ?? recipe.group}</div>
+                      <div className="mt-0.5 text-[10px] text-muted">Required nodes: {recipe.requiredNodes.map((node) => "sparkId" in node ? node.sparkId : node.role).join(", ")}</div>
+                      <div className="mt-1 space-y-0.5">{recipe.nodeStatus.map((node) => <div key={node.role} className="text-[10px] text-muted">
+                        <span className="font-mono">{node.role}</span>: <span className={node.running ? "text-accent" : "text-muted"}>{node.running ? "running" : "not running"}</span>
+                      </div>)}</div>
                     </div>
-                    <button
-                      type="button"
-                      disabled={disabled}
-                      onClick={() => handleActivate(recipe)}
+                    <button type="button" disabled={disabled} onClick={() => { void sessions.apply(recipe.id); }}
                       title={isActive ? "Stop and restart this recipe with the latest recipe/config files" : undefined}
-                      className="shrink-0 rounded bg-accent px-3 py-1.5 text-xs font-medium text-white hover:bg-accent-hover disabled:opacity-50"
-                    >
-                      {label}
-                    </button>
+                      className="shrink-0 rounded bg-accent px-3 py-1.5 text-xs font-medium text-white hover:bg-accent-hover disabled:opacity-50">{label}</button>
                   </div>
-                </div>
-              );
-            })}
-          </div>
-        )}
+                </div>;
+              })}
+            </div>
+          </section>
         </div>
-
-        {error && (
-          <div className="mt-3 shrink-0 rounded bg-danger/20 px-3 py-2 text-xs text-danger">{error}</div>
-        )}
-
-        <div className="mt-3 flex shrink-0 justify-end gap-2 border-t border-border pt-3">
-          <button
-            type="button"
-            onClick={onClose}
-            className="rounded border border-border bg-surface-elevated px-3 py-1.5 text-xs text-muted hover:bg-surface-hover"
-          >
-            Close
-          </button>
+        <div className="mt-3 flex shrink-0 justify-end border-t border-border pt-3">
+          <button type="button" onClick={onClose} className="rounded border border-border bg-surface-elevated px-3 py-1.5 text-xs text-muted hover:bg-surface-hover">Close</button>
         </div>
       </div>
     </div>

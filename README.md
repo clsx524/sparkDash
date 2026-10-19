@@ -1089,6 +1089,59 @@ your main-server configuration uses a different ID. Override definitions via
   launcher commands, and model-server health checks remain in place; model loading
   still takes the time required by the model and hardware.
 
+#### Persistent Apply sessions
+
+The recipe dialog replaces the single progress banner with two independent views:
+
+- **Current Apply** shows only the latest session, including its final result,
+  until another Apply starts. Refreshing the browser restores the open recipe
+  dialog and reloads the same session from the server.
+- **Apply History** lists prior succeeded, failed, and interrupted sessions.
+  Selecting a row opens read-only stage details without replacing Current Apply.
+  The historical selection is remembered across refreshes.
+
+Stages are created only when entered. Offline dependencies add **Waking required
+nodes** and **Waiting for required nodes to come online** before deployment.
+Already-online dependencies omit those stages. Stop/confirm stages appear only
+when there is an active recipe to stop, and model-sync appears only for tracked
+models. Repeated boot polls update the existing stage rather than adding log rows.
+
+Each stage retains its outcome, timestamps, duration, pending nodes, loading
+progress, per-node actions, and captured launcher/transfer stdout and stderr.
+Expand a stage for diagnostics; running and failed stages expand automatically.
+Output follows new lines until you scroll up or pause following. Errors include
+the failed stage and command exit context when available; output is rendered as
+plain text, with known credentials and Bearer tokens redacted before storage.
+Estimated model loading is labelled, and terminal stages show their last load
+reading without a stale remaining-time countdown.
+
+Session files live in `config/recipe-sessions/` (override with
+`RECIPE_SESSIONS_DIR`), under the existing persistent `/app/config` container
+mount. Files are private (0600). The store retains the latest 50 terminal sessions
+plus a running session, limits captured output to 2 MiB per session and 16 KiB per
+line, and marks truncation explicitly. Stage outcomes and final errors remain
+available after output eviction. Start, stage transitions, and completion persist
+immediately; output/progress updates are batched for up to 500 ms and flushed on
+graceful shutdown. An abrupt crash can lose the last unflushed output batch.
+
+A server restart marks unfinished sessions **interrupted** without replaying
+commands. Remote launchers may still be running, so the recorded outcome is
+unknown rather than a claimed deployment failure or success. Storage failures
+are visible; inability to persist a new session prevents starting its Apply.
+
+| API | Purpose |
+|-----|---------|
+| `POST /api/recipes/:id/activate` | Start Apply; returns `sessionId` with the accepted target |
+| `GET /api/recipes/sessions/current` | Latest session, including entered stages and retained output |
+| `GET /api/recipes/sessions` | Terminal-session summaries, newest first |
+| `GET /api/recipes/sessions/:id?afterSeq=N` | Session details with log lines newer than sequence `N` |
+
+The WebSocket snapshot carries compact `recipeSession` metadata, not the full
+output history. The dialog fetches incremental diagnostics by session and sequence,
+deduplicates reconnect updates, and polls as a fallback. Reading a session or
+refreshing the page never starts or resumes Apply.
+
+
 ### Themes
 
 Choose a theme in **Settings → Appearance** (or the sun / moon button in the sidebar):

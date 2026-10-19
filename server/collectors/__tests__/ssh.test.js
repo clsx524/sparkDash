@@ -3,7 +3,8 @@ import { strict as assert } from "node:assert";
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import { sshCommandSpec, explainSshFailure } from "../ssh.js";
+import os from "node:os";
+import { sshCommandSpec, explainSshFailure, sshExec } from "../ssh.js";
 
 beforeEach((t) => {
   for (const name of ["SSH_CONTROL_PERSIST_SECONDS", "SSH_CONTROL_PERSIST", "SSH_IDENTITY_FILE"]) {
@@ -212,4 +213,42 @@ test("explainSshFailure names the administrators_authorized_keys file for a refu
   assert.match(win, /administrators_authorized_keys/);
   assert.match(win, /Administrators and SYSTEM/);
   assert.equal(explainSshFailure(denied), denied);
+});
+
+test("SSH streams output before command exit and retains stderr tails and exit status", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "recipe-ssh-output-"));
+  const release = path.join(dir, "release");
+  const oldPath = process.env.PATH;
+  fs.writeFileSync(path.join(dir, "ssh"), `#!${process.execPath}
+const fs = require("node:fs");
+process.stdout.write("\\u001b[32mrank loading\\u001b[0m\\n");
+process.stderr.write("launcher warning\\n");
+const timer = setInterval(() => {
+  if (!fs.existsSync(${JSON.stringify(release)})) return;
+  clearInterval(timer);
+  process.stdout.write("final stdout");
+  process.stderr.write("fatal diagnostic");
+  process.exitCode = 7;
+}, 5);
+`, { mode: 0o755 });
+  process.env.PATH = `${dir}:${oldPath}`;
+  t.after(() => {
+    process.env.PATH = oldPath;
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+  const lines = [];
+  await assert.rejects(sshExec({
+    id: "fake", lanIp: "127.0.0.1", ssh: { host: "127.0.0.1", user: "smoke", auth: "key" },
+  }, "fake launcher", {
+    multiplex: false,
+    timeoutMs: 2000,
+    onOutput: (line) => {
+      lines.push(line);
+      if (line.text === "rank loading") fs.writeFileSync(release, "");
+    },
+  }), (err) => err.exitCode === 7 && /fatal diagnostic/.test(err.message));
+  assert.ok(lines.some((line) => line.stream === "stdout" && line.text === "rank loading"));
+  assert.ok(lines.some((line) => line.stream === "stdout" && line.text === "final stdout"));
+  assert.ok(lines.some((line) => line.stream === "stderr" && line.text === "launcher warning"));
+  assert.ok(lines.some((line) => line.stream === "stderr" && line.text === "fatal diagnostic"));
 });

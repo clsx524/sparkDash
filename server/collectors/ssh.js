@@ -17,6 +17,7 @@ import {
 } from "../config.js";
 import { isAllowedTargetHost, isValidSshUser, normalizeSshPort } from "../validate.js";
 import { llmProbeHost } from "./llmHost.js";
+import { LineSplitter } from "../util/commandOutput.js";
 
 // Detect sshpass without shelling out to `which` on every cold call —
 // checking PATH entries directly is faster and avoids spawning a shell.
@@ -284,7 +285,7 @@ export function explainSshFailure(message, { windows = false } = {}) {
  *
  * @param {Object} spark - Spark config object
  * @param {string} cmd - Command to execute (passed as a single remote argv via bash -c)
- * @param {{ timeoutMs?: number, multiplex?: boolean, extraSshArgs?: string[] }} [options]
+ * @param {{ timeoutMs?: number, multiplex?: boolean, extraSshArgs?: string[], onOutput?: (line: {stream: string, text: string}) => void }} [options]
  *   `multiplex: false` forces a connection of its own instead of riding the shared ControlMaster
  *   socket (needed for many concurrent sessions to one host, e.g. sharded transfers), and
  *   `extraSshArgs` are inserted before the destination.
@@ -313,14 +314,39 @@ export async function sshExec(spark, cmd, options = {}) {
 
   const execute = (execArgs) =>
     new Promise((resolve, reject) => {
+      const capture = execArgs === args && typeof options.onOutput === "function";
+      const splitters = capture ? { stdout: new LineSplitter(), stderr: new LineSplitter() } : null;
+      const push = (stream, text) => {
+        try {
+          options.onOutput({ stream, text });
+        } catch {
+          /* logging must not change command execution */
+        }
+      };
       const child = execFile(file, execArgs, { timeout: timeoutMs, env, maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
+        if (splitters) {
+          for (const [stream, splitter] of Object.entries(splitters)) {
+            const rest = splitter.flush();
+            if (rest) push(stream, rest);
+          }
+        }
         if (err) {
           const msg = stderr?.trim() || err.message;
-          reject(new Error(`SSH to ${targetHost}:${sshPort} failed: ${explainSshFailure(msg, { windows: isWindows })}`));
+          const failure = new Error(`SSH to ${targetHost}:${sshPort} failed: ${explainSshFailure(msg, { windows: isWindows })}`);
+          if (typeof err.code === "number") failure.exitCode = err.code;
+          reject(failure);
         } else {
           resolve(String(stdout).trim());
         }
       });
+      if (splitters) {
+        for (const [stream, splitter] of Object.entries(splitters)) {
+          child[stream]?.setEncoding("utf8");
+          child[stream]?.on("data", (chunk) => {
+            for (const line of splitter.feed(chunk)) push(stream, line);
+          });
+        }
+      }
       // Windows PowerShell can wait for stdin to close; nothing is ever sent on it.
       if (isWindows) child.stdin?.end();
       // `options.input` travels on stdin only (never argv, never the environment), e.g. a
