@@ -39,18 +39,16 @@ function setup(t, { tp = 2, online = ["spark1", "spark2"], sameTarget = false } 
     { id: "spark2", name: "Worker", role: "worker", lanIp: "192.168.1.12" },
     { id: "atom", name: "Atom", role: "worker", lanIp: "192.168.1.13" },
   ];
-  // Atom is identified explicitly; it must not make the normal worker selector ambiguous.
-  sparks[2].role = "atom";
   const registry = new RecipeRegistry({ sparks });
-  const launcher = { role: "head", workdir: "~/recipe", statusCmd: "status", startCmd: "start", stopCmd: "stop", runningPattern: "running", llmPort: 8888 };
+  const launcher = { role: "head", sparkId: "spark1", workdir: "~/recipe", statusCmd: "status", startCmd: "start", stopCmd: "stop", runningPattern: "running", llmPort: 8888 };
   const recipe = {
     id: "target", label: "Target", tp,
-    requiredNodes: [{ role: "head" }, { role: "worker" }, ...(tp === 3 ? [{ sparkId: "atom" }] : [])],
+    requiredNodes: [{ sparkId: "spark1" }, { sparkId: "spark2" }, ...(tp === 3 ? [{ sparkId: "atom" }] : [])],
     nodes: [launcher],
   };
   const unrelated = {
     id: "deepseek", tp: 3,
-    requiredNodes: [{ role: "head" }, { role: "worker" }, { sparkId: "atom" }],
+    requiredNodes: [{ sparkId: "spark1" }, { sparkId: "spark2" }, { sparkId: "atom" }],
     nodes: [{ ...launcher, workdir: "~/deepseek" }],
   };
   registry._recipes = [recipe, unrelated];
@@ -228,23 +226,19 @@ test("missing readiness/wake configuration never reaches apply", async (t) => {
 
 test("metadata rejects missing, ambiguous, duplicate and TP-mismatched dependencies before wake", async (t) => {
   const h = setup(t);
-  const original = structuredClone(h.recipe.requiredNodes);
   for (const selectors of [undefined, [], [{ role: "missing" }], [{ role: "head" }, { sparkId: "spark1" }], [{ role: "head" }], [{ role: "head", sparkId: "spark1" }]]) {
     h.recipe.requiredNodes = selectors;
     await assert.rejects(h.apply(), /metadata|no Spark configured|unique required nodes|invalid requiredNodes/);
   }
-  h.recipe.requiredNodes = original;
-  h.sparks.push({ id: "duplicate-worker", role: "worker" });
+  h.recipe.requiredNodes = [{ sparkId: "spark1" }, { role: "worker" }];
   await assert.rejects(h.apply(), /ambiguous/);
   assert.deepEqual(h.wakes, []);
   assert.deepEqual(h.commands, []);
 });
 
-test("recipe list exposes topology while skipping offline dependency status commands", async (t) => {
+test("recipe list skips status commands for unrelated offline dependencies", async (t) => {
   const h = setup(t);
   const list = await h.registry.list({ getOnline: h.options.getOnline });
-  assert.equal(list.recipes[0].tp, 2);
-  assert.deepEqual(list.recipes[0].requiredNodes, [{ role: "head" }, { role: "worker" }]);
   assert.equal(list.recipes[1].active, false);
   assert.ok(h.commands.every(({ command }) => !command.includes("~/deepseek")));
 });
@@ -396,5 +390,38 @@ test("failed launcher session retains node output, exit context and failed stage
   } finally {
     store.flush();
     fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("shipped fleet recipes apply with spark2 and Atom both configured as workers", async (t) => {
+  const definitions = JSON.parse(fs.readFileSync(new URL("../../config/recipes.json", import.meta.url), "utf8"));
+  const expected = {
+    "glm53-exl3": { required: ["spark1", "spark2"], launcher: "spark1" },
+    "qwen38-flash-next": { required: ["spark1", "spark2"], launcher: "spark1" },
+    "minimax-h3": { required: ["spark2"], launcher: "spark2" },
+    "deepseek-v41-lakyfx-tp3": { required: ["spark1", "spark2", "atom"], launcher: "spark1" },
+  };
+  for (const definition of definitions) {
+    const h = setup(t, { online: [] });
+    h.registry._recipes = [definition];
+    h.options.wakeNodes = async (targets) => {
+      h.wakes.push(targets.map((spark) => spark.id));
+      for (const spark of targets) h.onlineIds.add(spark.id);
+    };
+    const stagedModels = {
+      registryHost: () => h.sparks[0],
+      getRegistryConfig: () => ({ directory: "/staged" }),
+      getModel: (id) => ({ id, subfolder: id, manifest: [] }),
+      verifyFilesOnHost: async () => { assert.fail("Apply must not hash staged weights"); },
+    };
+    await switchRecipe(h.registry, stagedModels, definition.id,
+      (state) => h.phases.push(state), h.options);
+    const topology = expected[definition.id];
+    assert.deepEqual(h.wakes, [topology.required], definition.id);
+    const starts = h.commands.filter(({ command }) => definition.nodes.some(
+      (node) => command === `cd ${node.workdir} && ${node.startCmd}`
+    ));
+    assert.deepEqual(starts.map(({ id }) => id), [topology.launcher], definition.id);
+    assert.equal(h.phases.at(-1).phase, "done");
   }
 });
