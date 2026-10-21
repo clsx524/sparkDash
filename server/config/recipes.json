@@ -70,7 +70,7 @@
       {
         "role": "head",
         "sparkId": "spark-1",
-        "workdir": "~/ds41f-1.2.0",
+        "workdir": "~/ds41f",
         "startCmd": "./tp3-cluster.sh start",
         "stopCmd": "./tp3-cluster.sh stop",
         "statusCmd": "./tp3-cluster.sh status",
