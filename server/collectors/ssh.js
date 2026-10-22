@@ -18,6 +18,8 @@ import {
 import { isAllowedTargetHost, isValidSshUser, normalizeSshPort } from "../validate.js";
 import { llmProbeHost } from "./llmHost.js";
 import { LineSplitter } from "../util/commandOutput.js";
+import { attachedCommand } from "./attachedCommand.js";
+import { abortable } from "../util/abort.js";
 
 /** A decoded PowerShell error keeps its first line or two; the rest is position noise. */
 const CLIXML_MESSAGE_MAX = 300;
@@ -303,10 +305,13 @@ export function explainSshFailure(message, { windows = false } = {}) {
  *
  * @param {Object} spark - Spark config object
  * @param {string} cmd - Command to execute (passed as a single remote argv via bash -c)
- * @param {{ timeoutMs?: number, multiplex?: boolean, extraSshArgs?: string[], onOutput?: (line: {stream: string, text: string}) => void }} [options]
+ * @param {{ timeoutMs?: number, multiplex?: boolean, extraSshArgs?: string[], signal?: AbortSignal, cancelRemote?: boolean, onOutput?: (line: {stream: string, text: string}) => void }} [options]
  *   `multiplex: false` forces a connection of its own instead of riding the shared ControlMaster
  *   socket (needed for many concurrent sessions to one host, e.g. sharded transfers), and
  *   `extraSshArgs` are inserted before the destination.
+ *   `signal` cancels the transport. `cancelRemote` additionally leases a Linux attached
+ *   process group over stdin, killing attached descendants before settling cancellation.
+ *   It reserves stdin (cannot be combined with `input`); detached services are not stopped.
  * @returns {Promise<string>} - Trimmed stdout
  */
 /** The single remote argv for a command: PowerShell-encoded on Windows units, as written elsewhere. */
@@ -315,6 +320,8 @@ export function remoteArgvFor(spark, cmd) {
 }
 
 export async function sshExec(spark, cmd, options = {}) {
+  options.signal?.throwIfAborted();
+  const guarded = Boolean(options.signal && options.cancelRemote && spark?.platform !== "windows");
   const timeoutMs =
     Number.isFinite(options.timeoutMs) && options.timeoutMs > 0 ? options.timeoutMs : 10000;
 
@@ -325,13 +332,21 @@ export async function sshExec(spark, cmd, options = {}) {
   // Windows OpenSSH hands the command to cmd.exe or PowerShell, never bash.
   const isWindows = spark?.platform === "windows";
   const { file, args, env, targetHost, multiplex, sshPort } = sshCommandSpec(spark, {
-    remoteArgv: remoteArgvFor(spark, cmd),
+    remoteArgv: remoteArgvFor(spark, guarded ? attachedCommand(cmd) : cmd),
     multiplex: options.multiplex,
-    extraSshArgs: options.extraSshArgs,
+    extraSshArgs: guarded
+      ? [...(options.extraSshArgs ?? []), "-o", "ServerAliveInterval=2", "-o", "ServerAliveCountMax=3"]
+      : options.extraSshArgs,
   });
 
   const execute = (execArgs) =>
     new Promise((resolve, reject) => {
+      options.signal?.throwIfAborted();
+      let heartbeat;
+      let escalation;
+      let commandTimeout;
+      let timedOut = false;
+      let abort;
       const capture = execArgs === args && typeof options.onOutput === "function";
       const splitters = capture ? { stdout: new LineSplitter(), stderr: new LineSplitter() } : null;
       const push = (stream, text) => {
@@ -341,13 +356,21 @@ export async function sshExec(spark, cmd, options = {}) {
           /* logging must not change command execution */
         }
       };
-      const child = execFile(file, execArgs, { timeout: timeoutMs, env, maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
+      const child = execFile(file, execArgs, {
+        timeout: guarded && execArgs === args ? 0 : timeoutMs, env, maxBuffer: 10 * 1024 * 1024,
+      }, (err, stdout, stderr) => {
+        clearInterval(heartbeat);
+        clearTimeout(escalation);
+        clearTimeout(commandTimeout);
+        options.signal?.removeEventListener("abort", abort);
         if (splitters) {
           for (const [stream, splitter] of Object.entries(splitters)) {
             const rest = splitter.flush();
             if (rest) push(stream, rest);
           }
         }
+        if (options.signal?.aborted) return reject(options.signal.reason);
+        if (timedOut) return reject(new Error(`SSH to ${targetHost}:${sshPort} timed out after ${timeoutMs}ms`));
         if (err) {
           const msg = stderr?.trim() || err.message;
           const failure = new Error(`SSH to ${targetHost}:${sshPort} failed: ${explainSshFailure(msg, { windows: isWindows })}`);
@@ -357,6 +380,31 @@ export async function sshExec(spark, cmd, options = {}) {
           resolve(String(stdout).trim());
         }
       });
+      if (options.signal) {
+        abort = () => {
+          clearInterval(heartbeat);
+          clearTimeout(commandTimeout);
+          clearTimeout(escalation);
+          if (guarded && execArgs === args) {
+            // EOF revokes the remote lease; wait for its group cleanup before settling.
+            child.stdin?.end();
+            escalation = setTimeout(() => child.kill("SIGKILL"), 8_000);
+          } else child.kill("SIGTERM");
+        };
+        options.signal.addEventListener("abort", abort, { once: true });
+        if (options.signal.aborted) abort();
+      }
+      if (guarded && execArgs === args && !options.signal.aborted) {
+        child.stdin?.on("error", () => {});
+        child.stdin?.write("lease\n");
+        heartbeat = setInterval(() => child.stdin?.write("lease\n"), 500);
+        commandTimeout = setTimeout(() => {
+          timedOut = true;
+          clearInterval(heartbeat);
+          child.stdin?.end();
+          escalation = setTimeout(() => child.kill("SIGKILL"), 8_000);
+        }, timeoutMs);
+      }
       if (splitters) {
         for (const [stream, splitter] of Object.entries(splitters)) {
           child[stream]?.setEncoding("utf8");
@@ -369,7 +417,7 @@ export async function sshExec(spark, cmd, options = {}) {
       if (isWindows) child.stdin?.end();
       // `options.input` travels on stdin only (never argv, never the environment), e.g. a
       // sudo password for one action. Ignored for the multiplex readiness probe.
-      else if (typeof options.input === "string" && execArgs === args) {
+      else if (!guarded && typeof options.input === "string" && execArgs === args) {
         child.stdin?.on("error", () => {});
         child.stdin?.end(options.input);
       }
@@ -378,7 +426,7 @@ export async function sshExec(spark, cmd, options = {}) {
   if (multiplex) {
     const probeArgs = [...args];
     probeArgs[probeArgs.length - 1] = isWindows ? powershellCommand("exit 0") : "true";
-    await ensureMultiplexReady(multiplex, () => execute(probeArgs));
+    await abortable(() => ensureMultiplexReady(multiplex, () => execute(probeArgs)), options.signal);
   }
   try {
     return await execute(args);
@@ -504,6 +552,7 @@ export async function comfyTest(spark, port) {
  * @param {{timeoutMs?: number}} [options]
  */
 export async function copyToSpark(spark, content, remotePath, options = {}) {
+  options.signal?.throwIfAborted();
   const timeoutMs =
     Number.isFinite(options.timeoutMs) && options.timeoutMs > 0 ? options.timeoutMs : 30000;
   const quoted = "'" + String(remotePath).replace(/'/g, "'\\''") + "'";
@@ -511,11 +560,14 @@ export async function copyToSpark(spark, content, remotePath, options = {}) {
     remoteArgv: [`rm -f ${quoted}; cat > ${quoted}`],
   });
   return new Promise((resolve, reject) => {
+    let abort;
     const child = execFile(
       file,
       args,
       { timeout: timeoutMs, env, maxBuffer: 10 * 1024 * 1024 },
       (err, _stdout, stderr) => {
+        options.signal?.removeEventListener("abort", abort);
+        if (options.signal?.aborted) return reject(options.signal.reason);
         if (err) {
           reject(new Error(`Copy to ${targetHost} failed: ${stderr?.trim() || err.message}`));
         } else {
@@ -523,6 +575,12 @@ export async function copyToSpark(spark, content, remotePath, options = {}) {
         }
       }
     );
+    if (options.signal) {
+      abort = () => child.kill("SIGTERM");
+      options.signal.addEventListener("abort", abort, { once: true });
+      if (options.signal.aborted) abort();
+    }
+    child.stdin.on("error", () => {});
     child.stdin.write(content);
     child.stdin.end();
   });

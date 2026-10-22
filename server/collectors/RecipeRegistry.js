@@ -128,7 +128,8 @@ export class RecipeRegistry {
    * not-running status output.
    * @returns {Promise<{ role: string, running: boolean, detail: string }>}
    */
-  async _probeNode(node, { getOnline } = {}) {
+  async _probeNode(node, { getOnline, signal } = {}) {
+    signal?.throwIfAborted();
     const spark = this._sparkForNode(node);
     if (!spark) {
       return { role: node.role, running: false, detail: `no Spark configured for role ${node.role}` };
@@ -138,11 +139,12 @@ export class RecipeRegistry {
     }
     try {
       const out = await sshExec(spark, `cd ${node.workdir} && ${node.statusCmd}`, {
-        timeoutMs: STATUS_TIMEOUT_MS
+        timeoutMs: STATUS_TIMEOUT_MS, signal,
       });
       const running = new RegExp(node.runningPattern).test(out);
       return { role: node.role, running, detail: out.slice(0, 2000) };
     } catch (err) {
+      signal?.throwIfAborted();
       return { role: node.role, running: false, detail: err.message };
     }
   }

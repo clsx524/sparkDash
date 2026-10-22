@@ -932,6 +932,11 @@ export function fetchRecipeSession(
   return apiFetch(`/api/recipes/sessions/${encodeURIComponent(id)}${query}`);
 }
 
+/** Cancel remaining server-side Apply work; completed changes are not rolled back. */
+export function cancelRecipeSession(id: string): Promise<{ session: RecipeSessionDetail }> {
+  return apiFetch(`/api/recipes/sessions/${encodeURIComponent(id)}/cancel`, { method: "POST" });
+}
+
 // ─── Model Registry (generic model tracking/sync) ─────────
 export function fetchModelRegistry(): Promise<ModelRegistryConfig> {
   return apiFetch("/api/model-registry");

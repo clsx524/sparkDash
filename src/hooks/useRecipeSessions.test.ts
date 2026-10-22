@@ -41,6 +41,18 @@ describe("recipe session incremental merge", () => {
     expect(merged.stages[0].logs.map((entry) => entry.seq)).toEqual([1, 3]);
   });
 
+  it("keeps cancellation terminal when pre-cancel progress arrives late and retains captured logs", () => {
+    const cancelled: RecipeSessionDetail = {
+      ...first, version: 3, status: "cancelled", phase: "cancelled", finishedAt: 10,
+      stages: [{ ...stage, status: "cancelled", finishedAt: 10, message: "Cancelled by user", logs: [line(2)] }],
+    };
+    const merged = mergeRecipeSession(cancelled, first);
+    expect(merged.status).toBe("cancelled");
+    expect(merged.phase).toBe("cancelled");
+    expect(merged.stages[0].status).toBe("cancelled");
+    expect(merged.stages[0].logs.map((entry) => entry.seq)).toEqual([1, 2]);
+  });
+
   it("never merges output between distinct Apply sessions", () => {
     const next = { ...first, id: "apply-b", stages: [] };
     expect(mergeRecipeSession(first, next)).toEqual(next);

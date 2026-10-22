@@ -29,7 +29,7 @@ export function activateButtonState(
 
 export function RecipesDialog({ open, onClose, recipeSession }: RecipesDialogProps) {
   const sessions = useRecipeSessions(open, recipeSession);
-  const { data, current, history, selectedId, selected, selectionError, loading, ready, error, pendingId, running } = sessions;
+  const { data, current, history, selectedId, selected, selectionError, loading, ready, error, pendingId, running, cancelPending, cancelling, cancelError } = sessions;
   const { mounted, visible } = useModalPresence(open);
   useEffect(() => {
     if (!open) return;
@@ -56,11 +56,20 @@ export function RecipesDialog({ open, onClose, recipeSession }: RecipesDialogPro
             <section aria-label="Current Apply" className="min-w-0 rounded border border-border p-3">
               <h3 className="mb-2 text-xs font-semibold text-text-strong">Current Apply</h3>
               <p className="mb-2 text-[10px] text-muted">Latest session; stays here until the next Apply.</p>
+              {current && running && <div className="mb-3 rounded border border-danger/40 bg-danger/10 p-3">
+                <button type="button" onClick={() => { void sessions.cancel(current.id); }}
+                  disabled={cancelPending || cancelling}
+                  className="rounded bg-danger px-3 py-1.5 text-xs font-semibold text-white disabled:opacity-50">
+                  {cancelling ? "Cancelling…" : "Cancel Apply"}
+                </button>
+                <p className="mt-2 text-[10px] text-muted">Cancellation stops remaining Apply work. Completed changes and already-started services are not rolled back; nodes stay powered on and downloaded weights are kept.</p>
+              </div>}
+              {cancelError && <p role="alert" className="mb-2 text-xs text-danger">Could not cancel Apply: {cancelError}. Try Cancel Apply again, or retry loading to check the server state. <button type="button" className="underline" onClick={sessions.retry}>Retry loading</button></p>}
               {current ? <RecipeSessionDetails key={current.id} session={current} /> : <p className="text-xs text-muted">No Apply session recorded.</p>}
             </section>
             <section aria-label="Apply History" className="min-w-0 rounded border border-border p-3">
               <h3 className="mb-2 text-xs font-semibold text-text-strong">Apply History</h3>
-              <p className="mb-2 text-[10px] text-muted">Prior completed, failed, and interrupted sessions. Details are read-only.</p>
+              <p className="mb-2 text-[10px] text-muted">Prior completed, failed, interrupted, and cancelled sessions. Details are read-only.</p>
               {history.length === 0 && <p className="text-xs text-muted">No prior sessions.</p>}
               <ul className="mb-3 max-h-48 space-y-1 overflow-y-auto" aria-label="Prior Apply sessions">
                 {history.map((session) => <li key={session.id}>
@@ -85,7 +94,7 @@ export function RecipesDialog({ open, onClose, recipeSession }: RecipesDialogPro
             <div className="grid gap-2 md:grid-cols-2">
               {data?.recipes.map((recipe) => {
                 const isActive = data.activeId === recipe.id;
-                const { disabled, label } = activateButtonState(isActive, running || pendingId != null || !ready, pendingId === recipe.id);
+                const { disabled, label } = activateButtonState(isActive, running || cancelPending || pendingId != null || !ready, pendingId === recipe.id);
                 return <div key={recipe.id} className="rounded border border-border bg-surface-elevated p-3">
                   <div className="flex items-start justify-between gap-3">
                     <div>

@@ -382,3 +382,42 @@ test("startup directory errors fail clearly and recovery write errors remain vis
   assert.equal(restarted.current().storageError, null);
   assert.equal(JSON.parse(fs.readFileSync(file(id), "utf8")).status, "interrupted");
 });
+
+test("cancellation latches progress, preserves logs and stage outcome, and reloads durably", (t) => {
+  const { store, dir } = harness(t);
+  const { id } = store.start(input());
+  enter(store, id, "checking-nodes");
+  enter(store, id, "starting");
+  store.appendLog(id, { stream: "stdout", text: "Loading rank 0" });
+  const cancelling = enter(store, id, "cancelling");
+  assert.equal(cancelling.status, "running");
+  assert.equal(cancelling.finishedAt, null);
+  assert.equal(cancelling.stages.at(-1).status, "running");
+  assert.throws(() => store.start(input("other")), /already running/);
+  assert.deepEqual(enter(store, id, "done"), cancelling);
+  assert.deepEqual(enter(store, id, "health-checking"), cancelling);
+  const cancelled = enter(store, id, "cancelled", { message: "Apply cancelled; no rollback" });
+  assert.equal(cancelled.status, "cancelled");
+  assert.equal(cancelled.phase, "cancelled");
+  assert.deepEqual(cancelled.stages.map((stage) => stage.status), ["succeeded", "cancelled"]);
+  assert.equal(logs(cancelled)[0].text, "Loading rank 0");
+  assert.equal(cancelled.error, null);
+  assert.deepEqual(enter(store, id, "done"), cancelled);
+  const reloaded = new RecipeSessionStore({ dir }).get(id);
+  assert.equal(reloaded.status, "cancelled");
+  assert.equal(reloaded.stages.at(-1).status, "cancelled");
+  const next = store.start(input("other"));
+  enter(store, id, "cancelling");
+  assert.equal(store.get(next.id).status, "running");
+  enter(store, next.id, "done");
+});
+
+test("cancelling survives disk validation and becomes interrupted on server restart", (t) => {
+  const { store, dir } = harness(t);
+  const { id } = store.start(input());
+  enter(store, id, "waiting-online");
+  enter(store, id, "cancelling");
+  const reloaded = new RecipeSessionStore({ dir }).get(id);
+  assert.equal(reloaded.status, "interrupted");
+  assert.equal(reloaded.stages.at(-1).status, "interrupted");
+});

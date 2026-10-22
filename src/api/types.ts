@@ -924,7 +924,7 @@ export interface RecipeSwitchProgress {
   source: "log" | "estimate";
 }
 
-export type RecipeSessionStatus = "running" | "succeeded" | "failed" | "interrupted";
+export type RecipeSessionStatus = "running" | "succeeded" | "failed" | "interrupted" | "cancelled";
 export type RecipeStageStatus = RecipeSessionStatus | "skipped";
 
 export interface RecipeSessionSummary {

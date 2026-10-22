@@ -520,7 +520,8 @@ export class ModelRegistry {
    * report any that are missing or mismatched. Empty result = fully verified.
    * @returns {Promise<string[]>} list of mismatched/missing relative paths
    */
-  async verifyFilesOnHost(host, dir, manifest) {
+  async verifyFilesOnHost(host, dir, manifest, { signal } = {}) {
+    signal?.throwIfAborted();
     if (!manifest || manifest.length === 0) return [];
     const fileArgs = manifest.map((m) => shQuote(m.path)).join(" ");
     let out;
@@ -528,9 +529,10 @@ export class ModelRegistry {
       out = await sshExec(
         host,
         `cd ${shQuotePath(dir)} && sha256sum -- ${fileArgs} 2>&1`,
-        { timeoutMs: VERIFY_TIMEOUT_MS}
+        { timeoutMs: VERIFY_TIMEOUT_MS, signal, cancelRemote: true }
       );
     } catch (err) {
+      signal?.throwIfAborted();
       // sshExec throws on non-zero exit too (e.g. a missing file) — the
       // partial stdout is folded into the error message by sshExec's
       // stderr/message handling, so fall back to treating everything as

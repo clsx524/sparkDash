@@ -6,9 +6,9 @@ import { stripAnsi } from "../util/commandOutput.js";
 
 const PHASES = new Set([
   "checking-nodes", "powering-on", "waiting-online", "checking-current-state", "stopping",
-  "confirming-stopped", "clearing-conflicts", "syncing-model", "rechecking-nodes", "starting", "health-checking",
+  "confirming-stopped", "clearing-conflicts", "syncing-model", "rechecking-nodes", "starting", "health-checking", "cancelling",
 ]);
-const STATUSES = new Set(["running", "succeeded", "failed", "interrupted"]);
+const STATUSES = new Set(["running", "succeeded", "failed", "interrupted", "cancelled"]);
 const STAGE_STATUSES = new Set([...STATUSES, "skipped"]);
 const STREAMS = new Set(["action", "stdout", "stderr"]);
 const LINE_BYTES = 16 * 1024;
@@ -44,7 +44,7 @@ function validRecord(record, id) {
   if (!record || record.id !== id || !isValidRecipeSessionId(id) || typeof record.targetId !== "string" ||
       typeof record.label !== "string" || !Number.isFinite(record.tp) || !Array.isArray(record.requiredNodes) ||
       !record.requiredNodes.every((node) => node && typeof node.id === "string" && typeof node.name === "string") ||
-      !STATUSES.has(record.status) || !(record.phase === null || PHASES.has(record.phase) || ["done", "failed", "interrupted"].includes(record.phase)) ||
+      !STATUSES.has(record.status) || !(record.phase === null || PHASES.has(record.phase) || ["done", "failed", "interrupted", "cancelled"].includes(record.phase)) ||
       !timestamp(record.startedAt) || !timestamp(record.updatedAt) || record.updatedAt < record.startedAt ||
       !nullableTime(record.finishedAt) || !nullableText(record.error) || !nullableText(record.storageError) ||
       !Number.isSafeInteger(record.version) || record.version < 1 || !Number.isSafeInteger(record.lastSeq) || record.lastSeq < 0 ||
@@ -319,7 +319,21 @@ export class RecipeSessionStore {
     if (!session) return null;
     if (session.status !== "running" || !update) return copy(session);
     const phase = update.phase ?? session.phase;
-    const terminal = phase === "done" ? "succeeded" : phase === "failed" ? "failed" : phase === "interrupted" ? "interrupted" : null;
+    // Cancellation is a latch: late progress/success cannot win after it was accepted.
+    if (session.phase === "cancelling" && !["cancelling", "cancelled", "interrupted"].includes(phase)) return copy(session);
+    if (phase === "cancelling") {
+      if (session.phase !== phase) {
+        session.phase = phase;
+        const stage = session.stages.at(-1);
+        if (stage?.status === "running") {
+          stage.message = this._short(id, update.message ?? "Cancelling Apply; waiting for attached work to stop");
+          stage.updatedAt = this._tick();
+        }
+        this._changed(session, true);
+      }
+      return copy(session);
+    }
+    const terminal = phase === "done" ? "succeeded" : ["failed", "interrupted", "cancelled"].includes(phase) ? phase : null;
     if (!terminal && !PHASES.has(phase)) return copy(session);
     const transition = phase !== session.phase;
     let stage = session.stages.at(-1);

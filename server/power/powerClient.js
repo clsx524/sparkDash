@@ -63,10 +63,11 @@ function groupKey(spark, action) {
  *
  * @param {object[]} sparks
  * @param {"on"|"off"} action
- * @param {{ fetchFn?: typeof fetch }} [opts]
+ * @param {{ fetchFn?: typeof fetch, signal?: AbortSignal }} [opts]
  * @returns {Promise<Array<{ id: string, ok: boolean, skipped?: boolean, target?: string, error?: string|null, message?: string|null }>>}
  */
-export async function powerAction(sparks, action, { fetchFn = fetch } = {}) {
+export async function powerAction(sparks, action, { fetchFn = fetch, signal } = {}) {
+  signal?.throwIfAborted();
   const results = [];
   const groups = new Map();
 
@@ -96,8 +97,10 @@ export async function powerAction(sparks, action, { fetchFn = fetch } = {}) {
   }
 
   for (const group of groups.values()) {
+    signal?.throwIfAborted();
     try {
-      const payload = await sendBatch(group, action, fetchFn);
+      const payload = await sendBatch(group, action, fetchFn, signal);
+      signal?.throwIfAborted();
       const byTarget = new Map();
       if (Array.isArray(payload?.results)) {
         for (const item of payload.results) {
@@ -128,6 +131,7 @@ export async function powerAction(sparks, action, { fetchFn = fetch } = {}) {
         }
       }
     } catch (err) {
+      signal?.throwIfAborted();
       const message = err?.message || String(err);
       for (const spark of group.sparks) {
         results.push({ id: spark.id, ok: false, target: powerTarget(spark), error: message });
@@ -146,7 +150,7 @@ export function powerOff(sparks, opts) {
   return powerAction(sparks, "off", opts);
 }
 
-async function sendBatch(group, action, fetchFn) {
+async function sendBatch(group, action, fetchFn, signal) {
   const pc = group.config;
   const method = String(pc.method || "POST").toUpperCase();
   const headers = { "Content-Type": "application/json", ...(pc.headers || {}) };
@@ -170,7 +174,8 @@ async function sendBatch(group, action, fetchFn) {
     method,
     headers,
     body,
-    signal: AbortSignal.timeout(pc.timeoutMs || DEFAULT_TIMEOUT_MS),
+    signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(pc.timeoutMs || DEFAULT_TIMEOUT_MS)])
+      : AbortSignal.timeout(pc.timeoutMs || DEFAULT_TIMEOUT_MS),
   });
   const text = await readLimited(res);
   if (!res.ok) {

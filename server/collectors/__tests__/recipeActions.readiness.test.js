@@ -427,3 +427,131 @@ test("shipped recipes apply with registered spark-1, spark-2 and atom IDs and tw
     assert.equal(h.phases.at(-1).phase, "done");
   }
 });
+
+test("cancel races a hanging readiness observation and ignores its late online result", async (t) => {
+  const h = setup(t);
+  const controller = new AbortController();
+  h.options.signal = controller.signal;
+  let release;
+  let entered;
+  const checking = new Promise((resolve) => { entered = resolve; });
+  h.options.checkOnlineNow = () => new Promise((resolve) => { release = resolve; entered(); });
+  const applying = h.apply();
+  const rejected = assert.rejects(applying, { name: "AbortError" });
+  await checking;
+  controller.abort();
+  await rejected;
+  assert.equal(h.phases.at(-1).phase, "cancelled");
+  assert.equal(isSwitchInFlight(), false);
+  release(true);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(h.commands, []);
+  h.options.signal = undefined;
+  h.options.checkOnlineNow = async () => true;
+  await h.apply();
+  assert.equal(h.phases.at(-1).phase, "done");
+});
+
+test("cancelling parallel attached cleanup retains lock until every sibling unwinds and never starts", async (t) => {
+  const h = setup(t);
+  const controller = new AbortController();
+  h.options.signal = controller.signal;
+  const original = globalThis.recipeTestSsh;
+  let started = 0;
+  let entered;
+  const cleaning = new Promise((resolve) => { entered = resolve; });
+  const unwind = [];
+  globalThis.recipeTestSsh = async (spark, command, options) => {
+    if (!command.includes("docker rm -f")) return original(spark, command, options);
+    started++;
+    if (started === 2) entered();
+    return new Promise((_, reject) => {
+      options.signal.addEventListener("abort", () => {
+        unwind.push(() => reject(options.signal.reason));
+      }, { once: true });
+    });
+  };
+  const applying = h.apply();
+  const rejected = assert.rejects(applying, { name: "AbortError" });
+  await cleaning;
+  controller.abort();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(isSwitchInFlight(), true);
+  assert.equal(unwind.length, 2);
+  unwind[0]();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(isSwitchInFlight(), true);
+  unwind[1]();
+  await rejected;
+  assert.equal(isSwitchInFlight(), false);
+  assert.equal(h.phases.at(-1).phase, "cancelled");
+  assert.equal(h.commands.some(({ command }) => command.endsWith("&& start")), false);
+});
+
+test("cancelling staged-file preflight escapes fallback and never transfers or launches", async (t) => {
+  const h = setup(t);
+  h.recipe.nodes[0].modelIds = ["weights"];
+  const controller = new AbortController();
+  h.options.signal = controller.signal;
+  const original = globalThis.recipeTestSsh;
+  let entered;
+  const staging = new Promise((resolve) => { entered = resolve; });
+  globalThis.recipeTestSsh = async (spark, command, options) => {
+    if (!command.includes("__PRESENT__")) return original(spark, command, options);
+    entered();
+    return new Promise((_, reject) => options.signal.addEventListener("abort",
+      () => reject(options.signal.reason), { once: true }));
+  };
+  const applying = h.apply(modelRegistry());
+  const rejected = assert.rejects(applying, { name: "AbortError" });
+  await staging;
+  controller.abort();
+  await rejected;
+  assert.equal(h.phases.at(-1).phase, "cancelled");
+  assert.equal(h.commands.some(({ command }) => command.includes("rsync") || command.endsWith("&& start")), false);
+});
+
+test("cancel aborts an in-flight model transfer without reaching the launcher", async (t) => {
+  const h = setup(t);
+  h.recipe.nodes[0].modelIds = ["weights"];
+  const controller = new AbortController();
+  h.options.signal = controller.signal;
+  const original = globalThis.recipeTestSsh;
+  let entered;
+  const transferring = new Promise((resolve) => { entered = resolve; });
+  globalThis.recipeTestSsh = async (spark, command, options) => {
+    if (!command.includes("rsync -aL")) return original(spark, command, options);
+    entered();
+    return new Promise((_, reject) => options.signal.addEventListener("abort",
+      () => reject(options.signal.reason), { once: true }));
+  };
+  const applying = h.apply(modelRegistry());
+  const rejected = assert.rejects(applying, { name: "AbortError" });
+  await transferring;
+  controller.abort();
+  await rejected;
+  assert.equal(h.phases.at(-1).phase, "cancelled");
+  assert.equal(h.commands.some(({ command }) => command.endsWith("&& start")), false);
+  assert.equal(isSwitchInFlight(), false);
+});
+
+test("cancel aborts an in-flight serving health request rather than reporting failed", async (t) => {
+  const h = setup(t);
+  const controller = new AbortController();
+  h.options.signal = controller.signal;
+  let entered;
+  const checking = new Promise((resolve) => { entered = resolve; });
+  t.mock.method(globalThis, "fetch", async (_url, { signal }) => {
+    entered();
+    return new Promise((_, reject) => signal.addEventListener("abort",
+      () => reject(signal.reason), { once: true }));
+  });
+  const applying = h.apply();
+  const rejected = assert.rejects(applying, { name: "AbortError" });
+  await checking;
+  controller.abort();
+  await rejected;
+  assert.equal(h.phases.at(-1).phase, "cancelled");
+  assert.equal(h.phases.some((state) => state.phase === "done" || state.phase === "failed"), false);
+  assert.equal(isSwitchInFlight(), false);
+});
