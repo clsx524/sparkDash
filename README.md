@@ -1100,9 +1100,17 @@ The recipe dialog replaces the single progress banner with two independent views
 - **Current Apply** shows only the latest session, including its final result,
   until another Apply starts. Refreshing the browser restores the open recipe
   dialog and reloads the same session from the server.
-- **Apply History** lists prior succeeded, failed, and interrupted sessions.
+- **Apply History** lists prior succeeded, failed, interrupted, and cancelled sessions.
   Selecting a row opens read-only stage details without replacing Current Apply.
   The historical selection is remembered across refreshes.
+
+While a session is running, **Current Apply → Cancel Apply** cancels it on the
+server, including after closing and reopening the dialog. The button changes to
+**Cancelling…** while attached commands and transfers stop; another Apply remains
+blocked until that work has settled. The interrupted stage and session then show
+**cancelled**, retaining their logs and remaining in history after refresh.
+Cancellation does not undo completed changes, power nodes off, remove staged
+weights, or stop services that have already detached from their launcher.
 
 Stages are created only when entered. Offline dependencies add **Waking required
 nodes** and **Waiting for required nodes to come online** before deployment.
@@ -1143,6 +1151,7 @@ are visible; inability to persist a new session prevents starting its Apply.
 | API | Purpose |
 |-----|---------|
 | `POST /api/recipes/:id/activate` | Start Apply; returns `sessionId` with the accepted target |
+| `POST /api/recipes/sessions/:id/cancel` | Cancel that running Apply and return its settled session; finished sessions are returned unchanged |
 | `GET /api/recipes/sessions/current` | Latest session, including entered stages and retained output |
 | `GET /api/recipes/sessions` | Terminal-session summaries, newest first |
 | `GET /api/recipes/sessions/:id?afterSeq=N` | Session details with log lines newer than sequence `N` |

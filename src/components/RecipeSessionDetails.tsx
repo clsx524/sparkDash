@@ -14,6 +14,8 @@ const PHASE_LABEL: Record<string, string> = {
   "rechecking-nodes": "Rechecking required nodes",
   starting: "Starting target recipe",
   "health-checking": "Waiting for health",
+  cancelling: "Cancelling Apply",
+  cancelled: "Apply cancelled",
 };
 
 function StageOutput({ stage }: { stage: RecipeSessionStage }) {
@@ -60,7 +62,7 @@ export function RecipeSessionDetails({ session }: { session: RecipeSessionDetail
       <div className="flex flex-wrap items-center gap-2">
         <strong className="text-text-strong">{session.label}</strong>
         <span>TP{session.tp}</span>
-        <span className={`rounded border border-border px-2 py-0.5 ${session.status === "failed" || session.status === "interrupted" ? "text-danger" : "text-accent"}`} role="status">{session.status}</span>
+        <span className={`rounded border border-border px-2 py-0.5 ${session.status === "failed" || session.status === "interrupted" ? "text-danger" : session.status === "cancelled" ? "text-muted" : "text-accent"}`} role="status">{session.status === "running" && session.phase === "cancelling" ? "cancelling" : session.status}</span>
       </div>
       <div className="text-[10px] text-muted">
         Started <time dateTime={new Date(session.startedAt).toISOString()}>{new Date(session.startedAt).toLocaleString()}</time>
@@ -68,12 +70,13 @@ export function RecipeSessionDetails({ session }: { session: RecipeSessionDetail
         {" · "}{elapsed}s elapsed
       </div>
       <p className="text-[10px] text-muted">Required nodes: {session.requiredNodes.map((node) => node.name).join(", ")}</p>
+      {session.phase === "cancelling" && session.status === "running" && <p className="text-muted">Cancelling remaining Apply work; waiting for the current operation to stop.</p>}
       {session.storageError && <p role="alert" className="text-danger">Session storage error: {session.storageError}</p>}
       {session.logsTruncated && <p className="text-muted">Captured output reached its limit; some log text was truncated.</p>}
       <ol className="space-y-1" aria-label="Apply stages">
         {session.stages.map((stage) => {
           const key = `${session.id}:${stage.id}`;
-          const isExpanded = expanded[key] ?? (stage.status === "running" || stage.status === "failed" || stage.status === "interrupted");
+          const isExpanded = expanded[key] ?? (stage.status === "running" || stage.status === "failed" || stage.status === "interrupted" || stage.status === "cancelled");
           const duration = Math.max(0, Math.round(((stage.finishedAt ?? now) - stage.startedAt) / 1000));
           const percent = stage.progress && Number.isFinite(stage.progress.percent) ? Math.min(100, Math.max(0, stage.progress.percent)) : null;
           const eta = stage.progress?.etaSeconds;
@@ -110,6 +113,7 @@ export function RecipeSessionDetails({ session }: { session: RecipeSessionDetail
       </ol>
       {session.error && !session.stages.some((stage) => stage.message === session.error) && <p role="alert" className="whitespace-pre-wrap break-words text-danger">{session.error}</p>}
       {(session.status === "failed" || session.status === "interrupted") && <p className="text-[10px] text-muted">Apply {session.status}. Only stages entered are shown; subsequent steps were not run. This session will not be replayed automatically.</p>}
+      {session.status === "cancelled" && <p className="text-[10px] text-muted">Apply cancelled. Remaining steps were not run. Completed changes and already-started services are not rolled back.</p>}
     </div>
   );
 }

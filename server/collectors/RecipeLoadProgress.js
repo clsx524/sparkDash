@@ -72,11 +72,11 @@ export function parseShardProgress(logText) {
  * @param {{ containerName?: string }} node
  * @returns {Promise<{ percent: number, current: number, total: number } | null>}
  */
-export async function probeNodeShardProgress(spark, node) {
+export async function probeNodeShardProgress(spark, node, { signal } = {}) {
   if (!node?.containerName) return null;
   try {
     const out = await sshExec(spark, `docker logs --tail ${LOG_TAIL_LINES} ${node.containerName} 2>&1`, {
-      timeoutMs: 8000,
+      timeoutMs: 8000, signal,
     });
     return parseShardProgress(out);
   } catch {

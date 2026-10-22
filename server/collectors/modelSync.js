@@ -50,6 +50,7 @@
  * check below in practice) or the model has too few files to shard.
  */
 import { sshExec, copyToSpark } from "./ssh.js";
+import { settleAll } from "../util/abort.js";
 
 const PREFLIGHT_TIMEOUT_MS = 15_000;
 const DEFAULT_SYNC_TIMEOUT_MS = 21_600_000;
@@ -102,15 +103,16 @@ export function shardFiles(files, maxShards) {
  * outright over a listing hiccup.
  * @returns {Promise<string[]>}
  */
-async function listSyncFiles(host, dir) {
+async function listSyncFiles(host, dir, signal) {
   try {
     const out = await sshExec(
       host,
       `cd ${shQuotePath(dir)} && find -L . -type f | sed 's|^\\./||'`,
-      { timeoutMs: LIST_FILES_TIMEOUT_MS}
+      { timeoutMs: LIST_FILES_TIMEOUT_MS, signal, cancelRemote: true }
     );
     return out ? out.split("\n").filter(Boolean) : [];
   } catch {
+    signal?.throwIfAborted();
     return [];
   }
 }
@@ -120,11 +122,14 @@ async function listSyncFiles(host, dir) {
  * @param {import("./ModelRegistry.js").ModelRegistry} modelRegistry
  * @param {object} model - tracked model entry (id, subfolder, manifest, ...)
  * @param {object} targetSpark - full SparkConfig (with secrets) of the host to sync onto
- * @param {{timeoutMs?: number, verify?: boolean, onOutput?: (line: {stream: string, text: string}) => void}} [options] - verify defaults to true;
+ * @param {{timeoutMs?: number, verify?: boolean, signal?: AbortSignal, onOutput?: (line: {stream: string, text: string}) => void}} [options] - verify defaults to true;
  *   Apply Recipe uses false for target-only presence checks and rsync without hashing.
  * @returns {Promise<{destDir: string, skipped?: boolean}>}
  */
 export async function syncModelToSpark(modelRegistry, model, targetSpark, options = {}) {
+  const { signal } = options;
+  signal?.throwIfAborted();
+  const commandOptions = { signal, cancelRemote: true };
   const verify = options.verify !== false;
   const registryHost = modelRegistry.registryHost();
   if (!registryHost) throw new Error("No Model Registry host configured");
@@ -137,7 +142,7 @@ export async function syncModelToSpark(modelRegistry, model, targetSpark, option
   if (targetSpark.id === registryHost.id) {
     const destDir = joinRemotePath(registryConfig.directory, model.subfolder);
     if (verify && Array.isArray(model.manifest) && model.manifest.length > 0) {
-      const mismatches = await modelRegistry.verifyFilesOnHost(targetSpark, destDir, model.manifest);
+      const mismatches = await modelRegistry.verifyFilesOnHost(targetSpark, destDir, model.manifest, { signal });
       if (mismatches.length > 0) {
         throw new Error(
           `Checksum verification failed on Model Registry host ${targetSpark.id} for ${mismatches.length} file(s): ` +
@@ -160,10 +165,11 @@ export async function syncModelToSpark(modelRegistry, model, targetSpark, option
       const present = await sshExec(
         targetSpark,
         `cd ${shQuotePath(destDir)} && for file in ${fileArgs}; do test -s "$file" || exit 1; done && printf '__PRESENT__'`,
-        { timeoutMs: PREFLIGHT_TIMEOUT_MS }
+        { timeoutMs: PREFLIGHT_TIMEOUT_MS, ...commandOptions }
       );
       if (present === "__PRESENT__") return { destDir, skipped: true };
     } catch {
+      signal?.throwIfAborted();
       // Missing/incomplete staging falls through to the existing rsync transfer.
     }
   }
@@ -172,7 +178,7 @@ export async function syncModelToSpark(modelRegistry, model, targetSpark, option
   // the module doc comment above for why this must come before the
   // reachability preflight, not after it.
   if (verify && Array.isArray(model.manifest) && model.manifest.length > 0) {
-    const mismatches = await modelRegistry.verifyFilesOnHost(targetSpark, destDir, model.manifest);
+    const mismatches = await modelRegistry.verifyFilesOnHost(targetSpark, destDir, model.manifest, { signal });
     if (mismatches.length === 0) {
       return { destDir, skipped: true };
     }
@@ -189,9 +195,10 @@ export async function syncModelToSpark(modelRegistry, model, targetSpark, option
     await sshExec(
       targetSpark,
       `${rsyncSsh} ${shQuote(`${registryHost.ssh.user}@${registryAddr}`)} true`,
-      { timeoutMs: PREFLIGHT_TIMEOUT_MS}
+      { timeoutMs: PREFLIGHT_TIMEOUT_MS, ...commandOptions }
     );
   } catch (err) {
+    signal?.throwIfAborted();
     throw new Error(
       `${targetSpark.id} cannot reach the Model Registry host ${registryHost.id} over SSH. ` +
         `This host needs its own SSH trust established there first (sparkDash does not provision cross-host SSH keys). ` +
@@ -206,7 +213,8 @@ export async function syncModelToSpark(modelRegistry, model, targetSpark, option
   const mkdirCmd = `mkdir -p ${shQuotePath(destDir)}`;
   const syncTimeout = options.timeoutMs || DEFAULT_SYNC_TIMEOUT_MS;
 
-  const files = await listSyncFiles(registryHost, sourceDir);
+  const files = await listSyncFiles(registryHost, sourceDir, signal);
+  signal?.throwIfAborted();
   const shards = shardFiles(files, MAX_SYNC_SHARDS);
 
   if (shards.length <= 1) {
@@ -215,37 +223,39 @@ export async function syncModelToSpark(modelRegistry, model, targetSpark, option
     await sshExec(
       targetSpark,
       `${mkdirCmd} && rsync -aL -e ${shQuote(fastRsyncSsh)} ${remoteSpec} ${shQuotePath(destDir + "/")}`,
-      { timeoutMs: syncTimeout, multiplex: false, onOutput: options.onOutput }
+      { timeoutMs: syncTimeout, multiplex: false, onOutput: options.onOutput, ...commandOptions }
     );
   } else {
-    await sshExec(targetSpark, mkdirCmd, { timeoutMs: PREFLIGHT_TIMEOUT_MS});
+    await sshExec(targetSpark, mkdirCmd, { timeoutMs: PREFLIGHT_TIMEOUT_MS, ...commandOptions });
     const listPaths = shards.map((_, idx) => `/tmp/sparkdash-modelsync-${model.id}-${idx}.list`);
     try {
-      await Promise.all(
-        shards.map((shard, idx) => copyToSpark(targetSpark, shard.join("\n") + "\n", listPaths[idx]))
+      await settleAll(
+        shards.map((shard, idx) => copyToSpark(targetSpark, shard.join("\n") + "\n", listPaths[idx], { signal }))
       );
       // Each shard opts out of sparkDash's shared multiplexed connection
       // (see the module doc comment) so the N streams actually parallelize
       // instead of colliding on one connection's session cap or crypto core.
-      await Promise.all(
+      signal?.throwIfAborted();
+      await settleAll(
         shards.map((_, idx) =>
           sshExec(
             targetSpark,
             `rsync -aL --files-from=${shQuotePath(listPaths[idx])} -e ${shQuote(fastRsyncSsh)} ${remoteSpec} ${shQuotePath(destDir + "/")}`,
-            { timeoutMs: syncTimeout, multiplex: false, onOutput: options.onOutput }
+            { timeoutMs: syncTimeout, multiplex: false, onOutput: options.onOutput, ...commandOptions }
           )
         )
       );
     } finally {
       const cleanupList = listPaths.map((p) => shQuotePath(p)).join(" ");
-      await sshExec(targetSpark, `rm -f -- ${cleanupList}`, {
-        timeoutMs: PREFLIGHT_TIMEOUT_MS
+      if (!signal?.aborted) await sshExec(targetSpark, `rm -f -- ${cleanupList}`, {
+        timeoutMs: PREFLIGHT_TIMEOUT_MS, ...commandOptions
       }).catch(() => {}); // best-effort; leftover list files are harmless
     }
   }
+  signal?.throwIfAborted();
 
   if (verify && Array.isArray(model.manifest) && model.manifest.length > 0) {
-    const mismatches = await modelRegistry.verifyFilesOnHost(targetSpark, destDir, model.manifest);
+    const mismatches = await modelRegistry.verifyFilesOnHost(targetSpark, destDir, model.manifest, { signal });
     if (mismatches.length > 0) {
       throw new Error(
         `Post-copy checksum verification failed on ${targetSpark.id} for ${mismatches.length} file(s): ` +

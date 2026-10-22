@@ -2104,13 +2104,15 @@ async function wakeSparkWol(spark) {
 }
 
 /** Wake only the recipe dependencies selected by the activation state machine. */
-async function wakeRecipeNodes(sparks, onLog) {
+async function wakeRecipeNodes(sparks, onLog, signal) {
+  signal?.throwIfAborted();
   const log = (spark, text) => onLog?.({
     stream: "action", nodeId: spark.id, nodeName: spark.name || spark.id, text,
   });
   for (const spark of sparks) log(spark, "Requesting power-on");
   const powered = sparks.filter((spark) => powerClient.hasPowerControl(spark));
-  const results = await powerClient.powerOn(powered);
+  const results = await powerClient.powerOn(powered, { signal });
+  signal?.throwIfAborted();
   for (const result of results) {
     const spark = sparks.find((node) => node.id === result.id);
     if (spark) log(spark, result.ok
@@ -2122,6 +2124,7 @@ async function wakeRecipeNodes(sparks, onLog) {
     return `${spark?.name || result.id}: ${result.error || "power-on failed"}`;
   });
   await Promise.all(sparks.filter((spark) => !powerClient.hasPowerControl(spark)).map(async (spark) => {
+    signal?.throwIfAborted();
     try {
       if (spark.kind !== "host") throw new Error("No power-on endpoint configured");
       await wakeSparkWol(spark);
@@ -2370,6 +2373,28 @@ app.get("/api/recipes/sessions/:id", (req, res) => {
   res.set("Cache-Control", "no-store").json({ session });
 });
 
+let recipeApply = null;
+
+app.post("/api/recipes/sessions/:id/cancel", async (req, res) => {
+  if (!isValidRecipeSessionId(req.params.id)) {
+    return res.status(400).json({ error: "Invalid Apply session ID" });
+  }
+  const session = recipeSessions.get(req.params.id);
+  if (!session) return res.status(404).json({ error: "Apply session not found" });
+  if (session.status !== "running") {
+    return res.set("Cache-Control", "no-store").json({ session });
+  }
+  // Capture the exact operation: a historical/stale request must never abort its successor.
+  const operation = recipeApply;
+  if (!operation || operation.id !== session.id) {
+    return res.status(409).json({ error: "Apply session is not cancellable" });
+  }
+  recipeSessions.recordProgress(session.id, { phase: "cancelling" });
+  operation.controller.abort();
+  await operation.settled;
+  return res.set("Cache-Control", "no-store").json({ session: recipeSessions.get(session.id) });
+});
+
 /**
  * Switch the cluster to a different recipe. Responds immediately once the switch has started;
  * the operation itself (wake required nodes → wait online → stop current → start → health-check) can take
@@ -2409,8 +2434,8 @@ function startRecipeApply(recipeId) {
   }
   const onLog = (line) => recipeSessions.appendLog(session.id, line);
   const onProgress = (state) => {
-    recipeSessions.recordProgress(session.id, state);
-    if (state.phase === "done") lastActiveRecipe.remember(recipe.id);
+    const updated = recipeSessions.recordProgress(session.id, state);
+    if (state.phase === "done" && updated?.status === "succeeded") lastActiveRecipe.remember(recipe.id);
   };
   if (configurationError) {
     onProgress({ phase: "checking-nodes" });
@@ -2419,29 +2444,37 @@ function startRecipeApply(recipeId) {
       status: 400, sessionId: session.id,
     });
   }
+  const operation = { id: session.id, controller: new AbortController(), settled: null };
+  recipeApply = operation;
   const applying = switchRecipe(recipeRegistry, modelRegistry, recipeId, onProgress, {
+    signal: operation.controller.signal,
     getOnline: (id) => Boolean(monitors.get(id)?.online),
     checkOnlineNow: async (id) => {
       const monitor = monitors.get(id);
       return monitor ? monitor.checkOnlineNow() : false;
     },
-    wakeNodes: (sparks) => wakeRecipeNodes(sparks, onLog),
+    wakeNodes: (sparks) => wakeRecipeNodes(sparks, onLog, operation.controller.signal),
     isPowerActionInFlight: () => Boolean(powerOrchestrator.isInFlight()),
     onLog,
   });
-  applying.catch((err) => {
+  operation.settled = applying.catch((err) => {
     if (recipeSessions.get(session.id)?.status === "running") {
-      onProgress({ phase: "failed", error: err.message });
+      onProgress(operation.controller.signal.aborted
+        ? { phase: "cancelled", message: "Apply cancelled; already-started services and staged weights were left in place." }
+        : { phase: "failed", error: err.message });
     }
     // switchRecipe already emitted a "failed" progress state for real switch failures;
     // this only catches the class of error it throws before entering the state machine
     // (unknown recipe id, switch already in flight — the isSwitchInFlight() check above
     // makes the latter a race rather than the common case).
+    if (operation.controller.signal.aborted) return;
     if (err instanceof RecipeSwitchError) {
       console.warn(`[recipes] switch to ${recipeId} failed: ${err.message}`);
     } else {
       console.error(`[recipes] switch to ${recipeId} failed unexpectedly:`, err);
     }
+  }).finally(() => {
+    if (recipeApply === operation) recipeApply = null;
   });
   return { started: true, targetId: recipeId, sessionId: session.id };
 }

@@ -44,6 +44,30 @@ function spark(id, target, base, extra = {}) {
   };
 }
 
+test("cancelling in-flight power-on aborts its fetch and never requests the next endpoint", async () => {
+  const controller = new AbortController();
+  const requested = [];
+  let entered;
+  const fetching = new Promise((resolve) => { entered = resolve; });
+  const applying = powerOn([
+    spark("a", "1", "http://controller-a"),
+    spark("b", "2", "http://controller-b"),
+  ], {
+    signal: controller.signal,
+    fetchFn: async (url, { signal }) => {
+      requested.push(url);
+      entered();
+      return new Promise((_, reject) => signal.addEventListener("abort",
+        () => reject(signal.reason), { once: true }));
+    },
+  });
+  const rejected = assert.rejects(applying, { name: "AbortError" });
+  await fetching;
+  controller.abort();
+  await rejected;
+  assert.deepEqual(requested, ["http://controller-a/outlets/on"]);
+});
+
 test("hasPowerControl and powerTarget", () => {
   assert.equal(hasPowerControl({ powerControl: { onUrl: "http://x/on" } }), true);
   assert.equal(hasPowerControl({ powerControl: { offUrl: "http://x/off" } }), true);

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  activateRecipe, fetchCurrentRecipeSession, fetchRecipeSession,
+  activateRecipe, cancelRecipeSession, fetchCurrentRecipeSession, fetchRecipeSession,
   fetchRecipeSessions, fetchRecipes,
 } from "../api/client";
 import type { RecipeListResponse, RecipeSessionDetail, RecipeSessionSummary } from "../api/types";
@@ -25,6 +25,14 @@ export function mergeRecipeSession(
   };
 }
 
+function sessionAuthority(
+  cached: RecipeSessionDetail | null,
+  announced: RecipeSessionSummary | null | undefined,
+): RecipeSessionSummary | null {
+  return announced && (!cached || announced.startedAt > cached.startedAt || (announced.id === cached.id && announced.version > cached.version))
+    ? announced : cached;
+}
+
 export function useRecipeSessions(open: boolean, wireSummary: RecipeSessionSummary | null | undefined) {
   const [data, setData] = useState<RecipeListResponse | null>(null);
   const [current, setCurrent] = useState<RecipeSessionDetail | null>(null);
@@ -39,6 +47,8 @@ export function useRecipeSessions(open: boolean, wireSummary: RecipeSessionSumma
   const [loading, setLoading] = useState(true);
   const [ready, setReady] = useState(false);
   const [pendingId, setPendingId] = useState<string | null>(null);
+  const [cancelPendingId, setCancelPendingId] = useState<string | null>(null);
+  const [cancelFailure, setCancelFailure] = useState<{ id: string; message: string } | null>(null);
   const cache = useRef(new Map<string, RecipeSessionDetail>());
   const latest = useRef<RecipeSessionDetail | null>(null);
   const selection = useRef(selectedId);
@@ -47,6 +57,7 @@ export function useRecipeSessions(open: boolean, wireSummary: RecipeSessionSumma
   const active = useRef(false);
   const epoch = useRef(0);
   const requestPending = useRef(false);
+  const cancellation = useRef<string | null>(null);
   const hydrated = useRef(false);
   const awaitingSession = useRef<string | null>(null);
   const refresh = useRef<(discover?: boolean, recipes?: boolean) => Promise<void>>(async () => {});
@@ -168,11 +179,8 @@ export function useRecipeSessions(open: boolean, wireSummary: RecipeSessionSumma
   }, [open, wireSummary?.id, wireSummary?.version, wireSummary?.status]);
 
   const apply = useCallback(async (targetId: string) => {
-    const cached = latest.current;
-    const announced = wire.current;
-    const authoritative = announced && (!cached || announced.startedAt > cached.startedAt || (announced.id === cached.id && announced.version > cached.version))
-      ? announced : cached;
-    if (!active.current || !hydrated.current || requestPending.current || awaitingSession.current || authoritative?.status === "running") return;
+    const authoritative = sessionAuthority(latest.current, wire.current);
+    if (!active.current || !hydrated.current || requestPending.current || cancellation.current || awaitingSession.current || authoritative?.status === "running") return;
     requestPending.current = true;
     setPendingId(targetId);
     setActionError(null);
@@ -189,12 +197,50 @@ export function useRecipeSessions(open: boolean, wireSummary: RecipeSessionSumma
     }
   }, []);
 
-  // A terminal WS update can supersede a running cached detail before catch-up arrives.
-  const authority = wireSummary && (!current || wireSummary.startedAt > current.startedAt || (wireSummary.id === current.id && wireSummary.version > current.version))
-    ? wireSummary : current;
+  const cancel = useCallback(async (id: string) => {
+    const authoritative = sessionAuthority(latest.current, wire.current);
+    if (!active.current || cancellation.current || authoritative?.id !== id || authoritative.status !== "running" || authoritative.phase === "cancelling") return;
+    const generation = epoch.current;
+    cancellation.current = id;
+    setCancelPendingId(id);
+    setCancelFailure(null);
+    try {
+      const response = await cancelRecipeSession(id);
+      if (active.current && epoch.current === generation) {
+        const merged = mergeRecipeSession(cache.current.get(id), response.session);
+        cache.current.set(id, merged);
+        const known = latest.current;
+        if (!known || known.id === id || merged.startedAt > known.startedAt) {
+          latest.current = merged;
+          setCurrent(merged);
+        }
+        if (selection.current === id) setSelected(merged);
+      }
+    } catch (cause) {
+      if (active.current && epoch.current === generation) {
+        setCancelFailure({ id, message: cause instanceof Error ? cause.message : String(cause) });
+      }
+    } finally {
+      // Rediscover even after an error: the server may have accepted cancellation
+      // before the connection failed. A reopened dialog uses its own refresh epoch.
+      if (active.current) await refresh.current(true, true);
+      cancellation.current = null;
+      setCancelPendingId(null);
+    }
+  }, []);
+
+  // WS authority can precede detail catch-up, including a newly started Apply.
+  const authority = sessionAuthority(current, wireSummary);
+  const displayedCurrent: RecipeSessionDetail | null = authority
+    ? authority === current ? current
+      : { ...authority, firstSeq: current?.id === authority.id ? current.firstSeq : 1, stages: current?.id === authority.id ? current.stages : [] }
+    : null;
   return {
-    data, current, history: history.filter((session) => session.id !== current?.id),
+    data, current: displayedCurrent, history: history.filter((session) => session.id !== authority?.id),
     selectedId, selected, selectHistory, selectionError, error: actionError ?? error, loading, ready, pendingId, apply,
+    cancel, cancelPending: cancelPendingId != null,
+    cancelling: authority?.status === "running" && (cancelPendingId === authority.id || authority.phase === "cancelling"),
+    cancelError: cancelFailure?.id === authority?.id ? cancelFailure?.message : null,
     running: authority?.status === "running",
     retry: () => { void refresh.current(true, true); },
   };

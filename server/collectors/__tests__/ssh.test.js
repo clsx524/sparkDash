@@ -252,3 +252,68 @@ const timer = setInterval(() => {
   assert.ok(lines.some((line) => line.stream === "stderr" && line.text === "launcher warning"));
   assert.ok(lines.some((line) => line.stream === "stderr" && line.text === "fatal diagnostic"));
 });
+
+test("SSH AbortSignal stops an in-flight local transport and preserves AbortError", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "recipe-ssh-abort-"));
+  const oldPath = process.env.PATH;
+  fs.writeFileSync(path.join(dir, "ssh"), `#!${process.execPath}
+process.stdout.write("waiting\\n");
+setInterval(() => {}, 1000);
+`, { mode: 0o755 });
+  process.env.PATH = `${dir}:${oldPath}`;
+  t.after(() => { process.env.PATH = oldPath; fs.rmSync(dir, { recursive: true, force: true }); });
+  const controller = new AbortController();
+  await assert.rejects(sshExec(keySpark, "status", {
+    multiplex: false, signal: controller.signal, timeoutMs: 10_000,
+    onOutput: () => controller.abort(),
+  }), { name: "AbortError" });
+});
+
+test("attached SSH lease kills remote launcher descendants before a future launch", {
+  skip: process.platform !== "linux" && "Remote recipe process-group guard requires Linux /proc and setsid",
+}, async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "recipe-ssh-lease-"));
+  const marker = path.join(dir, "launched");
+  const oldPath = process.env.PATH;
+  // A local transport executes precisely the remote argv and forwards SSH's stdin.
+  // This exercises the real sshExec lease, not a mocked signal/wiring assertion.
+  fs.writeFileSync(path.join(dir, "ssh"), '#!/bin/bash\nexec bash -c "${@: -1}"\n', { mode: 0o755 });
+  process.env.PATH = `${dir}:${oldPath}`;
+  t.after(() => { process.env.PATH = oldPath; fs.rmSync(dir, { recursive: true, force: true }); });
+  const controller = new AbortController();
+  await assert.rejects(sshExec(keySpark,
+    `printf 'attached\\n'; sleep 2; printf launched > '${marker}'`, {
+      multiplex: false, signal: controller.signal, cancelRemote: true, timeoutMs: 10_000,
+      onOutput: (line) => { if (line.text === "attached") controller.abort(); },
+    }), { name: "AbortError" });
+  await new Promise((resolve) => setTimeout(resolve, 2200));
+  assert.equal(fs.existsSync(marker), false);
+});
+
+test("attached SSH cancellation leaves an already-detached service alone", {
+  skip: process.platform !== "linux" && "Remote recipe process-group guard requires Linux /proc and setsid",
+}, async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "recipe-ssh-detached-"));
+  const oldPath = process.env.PATH;
+  fs.writeFileSync(path.join(dir, "ssh"), '#!/bin/bash\nexec bash -c "${@: -1}"\n', { mode: 0o755 });
+  process.env.PATH = `${dir}:${oldPath}`;
+  let servicePid;
+  t.after(() => {
+    if (servicePid) { try { process.kill(servicePid, "SIGKILL"); } catch { /* already stopped */ } }
+    process.env.PATH = oldPath;
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+  const controller = new AbortController();
+  await assert.rejects(sshExec(keySpark,
+    'setsid sleep 30 >/dev/null 2>&1 < /dev/null & printf "%s\\n" "$!"; sleep 30', {
+      multiplex: false, signal: controller.signal, cancelRemote: true, timeoutMs: 10_000,
+      onOutput: (line) => {
+        if (/^[0-9]+$/.test(line.text)) {
+          servicePid = Number(line.text);
+          controller.abort();
+        }
+      },
+    }), { name: "AbortError" });
+  assert.ok(servicePid);
+  assert.doesNotThrow(() => process.kill(servicePid, 0));
+});

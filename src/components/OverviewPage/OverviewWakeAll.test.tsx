@@ -11,7 +11,7 @@ import { RecipesDialog } from "../RecipesDialog";
 import { OverviewPage } from "./OverviewPage";
 
 vi.mock("../../api/client", () => ({
-  activateRecipe: vi.fn(), fetchRecipes: vi.fn(), fetchCurrentRecipeSession: vi.fn(),
+  activateRecipe: vi.fn(), cancelRecipeSession: vi.fn(), fetchRecipes: vi.fn(), fetchCurrentRecipeSession: vi.fn(),
   fetchRecipeSession: vi.fn(), fetchRecipeSessions: vi.fn(), wakeAllSparks: vi.fn(),
   shutdownAllSparks: vi.fn(), updateAllHermes: vi.fn(),
 }));
