@@ -904,7 +904,7 @@ test("_applyTensorFoldMetrics: effective prefill can exceed one host's cold-comp
 });
 
 // ─── MiaAI-derived GLM server: `tensorfold_*` counters on /metrics (underscore dialect) ───
-function tfMetrics({ prompt, completion, cached, inflight, decode = 0 }) {
+function underscoreMetrics({ prompt, completion, cached, inflight, decode = 0 }) {
   const l = 'model="GLM-5.3-Flash-EXL3"';
   return [
     `tensorfold_prompt_tokens_total{${l}} ${prompt}`,
@@ -930,7 +930,7 @@ function underscoreProbe(getMetrics, health = { ok: true }) {
 }
 
 test("_tensorFoldUnderscoreHealth: parses the labeled series; non-TensorFold text → null", async () => {
-  let body = tfMetrics({ prompt: 844731, completion: 5589, cached: 749696, inflight: 2 });
+  let body = underscoreMetrics({ prompt: 844731, completion: 5589, cached: 749696, inflight: 2 });
   const probe = underscoreProbe(() => body);
   assert.deepEqual(await probe._tensorFoldUnderscoreHealth(), {
     prompt_tokens_total: 844731,
@@ -945,10 +945,10 @@ test("_tensorFoldUnderscoreHealth: parses the labeled series; non-TensorFold tex
 });
 
 test("probe: counter-less /health + underscore /metrics → totals, cache hit and running", async () => {
-  let metrics = tfMetrics({ prompt: 1000, completion: 100, cached: 500, inflight: 1 });
+  let metrics = underscoreMetrics({ prompt: 1000, completion: 100, cached: 500, inflight: 1 });
   const probe = underscoreProbe(() => metrics);
   await probe.probe();
-  metrics = tfMetrics({ prompt: 1200, completion: 300, cached: 700, inflight: 2 });
+  metrics = underscoreMetrics({ prompt: 1200, completion: 300, cached: 700, inflight: 2 });
   const snap = await probe.probe();
   assert.equal(snap.backend, "tensorfold");
   assert.equal(probe.totalOutputTokens, 300);
@@ -958,10 +958,10 @@ test("probe: counter-less /health + underscore /metrics → totals, cache hit an
 });
 
 test("probe: underscore /metrics tok/s = tokens / decode seconds, 0 once idle", async () => {
-  let metrics = tfMetrics({ prompt: 100, completion: 1000, cached: 0, inflight: 0, decode: 20 });
+  let metrics = underscoreMetrics({ prompt: 100, completion: 1000, cached: 0, inflight: 0, decode: 20 });
   const probe = underscoreProbe(() => metrics);
   await probe.probe();
-  metrics = tfMetrics({ prompt: 100, completion: 1200, cached: 0, inflight: 0, decode: 25 });
+  metrics = underscoreMetrics({ prompt: 100, completion: 1200, cached: 0, inflight: 0, decode: 25 });
   await probe.probe();
   assert.equal(probe.generationTps, 40, "rate is shown on the poll where tokens landed");
   await probe.probe();

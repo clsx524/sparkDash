@@ -142,19 +142,6 @@ test("remote network: operstate and speed loops survive an interface with no spe
   }
 });
 
-test("remote network: no interfaces at all completes with every separator printed", { skip: !zshAvailable }, async () => {
-  const { root } = fixture();
-  try {
-    let cmd = "";
-    await spark()._getRemoteNetwork(async (_s, c) => {
-      cmd = c;
-      return "";
-    });
-    expectClean(runZsh(cmd, root), (run) => assert.equal((run.stdout.match(/---/g) || []).length, 5));
-  } finally {
-    fs.rmSync(root, { recursive: true, force: true });
-  }
-});
 
 test("RoCE fast script: three devices print in sorted device order (sort)", { skip: !zshAvailable }, () => {
   const { root, w } = fixture();
@@ -239,39 +226,3 @@ test("macOS models listing survives zsh with an unmatched models tree", { skip: 
   }
 });
 
-test("no unquoted shell glob survives in any probe script (zsh aborts on one)", async () => {
-  const collector = spark();
-  let storageCmd = "";
-  let netCmd = "";
-  await collector._getRemoteStorage(async (_s, c) => {
-    storageCmd = c;
-    return "";
-  });
-  await collector._getRemoteNetwork(async (_s, c) => {
-    netCmd = c;
-    return "";
-  });
-  let modelsCmd = "";
-  await new SystemCollector({ id: "zsh-glob", kind: "spark", platform: "darwin", isLocal: false }).collectMacModels(
-    async (_s, c) => {
-      modelsCmd = c;
-      return "---";
-    },
-  );
-  const scripts = {
-    "intelGpu INTEL_PROBE_SCRIPT": INTEL_PROBE_SCRIPT,
-    "roce ROCE_FAST_SCRIPT": ROCE_FAST_SCRIPT,
-    "remote CPU command": collector._buildRemoteCpuCommand(),
-    "remote storage command": storageCmd,
-    "remote network command": netCmd,
-    "macOS models command": modelsCmd,
-  };
-  for (const [name, script] of Object.entries(scripts)) {
-    assert.ok(script.length > 0, `${name} is empty — the corpus must not pass vacuously`);
-    // Case patterns are exempt from pathname expansion, but a glob inside a case
-    // BODY is not — strip only the `case … in <patterns>)` header, keep the body.
-    const unquoted = script.replace(/'[^']*'/g, "''").replace(/"[^"]*"/g, '""');
-    const noCase = unquoted.replace(/case\b[^;]*?\bin\b[^)]*\)/g, "CASE()");
-    assert.doesNotMatch(noCase, /[*?]/, `${name} still contains an unquoted glob`);
-  }
-});

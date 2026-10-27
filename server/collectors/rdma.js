@@ -18,10 +18,10 @@ export function rdmaProbeCommand() {
   // One pass over sysfs. Emits `key=value` lines per device/port so parsing needs no
   // human-oriented command output. Silent (and empty) on hosts without RDMA.
   return [
-    'for d in /sys/class/infiniband/*; do',
+    'for d in $(find -L /sys/class/infiniband -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort); do',
     '[ -e "$d" ] || continue;',
     'dev=$(basename "$d");',
-    'for p in "$d"/ports/*; do',
+    'for p in $(find "$d/ports" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort); do',
     '[ -e "$p" ] || continue;',
     'port=$(basename "$p");',
     'echo "dev=$dev";',
