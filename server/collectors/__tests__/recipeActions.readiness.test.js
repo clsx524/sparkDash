@@ -393,13 +393,13 @@ test("failed launcher session retains node output, exit context and failed stage
   }
 });
 
-test("shipped recipes apply with registered spark-1, spark-2 and atom IDs and two workers", async (t) => {
+test("shipped recipes apply using only their required Sparks, never Atom", async (t) => {
   const definitions = JSON.parse(fs.readFileSync(new URL("../../config/recipes.json", import.meta.url), "utf8"));
   const expected = {
     "glm53-exl3": { required: ["spark-1", "spark-2"], launcher: "spark-1" },
     "qwen38-flash-next": { required: ["spark-1", "spark-2"], launcher: "spark-1" },
     "minimax-h3": { required: ["spark-2"], launcher: "spark-2" },
-    "deepseek-v41-lakyfx-tp3": { required: ["spark-1", "spark-2", "atom"], launcher: "spark-1" },
+    "deepseek-v41-flash": { required: ["spark-1", "spark-2"], launcher: "spark-1" },
   };
   for (const definition of definitions) {
     const h = setup(t, { online: [] });
@@ -424,9 +424,49 @@ test("shipped recipes apply with registered spark-1, spark-2 and atom IDs and tw
       (node) => command === `cd ${node.workdir} && ${node.startCmd}`
     ));
     assert.deepEqual(starts.map(({ id }) => id), [topology.launcher], definition.id);
+    assert.ok(h.commands.every(({ id }) => id !== "atom"), definition.id);
     assert.equal(h.phases.at(-1).phase, "done");
   }
 });
+test("DeepSeek TP2 stages both registry models on the head before launch without contacting Atom", async (t) => {
+  const definitions = JSON.parse(fs.readFileSync(new URL("../../config/recipes.json", import.meta.url), "utf8"));
+  const definition = definitions.find(({ id }) => id === "deepseek-v41-flash");
+  const head = definition.nodes[0];
+  const h = setup(t);
+  h.sparks[0].id = "spark-1";
+  h.sparks[1].id = "spark-2";
+  h.onlineIds.add("spark-1");
+  h.onlineIds.add("spark-2");
+  h.registry._recipes = [definition];
+  const resolved = [];
+  const models = modelRegistry(async () => { assert.fail("Apply must never hash"); });
+  models.registryHost = () => ({ id: "atom", ssh: { user: "op", host: "atom.test" } });
+  models.getModel = (id) => {
+    resolved.push(id);
+    return { id, subfolder: id, manifest: [{ path: `${id}.safetensors`, sha256: "abc" }] };
+  };
+  globalThis.recipeTestSsh = async (spark, command) => {
+    h.commands.push({ id: spark.id, command });
+    assert.notEqual(spark.id, "atom");
+    assert.ok(!command.includes("atom.test"));
+    if (command.includes("for file in")) return "__PRESENT__";
+    return "stopped";
+  };
+  await switchRecipe(h.registry, models, definition.id,
+    (state) => h.phases.push(state), h.options);
+  for (const id of head.modelIds) {
+    assert.ok(resolved.includes(id));
+    const staged = h.commands.findIndex(({ command }) =>
+      command.includes("for file in") && command.includes(`${id}.safetensors`));
+    const launched = h.commands.findIndex(({ command }) =>
+      command === "cd ~/DeepSeek-v4.1-Flash-1017-2x-DGX-Sparks && ./link-registry-weights.sh && ./start.sh");
+    assert.ok(staged >= 0 && staged < launched, id);
+    assert.equal(h.commands[staged].id, "spark-1");
+  }
+  assert.deepEqual(h.wakes, []);
+  assert.equal(h.phases.at(-1).phase, "done");
+});
+
 
 test("cancel races a hanging readiness observation and ignores its late online result", async (t) => {
   const h = setup(t);
