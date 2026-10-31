@@ -180,6 +180,91 @@ test("setRegistryConfig: empty hostId clears the registry host", () => {
   assert.equal(r.getRegistryConfig().hostId, null);
 });
 
+const nfsConfig = () => ({
+  hostId: "atom",
+  directory: "/home/op/.cache/huggingface/registry",
+  nfsMounts: {
+    "spark-1": { path: "/mnt/atom-model-registry", source: "10.100.30.2:/home/op/.cache/huggingface/registry" },
+  },
+});
+
+test("registry config API preserves NFS mounts on legacy UI saves and reloads", () => {
+  const r = fresh();
+  const config = nfsConfig();
+  assert.deepEqual(r.setRegistryConfig(config), config);
+  assert.deepEqual(r.setRegistryConfig({ hostId: " atom ", directory: ` ${config.directory} ` }), config);
+  assert.deepEqual(new ModelRegistry(sparkRegistryStub).getRegistryConfig(), config);
+});
+
+test("registry config API detaches both supplied mounts and returned nested mounts", () => {
+  const r = fresh();
+  const input = nfsConfig();
+  const saved = r.setRegistryConfig(input);
+  input.nfsMounts["spark-1"].path = "/wrong-input";
+  saved.nfsMounts["spark-1"].source = "wrong:/saved";
+  const fetched = r.getRegistryConfig();
+  fetched.nfsMounts["spark-1"].path = "/wrong-get";
+  assert.deepEqual(r.getRegistryConfig(), nfsConfig());
+});
+
+for (const patch of [{ hostId: "another-host" }, { directory: "/another-directory" }, { hostId: null }]) {
+  test(`registry config API clears stale NFS mappings for ${JSON.stringify(patch)}`, () => {
+    const r = fresh();
+    r.setRegistryConfig(nfsConfig());
+    const canonical = { hostId: "atom", directory: nfsConfig().directory, ...patch };
+    assert.deepEqual(r.setRegistryConfig(canonical), canonical);
+    assert.deepEqual(new ModelRegistry(sparkRegistryStub).getRegistryConfig(), canonical);
+  });
+}
+
+test("registry config API accepts explicit replacements or an empty mapping", () => {
+  const r = fresh();
+  r.setRegistryConfig(nfsConfig());
+  const replacement = {
+    hostId: "new-registry", directory: "/new",
+    nfsMounts: { "spark-1": { path: "/mnt/new/", source: "new-registry:/new" } },
+  };
+  const saved = r.setRegistryConfig(replacement);
+  assert.equal(saved.nfsMounts["spark-1"].path, "/mnt/new");
+  assert.equal(saved.nfsMounts["spark-1"].source, "new-registry:/new");
+  assert.deepEqual(r.setRegistryConfig({ ...saved, nfsMounts: {} }).nfsMounts, {});
+});
+
+for (const nfsMounts of [
+  null, [], "not-a-map",
+  { "spark-1": null },
+  { "": { path: "/mnt/models", source: "atom:/registry" } },
+  { "spark-1": { path: "relative/models", source: "atom:/registry" } },
+  { "spark-1": { path: "~/models", source: "atom:/registry" } },
+  { "spark-1": { path: "/mnt/\0models", source: "atom:/registry" } },
+  { "spark-1": { path: "/mnt/models", source: "" } },
+  { "spark-1": { path: "/mnt/models", source: "atom:relative" } },
+  { "spark-1": { path: "/mnt/models", source: "/registry" } },
+]) {
+  test(`registry config API rejects invalid NFS mapping ${JSON.stringify(nfsMounts)} without saving`, () => {
+    const r = fresh();
+    r.setRegistryConfig(nfsConfig());
+    assert.throws(() => r.setRegistryConfig({ ...nfsConfig(), nfsMounts }), /nfsMounts/);
+    assert.deepEqual(r.getRegistryConfig(), nfsConfig());
+    assert.deepEqual(new ModelRegistry(sparkRegistryStub).getRegistryConfig(), nfsConfig());
+  });
+}
+
+test("invalid persisted NFS configuration fails closed rather than loading SSH mode", () => {
+  fresh();
+  fs.writeFileSync(process.env.MODEL_REGISTRY_JSON_PATH, JSON.stringify({
+    ...nfsConfig(), nfsMounts: { "spark-1": { path: "relative", source: "atom:/registry" } },
+  }));
+  assert.throws(() => new ModelRegistry(sparkRegistryStub), /nfsMounts.*absolute/);
+});
+
+test("NFS mappings require a canonical host and directory", () => {
+  const r = fresh();
+  for (const patch of [{ hostId: null }, { directory: "" }]) {
+    assert.throws(() => r.setRegistryConfig({ ...nfsConfig(), ...patch }), /nfsMounts requires/);
+  }
+});
+
 // ─── splitIncludePatterns / filterManifestToIncluded: multi-file partial fetches ──────
 // (e.g. Engram: only 2 of a 48-shard repo's shards plus its index, sharing no single glob)
 

@@ -3,12 +3,11 @@
  * target host's own model folder, then verifies the copy's SHA256 against
  * the registry's manifest.
  *
- * PREREQUISITE this module does not and cannot provision: the target host
- * must already have its own SSH trust established to the registry host. This mirrors how any two hosts
- * in this fleet get mutual SSH trust today — it's an operator/ansible-level
- * concern, not something sparkDash sets up on the fly. A missing-trust
- * failure surfaces as a clear, actionable error rather than a bare rsync
- * failure.
+ * Bulk data uses a configured, pre-provisioned read-only NFS mount on the
+ * target, or SSH when that target has no NFS mapping. SSH always handles
+ * control. In SSH mode the target must already trust the registry host;
+ * this module provisions neither SSH trust nor mounts. An explicitly
+ * configured but unusable mount fails closed, never falling back to SSH.
  *
  * If the target already has a verified-correct copy (manifest checksums all
  * match), the sync is skipped entirely — including the registry-host
@@ -32,8 +31,8 @@
  * here), so initiating from the target is the only assumption-free choice.
  *
  * Transfer is sharded across up to MAX_SYNC_SHARDS parallel rsync streams
- * (each handling a disjoint subset of the model's files) instead of one
- * single-stream rsync, using a hardware-accelerated cipher
+ * (each handling a disjoint subset of the model's files). SSH mode uses
+ * a hardware-accelerated cipher
  * (aes128-gcm@openssh.com — every DGX Spark's ARM crypto extensions and any
  * modern x86 host's AES-NI both accelerate it). A single SSH stream tops out
  * around 550-700MB/s even on a 10GbE link because encryption is single-core;
@@ -49,6 +48,7 @@
  * listing fails (e.g. an unreachable host, still surfaced by the preflight
  * check below in practice) or the model has too few files to shard.
  */
+import path from "node:path";
 import { sshExec, copyToSpark } from "./ssh.js";
 import { settleAll } from "../util/abort.js";
 
@@ -117,6 +117,47 @@ async function listSyncFiles(host, dir, signal) {
   }
 }
 
+async function nfsSourceDirectory(target, mount, subfolder, commandOptions) {
+  const fail = (reason) => new Error(
+    `${target.id} NFS Model Registry mount ${mount.path}: ${reason}; refusing transfer (no SSH fallback)`
+  );
+  if (typeof mount.path !== "string" || !path.posix.isAbsolute(mount.path)) {
+    throw fail("mount path must be absolute");
+  }
+  const root = path.posix.normalize(mount.path).replace(/\/+$/, "") || "/";
+  try {
+    const output = await sshExec(target,
+      `findmnt --json --mountpoint ${shQuote(root)} --output TARGET,SOURCE,FSTYPE,OPTIONS`,
+      { timeoutMs: PREFLIGHT_TIMEOUT_MS, ...commandOptions });
+    const filesystems = JSON.parse(output).filesystems;
+    const mounted = Array.isArray(filesystems) && filesystems.length === 1 ? filesystems[0] : null;
+    const flags = typeof mounted?.options === "string" ? mounted.options.split(",") : [];
+    if (!mounted || mounted.target !== root || !["nfs", "nfs4"].includes(mounted.fstype) ||
+        mounted.source !== mount.source || !flags.includes("ro") || flags.includes("rw")) {
+      throw new Error(`expected exact read-only NFS source ${mount.source} at ${root}`);
+    }
+  } catch (err) {
+    commandOptions.signal?.throwIfAborted();
+    throw fail(`mount verification failed: ${err.message}`);
+  }
+  const source = path.posix.join(root, subfolder);
+  // Check resolved paths too: -aL follows links, including symlinked model
+  // folders and Hugging Face blob links. None may lead outside the export.
+  const checkPaths = `root=$1; shift; for entry do
+    resolved=$(realpath -e -- "$entry") || exit 1
+    case "$resolved" in "$root"|"$root"/*) ;; *) printf '%s\\n' "model path escapes configured NFS root: $entry" >&2; exit 1 ;; esac
+  done`;
+  try {
+    await sshExec(target,
+      `root=$(realpath -e -- ${shQuote(root)}) && root=\${root%/} && cd ${shQuote(source)} && find -L . -exec sh -c ${shQuote(checkPaths)} sh "$root" {} +`,
+      { timeoutMs: LIST_FILES_TIMEOUT_MS, ...commandOptions });
+  } catch (err) {
+    commandOptions.signal?.throwIfAborted();
+    throw fail(`source path verification failed: ${err.message}`);
+  }
+  return source;
+}
+
 
 /**
  * @param {import("./ModelRegistry.js").ModelRegistry} modelRegistry
@@ -155,8 +196,14 @@ export async function syncModelToSpark(modelRegistry, model, targetSpark, option
   if (!targetSpark.modelFolder) {
     throw new Error(`${targetSpark.id} has no model folder configured (Edit host → Model folder)`);
   }
+  const mount = registryConfig.nfsMounts && Object.hasOwn(registryConfig.nfsMounts, targetSpark.id)
+    ? registryConfig.nfsMounts[targetSpark.id] : null;
+  if (mount && (typeof model.subfolder !== "string" || !model.subfolder ||
+      path.posix.isAbsolute(model.subfolder) || model.subfolder.split("/").includes(".."))) {
+    throw new Error(`${targetSpark.id} NFS Model Registry mount ${mount.path}: model path escapes the configured root; refusing transfer (no SSH fallback)`);
+  }
 
-  const sourceDir = joinRemotePath(registryConfig.directory, model.subfolder);
+  let sourceDir = joinRemotePath(registryConfig.directory, model.subfolder);
   const destDir = joinRemotePath(targetSpark.modelFolder, model.subfolder);
 
   if (!verify && Array.isArray(model.manifest) && model.manifest.length > 0) {
@@ -184,48 +231,51 @@ export async function syncModelToSpark(modelRegistry, model, targetSpark, option
     }
   }
 
-  const registryAddr = registryHost.ssh.host || registryHost.lanIp;
-  if (!registryAddr) throw new Error(`Model Registry host ${registryHost.id} has no reachable address configured`);
-  const rsyncSsh = `ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes -o ConnectTimeout=10`;
-
-  // Preflight: does the target host already trust its way to the registry
-  // Fail with a specific, actionable message
-  // rather than a generic rsync error.
-  try {
-    await sshExec(
-      targetSpark,
-      `${rsyncSsh} ${shQuote(`${registryHost.ssh.user}@${registryAddr}`)} true`,
-      { timeoutMs: PREFLIGHT_TIMEOUT_MS, ...commandOptions }
-    );
-  } catch (err) {
-    signal?.throwIfAborted();
-    throw new Error(
-      `${targetSpark.id} cannot reach the Model Registry host ${registryHost.id} over SSH. ` +
-        `This host needs its own SSH trust established there first (sparkDash does not provision cross-host SSH keys). ` +
-        `Underlying error: ${err.message}`
-    );
+  let sourceHost;
+  let rsyncTransport;
+  let sourceSpec;
+  if (mount) {
+    sourceDir = await nfsSourceDirectory(targetSpark, mount, model.subfolder, commandOptions);
+    sourceHost = targetSpark;
+    rsyncTransport = "";
+    sourceSpec = shQuotePath(sourceDir + "/");
+    options.onOutput?.({ stream: "stdout", text: `Model transfer mode: NFS (${mount.source} mounted at ${mount.path}); SSH control only\n` });
+  } else {
+    const registryAddr = registryHost.ssh.host || registryHost.lanIp;
+    if (!registryAddr) throw new Error(`Model Registry host ${registryHost.id} has no reachable address configured`);
+    const rsyncSsh = "ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes -o ConnectTimeout=10";
+    try {
+      await sshExec(
+        targetSpark,
+        `${rsyncSsh} ${shQuote(`${registryHost.ssh.user}@${registryAddr}`)} true`,
+        { timeoutMs: PREFLIGHT_TIMEOUT_MS, ...commandOptions }
+      );
+    } catch (err) {
+      signal?.throwIfAborted();
+      throw new Error(
+        `${targetSpark.id} cannot reach the Model Registry host ${registryHost.id} over SSH. ` +
+          `This host needs its own SSH trust established there first (sparkDash does not provision cross-host SSH keys). ` +
+          `Underlying error: ${err.message}`
+      );
+    }
+    sourceHost = registryHost;
+    // Resolve home-relative paths in the registry's shell, not the target's HOME.
+    rsyncTransport = `--rsync-path=${shQuote(`cd ${shQuotePath(sourceDir)} && rsync`)} -e ${shQuote(`${rsyncSsh} -c ${FAST_CIPHER}`)} `;
+    sourceSpec = shQuote(`${registryHost.ssh.user}@${registryAddr}:./`);
+    options.onOutput?.({ stream: "stdout", text: `Model transfer mode: SSH (${registryHost.id})\n` });
   }
-
-  // Fast, hardware-accelerated cipher for the actual data-carrying
-  // connection(s) — see the module doc comment for the measured impact.
-  const fastRsyncSsh = `${rsyncSsh} -c ${FAST_CIPHER}`;
-  // Resolve home-relative paths in the registry's shell, not rsync's escaped
-  // source argument (which can treat "~/" literally), nor the target's HOME.
-  const rsyncPath = shQuote(`cd ${shQuotePath(sourceDir)} && rsync`);
-  const remoteSpec = shQuote(`${registryHost.ssh.user}@${registryAddr}:./`);
   const mkdirCmd = `mkdir -p ${shQuotePath(destDir)}`;
   const syncTimeout = options.timeoutMs || DEFAULT_SYNC_TIMEOUT_MS;
 
-  const files = await listSyncFiles(registryHost, sourceDir, signal);
+  const files = await listSyncFiles(sourceHost, sourceDir, signal);
   signal?.throwIfAborted();
   const shards = shardFiles(files, MAX_SYNC_SHARDS);
 
   if (shards.length <= 1) {
-    // Too few files to shard (or listing failed) — one plain whole-directory
-    // rsync still benefits from the fast cipher even without parallelism.
+    // Too few files to shard (or listing failed): one whole-directory rsync.
     await sshExec(
       targetSpark,
-      `${mkdirCmd} && rsync -aL --rsync-path=${rsyncPath} -e ${shQuote(fastRsyncSsh)} ${remoteSpec} ${shQuotePath(destDir + "/")}`,
+      `${mkdirCmd} && rsync -aL ${rsyncTransport}${sourceSpec} ${shQuotePath(destDir + "/")}`,
       { timeoutMs: syncTimeout, multiplex: false, onOutput: options.onOutput, ...commandOptions }
     );
   } else {
@@ -243,15 +293,17 @@ export async function syncModelToSpark(modelRegistry, model, targetSpark, option
         shards.map((_, idx) =>
           sshExec(
             targetSpark,
-            `rsync -aL --rsync-path=${rsyncPath} --files-from=${shQuotePath(listPaths[idx])} -e ${shQuote(fastRsyncSsh)} ${remoteSpec} ${shQuotePath(destDir + "/")}`,
+            `rsync -aL ${rsyncTransport}--files-from=${shQuotePath(listPaths[idx])} ${sourceSpec} ${shQuotePath(destDir + "/")}`,
             { timeoutMs: syncTimeout, multiplex: false, onOutput: options.onOutput, ...commandOptions }
           )
         )
       );
     } finally {
       const cleanupList = listPaths.map((p) => shQuotePath(p)).join(" ");
-      if (!signal?.aborted) await sshExec(targetSpark, `rm -f -- ${cleanupList}`, {
-        timeoutMs: PREFLIGHT_TIMEOUT_MS, ...commandOptions
+      // The transfer signal may already be aborted; cleanup must still run
+      // after all shards settle, under its own bounded control command.
+      await sshExec(targetSpark, `rm -f -- ${cleanupList}`, {
+        timeoutMs: PREFLIGHT_TIMEOUT_MS, cancelRemote: true
       }).catch(() => {}); // best-effort; leftover list files are harmless
     }
   }

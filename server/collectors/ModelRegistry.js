@@ -17,9 +17,9 @@
  * reports that — see probeStatus/statuses).
  *
  * Two files back this:
- *   - config/model-registry.json — { hostId, directory }: which tracked host
- *     (any host in SparkRegistry — Spark or otherwise) holds the canonical
- *     model files, and where.
+ *   - config/model-registry.json — { hostId, directory, nfsMounts? }: which tracked
+ *     host holds the canonical model files, and optional per-target read-only NFS
+ *     mounts used for bulk transfers (SSH still handles control).
  *   - config/models.json — the tracked model list: operator-declared entries
  *     (via Add model, always with a repo) plus reconciled discoveries (repo
  *     null until edited in).
@@ -30,6 +30,7 @@
  * cannot.
  */
 import fs from "fs";
+import path from "node:path";
 import {
   MODEL_REGISTRY_JSON_PATH,
   MODELS_JSON_PATH,
@@ -83,6 +84,32 @@ function joinRemotePath(dir, subfolder) {
 export function splitIncludePatterns(includePattern) {
   if (!includePattern) return [];
   return includePattern.split(/\s+/).filter(Boolean);
+}
+
+/** Validate and detach explicitly configured mounts; never discard a bad mount into SSH mode. */
+function validateNfsMounts(mounts, hostId, directory) {
+  if (!mounts || typeof mounts !== "object" || Array.isArray(mounts)) {
+    throw new Error("nfsMounts must be an object keyed by target host id");
+  }
+  const entries = Object.entries(mounts).map(([targetId, mount]) => {
+    if (!targetId.trim() || targetId !== targetId.trim() ||
+        !mount || typeof mount !== "object" || Array.isArray(mount)) {
+      throw new Error(`Invalid nfsMounts entry for ${targetId}`);
+    }
+    if (typeof mount.path !== "string" || !path.posix.isAbsolute(mount.path) ||
+        /[\0\r\n]/.test(mount.path)) {
+      throw new Error(`nfsMounts.${targetId}.path must be an absolute mount path`);
+    }
+    if (typeof mount.source !== "string" || /[\0\r\n]/.test(mount.source) ||
+        !/^(?:\[[^\]\s]+\]|[^:\s]+):\/[^\0\r\n]*$/.test(mount.source)) {
+      throw new Error(`nfsMounts.${targetId}.source must be an NFS server:/absolute/export source`);
+    }
+    return [targetId, { path: path.posix.normalize(mount.path).replace(/\/+$/, "") || "/", source: mount.source }];
+  });
+  if (entries.length && (!hostId || !directory)) {
+    throw new Error("nfsMounts requires a Model Registry hostId and directory");
+  }
+  return Object.fromEntries(entries);
 }
 
 
@@ -182,15 +209,22 @@ export class ModelRegistry {
   }
 
   _load() {
+    let data;
     try {
-      const raw = fs.readFileSync(MODEL_REGISTRY_JSON_PATH, "utf-8");
-      const data = JSON.parse(raw);
+      data = JSON.parse(fs.readFileSync(MODEL_REGISTRY_JSON_PATH, "utf-8"));
+    } catch {
+      // No config yet — stays at the empty default. Never assume a host/path.
+    }
+    if (data) {
       this._registryConfig = {
         hostId: typeof data.hostId === "string" && data.hostId ? data.hostId : null,
         directory: typeof data.directory === "string" ? data.directory : "",
       };
-    } catch {
-      // No config yet — stays at the empty default. Never assume a host/path.
+      if (Object.hasOwn(data, "nfsMounts")) {
+        this._registryConfig.nfsMounts = validateNfsMounts(
+          data.nfsMounts, this._registryConfig.hostId, this._registryConfig.directory
+        );
+      }
     }
     try {
       const raw = fs.readFileSync(MODELS_JSON_PATH, "utf-8");
@@ -211,15 +245,23 @@ export class ModelRegistry {
 
   // ─── Registry host + directory ───────────────────────────
   getRegistryConfig() {
-    return { ...this._registryConfig };
+    return structuredClone(this._registryConfig);
   }
 
-  /** @param {{hostId?: string|null, directory?: string}} patch */
-  setRegistryConfig({ hostId, directory }) {
-    this._registryConfig = {
-      hostId: typeof hostId === "string" && hostId.trim() ? hostId.trim() : null,
-      directory: typeof directory === "string" ? directory.trim() : "",
+  /** @param {{hostId?: string|null, directory?: string, nfsMounts?: Record<string, {path: string, source: string}>}} patch */
+  setRegistryConfig(patch) {
+    const config = {
+      hostId: typeof patch.hostId === "string" && patch.hostId.trim() ? patch.hostId.trim() : null,
+      directory: typeof patch.directory === "string" ? patch.directory.trim() : "",
     };
+    if (Object.hasOwn(patch, "nfsMounts")) {
+      config.nfsMounts = validateNfsMounts(patch.nfsMounts, config.hostId, config.directory);
+    } else if (config.hostId === this._registryConfig.hostId &&
+               config.directory === this._registryConfig.directory &&
+               this._registryConfig.nfsMounts) {
+      config.nfsMounts = this._registryConfig.nfsMounts;
+    }
+    this._registryConfig = config;
     this._saveRegistryConfig();
     return this.getRegistryConfig();
   }

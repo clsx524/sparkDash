@@ -128,6 +128,8 @@ export type SparkRole = "head" | "worker" | "standalone";
 export interface ModelRegistryConfig {
   hostId: string | null;
   directory: string;
+  /** Target host id → pre-provisioned read-only NFS mount; SSH remains the control transport. */
+  nfsMounts?: Record<string, { path: string; source: string }>;
 }
 
 /** Result of PUT /api/model-registry or POST /api/model-registry/rescan — a
