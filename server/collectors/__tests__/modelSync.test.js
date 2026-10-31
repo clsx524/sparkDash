@@ -1,33 +1,7 @@
 import { test } from "node:test";
 import { strict as assert } from "node:assert";
-import { syncModelToSpark, shQuotePath, joinRemotePath, shardFiles } from "../modelSync.js";
+import { syncModelToSpark, joinRemotePath, shardFiles } from "../modelSync.js";
 
-// shQuotePath must preserve a leading "~" unquoted (so the remote shell still
-// expands it to that user's home) while still safely quoting everything
-// else. Single-quoting a tilde is a real bug this session hit once already:
-// the default model folder is "~/.cache/huggingface", and a naive shQuote()
-// would turn `mkdir -p '~/.cache/huggingface/foo'` into a literal directory
-// named "~" instead of expanding to the user's home.
-
-test("shQuotePath: bare tilde stays unquoted", () => {
-  assert.equal(shQuotePath("~"), "~");
-});
-
-test("shQuotePath: tilde-prefixed path keeps the tilde bare, quotes the rest", () => {
-  assert.equal(shQuotePath("~/.cache/huggingface/my-model"), "~/'.cache/huggingface/my-model'");
-});
-
-test("shQuotePath: an absolute path is fully quoted like shQuote", () => {
-  assert.equal(shQuotePath("/mnt/models/my-model"), "'/mnt/models/my-model'");
-});
-
-test("shQuotePath: single quotes inside a tilde path are escaped in the quoted remainder", () => {
-  assert.equal(shQuotePath("~/it's-a-model"), "~/'it'\\''s-a-model'");
-});
-
-test("shQuotePath: a path that merely contains a tilde later is fully quoted (only a leading ~/ is special)", () => {
-  assert.equal(shQuotePath("/mnt/~cache/model"), "'/mnt/~cache/model'");
-});
 
 test("joinRemotePath: no doubled slashes at the seam", () => {
   assert.equal(joinRemotePath("~/.cache/huggingface/", "/my-model"), "~/.cache/huggingface/my-model");

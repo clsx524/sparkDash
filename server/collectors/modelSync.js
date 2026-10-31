@@ -209,7 +209,10 @@ export async function syncModelToSpark(modelRegistry, model, targetSpark, option
   // Fast, hardware-accelerated cipher for the actual data-carrying
   // connection(s) — see the module doc comment for the measured impact.
   const fastRsyncSsh = `${rsyncSsh} -c ${FAST_CIPHER}`;
-  const remoteSpec = shQuote(`${registryHost.ssh.user}@${registryAddr}:${sourceDir}/`);
+  // Resolve home-relative paths in the registry's shell, not rsync's escaped
+  // source argument (which can treat "~/" literally), nor the target's HOME.
+  const rsyncPath = shQuote(`cd ${shQuotePath(sourceDir)} && rsync`);
+  const remoteSpec = shQuote(`${registryHost.ssh.user}@${registryAddr}:./`);
   const mkdirCmd = `mkdir -p ${shQuotePath(destDir)}`;
   const syncTimeout = options.timeoutMs || DEFAULT_SYNC_TIMEOUT_MS;
 
@@ -222,7 +225,7 @@ export async function syncModelToSpark(modelRegistry, model, targetSpark, option
     // rsync still benefits from the fast cipher even without parallelism.
     await sshExec(
       targetSpark,
-      `${mkdirCmd} && rsync -aL -e ${shQuote(fastRsyncSsh)} ${remoteSpec} ${shQuotePath(destDir + "/")}`,
+      `${mkdirCmd} && rsync -aL --rsync-path=${rsyncPath} -e ${shQuote(fastRsyncSsh)} ${remoteSpec} ${shQuotePath(destDir + "/")}`,
       { timeoutMs: syncTimeout, multiplex: false, onOutput: options.onOutput, ...commandOptions }
     );
   } else {
@@ -240,7 +243,7 @@ export async function syncModelToSpark(modelRegistry, model, targetSpark, option
         shards.map((_, idx) =>
           sshExec(
             targetSpark,
-            `rsync -aL --files-from=${shQuotePath(listPaths[idx])} -e ${shQuote(fastRsyncSsh)} ${remoteSpec} ${shQuotePath(destDir + "/")}`,
+            `rsync -aL --rsync-path=${rsyncPath} --files-from=${shQuotePath(listPaths[idx])} -e ${shQuote(fastRsyncSsh)} ${remoteSpec} ${shQuotePath(destDir + "/")}`,
             { timeoutMs: syncTimeout, multiplex: false, onOutput: options.onOutput, ...commandOptions }
           )
         )
