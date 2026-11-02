@@ -6,7 +6,7 @@ import { stripAnsi } from "../util/commandOutput.js";
 
 const PHASES = new Set([
   "checking-nodes", "powering-on", "waiting-online", "checking-current-state", "stopping",
-  "confirming-stopped", "clearing-conflicts", "syncing-model", "rechecking-nodes", "starting", "health-checking", "cancelling",
+  "confirming-stopped", "clearing-conflicts", "syncing-model", "preparing", "rechecking-nodes", "starting", "health-checking", "cancelling",
 ]);
 const STATUSES = new Set(["running", "succeeded", "failed", "interrupted", "cancelled"]);
 const STAGE_STATUSES = new Set([...STATUSES, "skipped"]);

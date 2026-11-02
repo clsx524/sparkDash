@@ -1,3 +1,4 @@
+import type { DeploymentCatalog, DeploymentInput, DeploymentPreview } from "./deploymentTypes";
 import type {
   AlertChannel,
   AlertTestResult,
@@ -911,9 +912,16 @@ export function fetchRecipes(): Promise<RecipeListResponse> {
   return apiFetch("/api/recipes");
 }
 
-/** Start an Apply once; progress is persisted and announced by WS `recipeSession` summaries. */
-export function activateRecipe(id: string): Promise<RecipeActivateResponse> {
-  return apiFetch(`/api/recipes/${encodeURIComponent(id)}/activate`, { method: "POST" });
+export function fetchDeploymentCatalog(): Promise<DeploymentCatalog> {
+  return apiFetch("/api/deployment");
+}
+
+export function buildDeploymentPlan(input: DeploymentInput): Promise<DeploymentPreview> {
+  return apiFetch("/api/deployment/preview", { method: "POST", body: JSON.stringify(input) });
+}
+
+export function applyDeploymentPlan(revision: string): Promise<RecipeActivateResponse> {
+  return apiFetch("/api/deployment/apply", { method: "POST", body: JSON.stringify({ revision }) });
 }
 
 export function fetchRecipeSessions(): Promise<{ sessions: RecipeSessionSummary[] }> {

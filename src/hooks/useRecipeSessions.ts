@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  activateRecipe, cancelRecipeSession, fetchCurrentRecipeSession, fetchRecipeSession,
+  applyDeploymentPlan, cancelRecipeSession, fetchCurrentRecipeSession, fetchRecipeSession,
   fetchRecipeSessions, fetchRecipes,
 } from "../api/client";
 import type { RecipeListResponse, RecipeSessionDetail, RecipeSessionSummary } from "../api/types";
@@ -185,7 +185,7 @@ export function useRecipeSessions(open: boolean, wireSummary: RecipeSessionSumma
     setPendingId(targetId);
     setActionError(null);
     try {
-      const response = await activateRecipe(targetId);
+      const response = await applyDeploymentPlan(targetId);
       awaitingSession.current = response.sessionId;
       if (cache.current.has(response.sessionId)) awaitingSession.current = null;
       if (active.current) await refresh.current(true, true);

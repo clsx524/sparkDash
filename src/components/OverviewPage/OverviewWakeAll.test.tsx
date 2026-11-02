@@ -1,7 +1,7 @@
 import { act, useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  activateRecipe, fetchCurrentRecipeSession, fetchRecipeSession, fetchRecipeSessions, fetchRecipes, wakeAllSparks,
+  applyDeploymentPlan, fetchDeploymentCatalog, fetchCurrentRecipeSession, fetchRecipeSession, fetchRecipeSessions, fetchRecipes, wakeAllSparks,
   type BatchPowerResult,
 } from "../../api/client";
 import type { LastActiveRecipe, PowerActionState, RecipeSessionDetail, SparkSnapshot } from "../../api/types";
@@ -11,7 +11,7 @@ import { RecipesDialog } from "../RecipesDialog";
 import { OverviewPage } from "./OverviewPage";
 
 vi.mock("../../api/client", () => ({
-  activateRecipe: vi.fn(), cancelRecipeSession: vi.fn(), fetchRecipes: vi.fn(), fetchCurrentRecipeSession: vi.fn(),
+  applyDeploymentPlan: vi.fn(), fetchDeploymentCatalog: vi.fn(), cancelRecipeSession: vi.fn(), fetchRecipes: vi.fn(), fetchCurrentRecipeSession: vi.fn(),
   fetchRecipeSession: vi.fn(), fetchRecipeSessions: vi.fn(), wakeAllSparks: vi.fn(),
   shutdownAllSparks: vi.fn(), updateAllHermes: vi.fn(),
 }));
@@ -50,6 +50,7 @@ beforeEach(() => {
   vi.mocked(fetchCurrentRecipeSession).mockResolvedValue({ session: current });
   vi.mocked(fetchRecipeSessions).mockResolvedValue({ sessions: [current] });
   vi.mocked(fetchRecipeSession).mockResolvedValue({ session: current });
+  vi.mocked(fetchDeploymentCatalog).mockResolvedValue({ recipes: [], services: [], hosts: [], draft: { recipeId: null, placements: [] }, active: null, reserveGiB: 12, budgetBasis: "Conservative budgets" });
 });
 afterEach(() => vi.useRealTimers());
 
@@ -84,7 +85,7 @@ describe("Wake all recipe activation", () => {
     act(() => wakeButton(confirmation()).click());
     await flush();
     expect(wakeAllSparks).toHaveBeenCalledTimes(1);
-    expect(activateRecipe).not.toHaveBeenCalled();
+    expect(applyDeploymentPlan).not.toHaveBeenCalled();
     expect(container.querySelector('[aria-label="Current Apply"] [data-session-id]')?.getAttribute("data-session-id")).toBe(current.id);
     expect(container.querySelector('[aria-label="Apply History"]')).not.toBeNull();
     expect(container.querySelector(".ov-prog")).toBeNull();
@@ -151,7 +152,7 @@ describe("Wake all recipe activation", () => {
     act(() => wakeButton(confirmation()).click());
     await flush();
     expect(wakeAllSparks).toHaveBeenCalledTimes(1);
-    expect(activateRecipe).not.toHaveBeenCalled();
+    expect(applyDeploymentPlan).not.toHaveBeenCalled();
     expect(onOpenRecipes).not.toHaveBeenCalled();
     expect(container.querySelector('[role="status"]')?.textContent).toMatch(/power-only fleet wake/i);
   });
@@ -166,7 +167,7 @@ describe("Wake all recipe activation", () => {
     act(() => vi.advanceTimersByTime(10_000));
     expect(container.querySelector('.ov-batchmsg[role="status"]')?.textContent).toBe(message);
     expect(wakeAllSparks).toHaveBeenCalledTimes(1);
-    expect(activateRecipe).not.toHaveBeenCalled();
+    expect(applyDeploymentPlan).not.toHaveBeenCalled();
     expect(onOpenRecipes).not.toHaveBeenCalled();
   });
 

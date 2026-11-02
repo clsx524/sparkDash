@@ -65,6 +65,7 @@ import { createAlertsRuntime, registerAlertRoutes } from "./alerts/runtime.js";
 import { RecipeRegistry } from "./collectors/RecipeRegistry.js";
 import { ModelRegistry } from "./collectors/ModelRegistry.js";
 import { switchRecipe, isSwitchInFlight, RecipeSwitchError } from "./collectors/recipeActions.js";
+import { DeploymentPlanner } from "./collectors/deploymentPlan.js";
 import { RecipeSessionStore, isValidRecipeSessionId } from "./recipes/RecipeSessionStore.js";
 import { LastActiveRecipeStore } from "./recipes/LastActiveRecipeStore.js";
 import { createPowerOrchestrator } from "./power/powerOrchestrator.js";
@@ -311,6 +312,7 @@ const occupancy = createOccupancyRuntime({ listSparks: () => registry.sparks });
 const recipeRegistry = new RecipeRegistry(registry);
 // ─── Model Registry (generic model tracking/sync, distinct from recipes) ──
 const modelRegistry = new ModelRegistry(registry);
+const deploymentPlanner = new DeploymentPlanner(recipeRegistry, modelRegistry);
 const recipeSessions = new RecipeSessionStore({
   dir: RECIPE_SESSIONS_DIR,
   onChange: queueRecipeSessionBroadcast,
@@ -329,7 +331,7 @@ function lastActiveRecipeInfo() {
   if (!remembered) return null;
   return {
     id: remembered.id,
-    label: recipeRegistry.get(remembered.id)?.label || remembered.id,
+    label: recipeRegistry.get(remembered.id)?.label || (remembered.id === "services-only" ? "Standalone model services" : remembered.id),
     storageError: remembered.storageError,
   };
 }
@@ -543,7 +545,8 @@ const alertsRuntime = createAlertsRuntime({
 const app = express();
 const server = createServer(app);
 
-app.use(express.json());
+const jsonBody = express.json();
+app.use((req, res, next) => req.path.startsWith("/inference/") ? next() : jsonBody(req, res, next));
 // Registered ahead of the auth middleware: a remote browser holding no token
 // (or a stale one) must still be able to learn that it needs one.
 app.get("/api/auth/status", createHostGuardMiddleware(), (req, res) => {
@@ -2232,7 +2235,7 @@ app.post("/api/sparks/wake-all", async (req, res) => {
   if (isSwitchInFlight()) {
     return res.status(409).json({ error: "A recipe switch is in progress" });
   }
-  if (!lastActiveRecipe.get()) {
+  if (!deploymentPlanner.state.active && !lastActiveRecipe.get()) {
     try {
       const observedAt = Date.now();
       const snapshot = await recipeRegistry.list({
@@ -2247,9 +2250,9 @@ app.post("/api/sparks/wake-all", async (req, res) => {
     }
   }
   const remembered = lastActiveRecipe.get();
-  if (remembered) {
+  if (deploymentPlanner.state.active || remembered) {
     try {
-      const accepted = startRecipeApply(remembered.id);
+      const accepted = await startRecipeApply(deploymentPlanner.state.active ? deploymentPlanner.state.active.recipeId : remembered.id);
       return res.json({ success: true, ...accepted });
     } catch (err) {
       return res.status(err.status || 500).json({ error: err.message, sessionId: err.sessionId });
@@ -2455,52 +2458,48 @@ app.post("/api/recipes/sessions/:id/cancel", async (req, res) => {
  * many minutes and is reported through persisted Apply sessions and WS `recipeSession`,
  * not in this response.
  */
-function startRecipeApply(recipeId) {
-  const recipe = recipeRegistry.get(recipeId);
-  if (!recipe) {
-    throw Object.assign(new RecipeSwitchError(`Recipe not found: ${recipeId}`), { status: 404 });
-  }
-  if (isSwitchInFlight()) {
-    throw Object.assign(new RecipeSwitchError("A recipe switch is already in progress"), { status: 409 });
+async function startRecipeApply(recipeId, preparedPlan = null) {
+  if (isSwitchInFlight() || recipeApply) {
+    throw Object.assign(new RecipeSwitchError("An Apply is already in progress"), { status: 409 });
   }
   if (powerOrchestrator.isInFlight()) {
     throw Object.assign(new RecipeSwitchError("A power action is already in progress"), { status: 409 });
   }
-  let requiredNodes = [];
-  let configurationError = null;
-  try {
-    requiredNodes = recipeRegistry.resolveRequiredNodes(recipe);
-  } catch (err) {
-    configurationError = err;
+  const input = preparedPlan?.input ?? { ...(deploymentPlanner.state.active ?? deploymentPlanner.state.draft), recipeId };
+  const plan = deploymentPlanner.compile(input);
+  if (preparedPlan && (plan.revision !== preparedPlan.revision || deploymentPlanner.compile(deploymentPlanner.state.draft).revision !== plan.revision)) {
+    throw Object.assign(new RecipeSwitchError("Plan configuration changed; build the plan again"), { status: 409 });
   }
+  if (isSwitchInFlight() || recipeApply || powerOrchestrator.isInFlight()) {
+    throw Object.assign(new RecipeSwitchError("Another deployment or power action started"), { status: 409 });
+  }
+  const recipe = plan.target;
   const secrets = registry.sparks.flatMap((spark) => [
     spark.ssh?.password, spark.powerToken, ...Object.values(spark.llmApiKeys || {}),
   ]).filter(Boolean);
   if (process.env.SPARKDASH_TOKEN) secrets.push(process.env.SPARKDASH_TOKEN);
-  let session;
-  try {
-    session = recipeSessions.start({
-      targetId: recipe.id, label: recipe.label, tp: recipe.tp,
-      requiredNodes: requiredNodes.map((spark) => ({ id: spark.id, name: spark.name || spark.id })),
-    }, { secrets });
-  } catch (err) {
-    throw new Error(`Cannot persist Apply session: ${err.message}`);
-  }
+  const session = recipeSessions.start({
+    targetId: recipe.id, label: recipe.label, tp: recipe.tp,
+    requiredNodes: plan.requiredNodes.map((spark) => ({ id: spark.id, name: spark.name || spark.id })),
+  }, { secrets });
   const onLog = (line) => recipeSessions.appendLog(session.id, line);
   const onProgress = (state) => {
     const updated = recipeSessions.recordProgress(session.id, state);
     if (state.phase === "done" && updated?.status === "succeeded") lastActiveRecipe.remember(recipe.id);
   };
-  if (configurationError) {
-    onProgress({ phase: "checking-nodes" });
-    onProgress({ phase: "failed", error: configurationError.message });
-    throw Object.assign(new RecipeSwitchError(recipeSessions.summary().error), {
-      status: 400, sessionId: session.id,
-    });
-  }
   const operation = { id: session.id, controller: new AbortController(), settled: null };
   recipeApply = operation;
-  const applying = switchRecipe(recipeRegistry, modelRegistry, recipeId, onProgress, {
+  const applying = switchRecipe(recipeRegistry, modelRegistry, recipe.id, onProgress, {
+    plan,
+    ownedContainers: [...deploymentPlanner.services.map((service) => service.id), "drama-tts", "semif"],
+    cleanupHostIds: [...(deploymentPlanner.state.active?.placements.map((item) => item.sparkId) || []), modelRegistry.getRegistryConfig().hostId].filter(Boolean),
+    commitPlan: () => deploymentPlanner.commit(plan),
+    validatePlan: async () => {
+      const preview = await deploymentPlanner.preview(plan.input, { signal: operation.controller.signal });
+      if (!preview.valid || preview.revision !== plan.revision) {
+        throw new RecipeSwitchError(preview.errors.join("; ") || "Plan definitions changed before deployment");
+      }
+    },
     signal: operation.controller.signal,
     getOnline: (id) => Boolean(monitors.get(id)?.online),
     checkOnlineNow: async (id) => {
@@ -2517,29 +2516,14 @@ function startRecipeApply(recipeId) {
         ? { phase: "cancelled", message: "Apply cancelled; already-started services and staged weights were left in place." }
         : { phase: "failed", error: err.message });
     }
-    // switchRecipe already emitted a "failed" progress state for real switch failures;
-    // this only catches the class of error it throws before entering the state machine
-    // (unknown recipe id, switch already in flight — the isSwitchInFlight() check above
-    // makes the latter a race rather than the common case).
-    if (operation.controller.signal.aborted) return;
-    if (err instanceof RecipeSwitchError) {
-      console.warn(`[recipes] switch to ${recipeId} failed: ${err.message}`);
-    } else {
-      console.error(`[recipes] switch to ${recipeId} failed unexpectedly:`, err);
-    }
+    if (!operation.controller.signal.aborted) console.warn(`[deployment] ${recipe.id}: ${err.message}`);
   }).finally(() => {
     if (recipeApply === operation) recipeApply = null;
   });
-  return { started: true, targetId: recipeId, sessionId: session.id };
+  return { started: true, targetId: recipe.id, sessionId: session.id };
 }
 
-app.post("/api/recipes/:id/activate", (req, res) => {
-  try {
-    res.json(startRecipeApply(req.params.id));
-  } catch (err) {
-    res.status(err.status || 500).json({ error: err.message, sessionId: err.sessionId });
-  }
-});
+deploymentPlanner.register(app, startRecipeApply);
 
 // ─── Model Registry (generic model tracking/sync) ─────────
 // Which tracked host holds canonical model files, and where. No default is

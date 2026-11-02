@@ -13,14 +13,11 @@
  * One more OPTIONAL per-node field ties a recipe into Model Registry orchestration (see
  * recipeActions.js's syncModelsForRecipe):
  *   - `modelIds`: array of ids tracked in ModelRegistry (config/models.json). When set,
- *     switchRecipe pulls each one onto this node's own `modelFolder` (using rsync's
- *     quick check, one at a time) before starting it. Explicit model sync still verifies
- *     SHA256. A node needing a weight tree plus a separately-sourced component lists
- *     multiple ids; omit entirely for a node that provisions its weights another way.
- * Not assumed present — a recipe with no model tracked yet works exactly as before,
- * unchanged. Everything else about a node's files (.env, checked-out repo, patches) is
- * ansible's job, applied by the relevant playbook run ahead of any activate — switchRecipe
- * only starts/stops/health-checks whatever is already provisioned there.
+ *     switchRecipe stages and verifies each selected artifact before preparing
+ *     and starting its node. `modelFiles` can restrict a model to this rank's
+ *     published files. Multiple ids support separately sourced components.
+ * Host infrastructure and pinned checkouts remain Ansible's job. SparkDash
+ * owns preparation and the ordered small-service/large-model lifecycle.
  *
  * Active state is NEVER trusted from a stored flag — it is inferred live, every call, by
  * SSHing each recipe's node(s) and running that recipe's own statusCmd. A flag can drift from

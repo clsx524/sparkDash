@@ -1,0 +1,112 @@
+[
+  {
+    "id": "qwen3-embedding",
+    "label": "Qwen3 Embedding 0.6B",
+    "defaultHost": "spark-2",
+    "port": 8889,
+    "healthPath": "/health",
+    "memoryGiB": 3,
+    "startupGiB": 4,
+    "diskGiB": 12,
+    "image": "ghcr.io/huggingface/text-embeddings-inference:121-1.9",
+    "modelIds": [
+      "Qwen3-Embedding-0.6B"
+    ],
+    "args": [
+      "--model-id",
+      "/models/Qwen3-Embedding-0.6B",
+      "--port",
+      "8889",
+      "--max-concurrent-requests",
+      "4"
+    ]
+  },
+  {
+    "id": "qwen3-asr",
+    "label": "Qwen3 ASR 1.7B NVFP4",
+    "defaultHost": "spark-1",
+    "port": 8892,
+    "healthPath": "/v1/models",
+    "memoryGiB": 8,
+    "startupGiB": 9,
+    "diskGiB": 40,
+    "image": "vllm/vllm-openai:v0.31.0-aarch64",
+    "entrypoint": "vllm",
+    "modelIds": [
+      "Qwen3-ASR-1.7B-NVFP4"
+    ],
+    "args": [
+      "serve",
+      "/models/Qwen3-ASR-1.7B-NVFP4",
+      "--served-model-name",
+      "qwen3-asr",
+      "--gpu-memory-utilization",
+      "0.05",
+      "--max-model-len",
+      "4096",
+      "--max-num-seqs",
+      "4",
+      "--host",
+      "0.0.0.0",
+      "--port",
+      "8892"
+    ]
+  },
+  {
+    "id": "qwen3-tts",
+    "label": "Qwen3 TTS 1.7B NVFP4 \u00b7 preset voices",
+    "defaultHost": "spark-2",
+    "port": 8891,
+    "healthPath": "/v1/audio/voices",
+    "memoryGiB": 9,
+    "startupGiB": 10,
+    "diskGiB": 55,
+    "image": "vllm/vllm-omni:v0.30.0-aarch64",
+    "entrypoint": "/bin/bash",
+    "modelIds": [
+      "Qwen3-TTS-12Hz-1.7B-NVFP4"
+    ],
+    "args": [
+      "-c",
+      "python3 /config/qwen-tts-stream.py && exec vllm serve /models/Qwen3-TTS-12Hz-1.7B-NVFP4 --served-model-name qwen3-tts --omni --trust-remote-code --deploy-config /config/qwen-tts-deploy.yaml --host 0.0.0.0 --port 8891"
+    ]
+  },
+  {
+    "id": "qwen-image",
+    "label": "Qwen Image 2.1 Turbo",
+    "defaultHost": null,
+    "port": 8893,
+    "healthPath": "/",
+    "memoryGiB": 13,
+    "startupGiB": 14,
+    "diskGiB": 60,
+    "image": "qwen-image-sd:local",
+    "dockerfile": "qwen-image-Dockerfile",
+    "modelIds": [
+      "Qwen-Image-2.1-Turbo-Denoiser",
+      "Qwen-Image-2.1-Turbo-Encoder",
+      "Qwen-Image-2.1-VAE"
+    ],
+    "args": [
+      "--diffusion-model",
+      "/models/Qwen-Image-2.1-Turbo-Denoiser/Qwen-Image-2.1-Turbo-AD-Q4_K.gguf",
+      "--llm",
+      "/models/Qwen-Image-2.1-Turbo-Encoder/Qwen-Image-2.1-Turbo-Uncensored-AD-Q4_K.gguf",
+      "--vae",
+      "/models/Qwen-Image-2.1-VAE/vae/qwen_image_2.1_vae_bf16.safetensors",
+      "--diffusion-fa",
+      "--steps",
+      "8",
+      "--cfg-scale",
+      "1.0",
+      "--sampling-method",
+      "euler",
+      "--sigmas",
+      "1.0,0.978453,0.95418,0.926626,0.89508,0.845148,0.704534,0.414568,0.0",
+      "--listen-ip",
+      "0.0.0.0",
+      "--listen-port",
+      "8893"
+    ]
+  }
+]

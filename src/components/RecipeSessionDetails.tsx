@@ -11,6 +11,7 @@ const PHASE_LABEL: Record<string, string> = {
   "confirming-stopped": "Confirming it stopped",
   "clearing-conflicts": "Clearing stray containers",
   "syncing-model": "Syncing model files",
+  preparing: "Preparing images and runtime files",
   "rechecking-nodes": "Rechecking required nodes",
   starting: "Starting target recipe",
   "health-checking": "Waiting for health",

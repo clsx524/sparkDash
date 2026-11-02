@@ -1,14 +1,15 @@
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  activateRecipe, cancelRecipeSession, fetchCurrentRecipeSession, fetchRecipeSession, fetchRecipeSessions, fetchRecipes,
+  applyDeploymentPlan, buildDeploymentPlan, fetchDeploymentCatalog, cancelRecipeSession, fetchCurrentRecipeSession, fetchRecipeSession, fetchRecipeSessions, fetchRecipes,
 } from "../api/client";
 import type { RecipeActivateResponse, RecipeInfo, RecipeSessionDetail, RecipeSessionStage } from "../api/types";
 import { flush, render } from "../testing/render";
 import { RecipesDialog } from "./RecipesDialog";
 
 vi.mock("../api/client", () => ({
-  activateRecipe: vi.fn(), cancelRecipeSession: vi.fn(), fetchRecipes: vi.fn(), fetchCurrentRecipeSession: vi.fn(),
+  applyDeploymentPlan: vi.fn(), buildDeploymentPlan: vi.fn(), fetchDeploymentCatalog: vi.fn(),
+  cancelRecipeSession: vi.fn(), fetchRecipes: vi.fn(), fetchCurrentRecipeSession: vi.fn(),
   fetchRecipeSession: vi.fn(), fetchRecipeSessions: vi.fn(),
 }));
 
@@ -48,13 +49,21 @@ beforeEach(() => {
   vi.resetAllMocks();
   localStorage.clear();
   vi.useFakeTimers();
+  vi.mocked(fetchDeploymentCatalog).mockResolvedValue({
+    recipes: [glm, deepseek], services: [],
+    hosts: [{ id: "one", name: "Spark 1", modelFolder: "/models" }, { id: "two", name: "Spark 2", modelFolder: "/models" }],
+    draft: { recipeId: "glm", placements: [] }, active: null, reserveGiB: 12, budgetBasis: "Fixture budgets",
+  });
+  vi.mocked(buildDeploymentPlan).mockResolvedValue({
+    input: { recipeId: "glm", placements: [] }, revision: "plan-v1", valid: true, errors: [], hosts: [], steps: [],
+  });
   vi.mocked(fetchRecipes).mockResolvedValue({
     recipes: [glm, deepseek], activeId: null, conflict: false, conflictIds: [], session: null, lastActiveRecipe: null,
   });
   vi.mocked(fetchCurrentRecipeSession).mockResolvedValue({ session: null });
   vi.mocked(fetchRecipeSessions).mockResolvedValue({ sessions: [] });
   vi.mocked(fetchRecipeSession).mockImplementation(async (id) => ({ session: session(id) }));
-  vi.mocked(activateRecipe).mockResolvedValue({ started: true, targetId: glm.id, sessionId: "new" });
+  vi.mocked(applyDeploymentPlan).mockResolvedValue({ started: true, targetId: glm.id, sessionId: "new" });
 });
 afterEach(() => vi.useRealTimers());
 
@@ -65,21 +74,19 @@ function cancelButton(container: HTMLElement): HTMLButtonElement | undefined {
 }
 
 describe("persistent recipe Apply views", () => {
-  it("preserves offline activation, TP and dependency display, and guards pending double clicks", async () => {
+  it("requires a built plan and prevents pending double applies", async () => {
     const pending = deferred<RecipeActivateResponse>();
-    vi.mocked(activateRecipe).mockReturnValue(pending.promise);
+    vi.mocked(applyDeploymentPlan).mockReturnValue(pending.promise);
     const { container } = render(<RecipesDialog open onClose={onClose} recipeSession={null} />);
     await flush();
-    const buttons = [...container.querySelectorAll<HTMLButtonElement>('[aria-label="Choose recipe"] button')];
-    expect(buttons).toHaveLength(2);
-    expect(buttons[0].closest(".rounded.border")?.textContent).toContain("TP2");
-    expect(buttons[0].closest(".rounded.border")?.textContent).toContain("Required nodes: head, worker");
-    expect(buttons[1].closest(".rounded.border")?.textContent).toContain("TP3");
-    expect(buttons[1].closest(".rounded.border")?.textContent).toContain("Required nodes: head, worker, atom");
-    expect(buttons[0].disabled).toBe(false);
-    act(() => { buttons[0].click(); buttons[0].click(); buttons[1].click(); });
-    expect(activateRecipe).toHaveBeenCalledTimes(1);
-    expect(activateRecipe).toHaveBeenCalledWith("glm");
+    const buttons = [...container.querySelectorAll<HTMLButtonElement>('[aria-label="Deployment topology planner"] button')];
+    expect(buttons[1].disabled).toBe(true);
+    act(() => buttons[0].click());
+    await flush();
+    expect(buttons[1].disabled).toBe(false);
+    act(() => { buttons[1].click(); buttons[1].click(); });
+    expect(applyDeploymentPlan).toHaveBeenCalledTimes(1);
+    expect(applyDeploymentPlan).toHaveBeenCalledWith("plan-v1");
     expect(buttons.every((button) => button.disabled)).toBe(true);
     pending.resolve({ started: true, targetId: "glm", sessionId: "new" });
     await flush();
@@ -98,7 +105,7 @@ describe("persistent recipe Apply views", () => {
     expect(container.querySelector('[data-testid="history-detail"]')?.textContent).toContain("Old model");
     expect(container.querySelector('[data-testid="history-detail"]')?.textContent).toContain("Server restarted");
     expect(container.querySelectorAll('[aria-label="Prior Apply sessions"] button')).toHaveLength(1);
-    expect(activateRecipe).not.toHaveBeenCalled();
+    expect(applyDeploymentPlan).not.toHaveBeenCalled();
   });
 
   it("keeps live Current independent of selected history, including button authority", async () => {
@@ -114,14 +121,14 @@ describe("persistent recipe Apply views", () => {
     expect(localStorage.getItem("recipe-apply-history-selection")).toBe("old");
     expect(container.querySelector('[aria-label="Current Apply"]')?.textContent).toContain("Pending nodes: Spark 2");
     expect(container.querySelector('[data-testid="history-detail"]')?.textContent).toContain("Old model");
-    expect([...container.querySelectorAll<HTMLButtonElement>('[aria-label="Choose recipe"] button')].every((button) => button.disabled)).toBe(true);
+    expect([...container.querySelectorAll<HTMLButtonElement>('[aria-label="Deployment topology planner"] button')].every((button) => button.disabled)).toBe(true);
     const complete = { ...live, version: 2, status: "succeeded" as const, finishedAt: 4000 };
     vi.mocked(fetchRecipeSession).mockImplementation(async (id) => ({ session: id === old.id ? old : complete }));
     act(() => root.render(<RecipesDialog open onClose={onClose} recipeSession={complete} />));
     await flush();
     expect(container.querySelector('[aria-label="Current Apply"] [role="status"]')?.textContent).toBe("succeeded");
     expect(container.querySelector('[data-testid="history-detail"]')?.textContent).toContain("Old model");
-    expect([...container.querySelectorAll<HTMLButtonElement>('[aria-label="Choose recipe"] button')].every((button) => !button.disabled)).toBe(true);
+    expect(container.querySelector<HTMLButtonElement>('[aria-label="Deployment topology planner"] button')?.disabled).toBe(false);
   });
 
   it("cancels only live Current with history selected, locks pending clicks, and refreshes terminal state", async () => {
@@ -146,7 +153,7 @@ describe("persistent recipe Apply views", () => {
     expect(cancelRecipeSession).toHaveBeenCalledWith(live.id);
     expect(button.disabled).toBe(true);
     expect(button.textContent).toBe("Cancelling…");
-    expect([...container.querySelectorAll<HTMLButtonElement>('[aria-label="Choose recipe"] button')].every((entry) => entry.disabled)).toBe(true);
+    expect([...container.querySelectorAll<HTMLButtonElement>('[aria-label="Deployment topology planner"] button')].every((entry) => entry.disabled)).toBe(true);
 
     const cancelled = session(live.id, {
       version: 3, status: "cancelled", phase: "cancelled", finishedAt: 4000,
@@ -164,8 +171,8 @@ describe("persistent recipe Apply views", () => {
     expect(container.textContent).toContain("Waiting stopped");
     expect(container.querySelector('[data-testid="history-detail"]')?.textContent).toContain("Old model");
     expect(fetchRecipes).toHaveBeenCalledTimes(recipeReads + 1);
-    expect([...container.querySelectorAll<HTMLButtonElement>('[aria-label="Choose recipe"] button')].every((entry) => !entry.disabled)).toBe(true);
-    expect(activateRecipe).not.toHaveBeenCalled();
+    expect(container.querySelector<HTMLButtonElement>('[aria-label="Deployment topology planner"] button')?.disabled).toBe(false);
+    expect(applyDeploymentPlan).not.toHaveBeenCalled();
   });
 
   it("recovers from a cancellation error and keeps server-reported cancelling disabled after reopening", async () => {
@@ -179,7 +186,7 @@ describe("persistent recipe Apply views", () => {
     await flush();
     expect(container.querySelector('[aria-label="Current Apply"] [role="alert"]')?.textContent).toContain("Could not cancel Apply: Connection lost");
     expect(cancelButton(container)?.disabled).toBe(false);
-    expect([...container.querySelectorAll<HTMLButtonElement>('[aria-label="Choose recipe"] button')].every((entry) => entry.disabled)).toBe(true);
+    expect([...container.querySelectorAll<HTMLButtonElement>('[aria-label="Deployment topology planner"] button')].every((entry) => entry.disabled)).toBe(true);
 
     const post = deferred<{ session: RecipeSessionDetail }>();
     vi.mocked(cancelRecipeSession).mockReturnValueOnce(post.promise);
@@ -238,14 +245,14 @@ describe("persistent recipe Apply views", () => {
     act(() => root.render(<RecipesDialog open onClose={onClose} recipeSession={done} />));
     await flush();
     expect(cancelButton(container)).toBeUndefined();
-    const applyButtons = [...container.querySelectorAll<HTMLButtonElement>('[aria-label="Choose recipe"] button')];
+    const applyButtons = [...container.querySelectorAll<HTMLButtonElement>('[aria-label="Deployment topology planner"] button')];
     expect(applyButtons.every((entry) => entry.disabled)).toBe(true);
     act(() => applyButtons[0].click());
-    expect(activateRecipe).not.toHaveBeenCalled();
+    expect(applyDeploymentPlan).not.toHaveBeenCalled();
     post.resolve({ session: done });
     await flush();
     expect(container.querySelector('[aria-label="Current Apply"] [role="status"]')?.textContent).toBe("succeeded");
-    expect(applyButtons.every((entry) => !entry.disabled)).toBe(true);
+    expect(applyButtons[0].disabled).toBe(false);
   });
 
   it("ignores a late cancellation result after closing and reopening onto a newer Apply", async () => {
@@ -320,17 +327,18 @@ describe("persistent recipe Apply views", () => {
     await flush();
     expect(fetchRecipeSession).toHaveBeenLastCalledWith("live", 2);
     expect(container.querySelectorAll('[aria-label="Waiting for health logs"] > div')).toHaveLength(2);
-    expect(activateRecipe).not.toHaveBeenCalled();
+    expect(applyDeploymentPlan).not.toHaveBeenCalled();
   });
 
-  it("handles completion before the POST returns and retains same-target Refresh", async () => {
-    vi.mocked(fetchRecipes).mockResolvedValue({ recipes: [glm], activeId: "glm", conflict: false, conflictIds: [], session: null, lastActiveRecipe: null });
+  it("handles completion before the Apply POST returns and permits reapplying the plan", async () => {
     const post = deferred<RecipeActivateResponse>();
-    vi.mocked(activateRecipe).mockReturnValue(post.promise);
+    vi.mocked(applyDeploymentPlan).mockReturnValue(post.promise);
     const { container, root } = render(<RecipesDialog open onClose={onClose} recipeSession={null} />);
     await flush();
-    const button = container.querySelector<HTMLButtonElement>('[aria-label="Choose recipe"] button')!;
-    expect(button.textContent).toBe("Refresh");
+    const buttons = [...container.querySelectorAll<HTMLButtonElement>('[aria-label="Deployment topology planner"] button')];
+    act(() => buttons[0].click());
+    await flush();
+    const button = buttons[1];
     act(() => button.click());
     const done = session("quick", { status: "succeeded", finishedAt: 2000 });
     vi.mocked(fetchCurrentRecipeSession).mockResolvedValue({ session: done });
@@ -341,8 +349,7 @@ describe("persistent recipe Apply views", () => {
     await flush();
     expect(container.querySelector('[aria-label="Current Apply"] [role="status"]')?.textContent).toBe("succeeded");
     expect(button.disabled).toBe(false);
-    expect(button.textContent).toBe("Refresh");
-    expect(activateRecipe).toHaveBeenCalledTimes(1);
+    expect(applyDeploymentPlan).toHaveBeenCalledTimes(1);
   });
 
   it("ignores a late hydration response from a closed dialog and restores on reopening", async () => {
@@ -358,6 +365,6 @@ describe("persistent recipe Apply views", () => {
     await flush();
     expect(container.querySelector('[aria-label="Current Apply"]')?.textContent).toContain("Fresh session");
     expect(container.textContent).not.toContain("Stale session");
-    expect(activateRecipe).not.toHaveBeenCalled();
+    expect(applyDeploymentPlan).not.toHaveBeenCalled();
   });
 });

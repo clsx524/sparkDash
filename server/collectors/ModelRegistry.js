@@ -104,7 +104,11 @@ function validateNfsMounts(mounts, hostId, directory) {
         !/^(?:\[[^\]\s]+\]|[^:\s]+):\/[^\0\r\n]*$/.test(mount.source)) {
       throw new Error(`nfsMounts.${targetId}.source must be an NFS server:/absolute/export source`);
     }
-    return [targetId, { path: path.posix.normalize(mount.path).replace(/\/+$/, "") || "/", source: mount.source }];
+    if (mount.transport !== undefined && !["tcp", "rdma"].includes(mount.transport)) {
+      throw new Error(`Invalid NFS transport for ${targetId}`);
+    }
+    return [targetId, { path: path.posix.normalize(mount.path).replace(/\/+$/, "") || "/", source: mount.source,
+      ...(mount.transport ? { transport: mount.transport } : {}) }];
   });
   if (entries.length && (!hostId || !directory)) {
     throw new Error("nfsMounts requires a Model Registry hostId and directory");
@@ -185,7 +189,8 @@ export async function fetchHfManifest(repo, revision) {
     if (!Array.isArray(entries)) break;
     for (const entry of entries) {
       if (entry?.type === "file" && entry?.lfs?.oid && typeof entry.path === "string") {
-        manifest.push({ path: entry.path, sha256: String(entry.lfs.oid).toLowerCase() });
+        manifest.push({ path: entry.path, sha256: String(entry.lfs.oid).toLowerCase(),
+          ...(Number.isSafeInteger(entry.size) ? { size: entry.size } : {}) });
       }
     }
     // RFC5988 Link header pagination, same convention HF uses elsewhere.
@@ -621,7 +626,7 @@ export class ModelRegistry {
       // if the hf_transfer extra is installed — silently ignored otherwise, never an
       // error), and --max-workers lets multiple files download concurrently. Confirmed
       // live 2026-09-13: 6.3 MB/s without either, 21.3 MB/s with both, same repo/files.
-      const downloadCmd = `HF_HUB_ENABLE_HF_TRANSFER=1 hf download ${shQuote(model.repo)} --revision ${shQuote(model.revision)}${includeArgs} --local-dir ${shQuotePath(dir)} --max-workers 8`;
+      const downloadCmd = `HF_HUB_ENABLE_HF_TRANSFER=1 hf download ${shQuote(model.repo)} --revision ${shQuote(model.revision)}${includeArgs} --local-dir ${shQuotePath(dir)} --cache-dir ${shQuotePath(dir + "/.cache/hub")} --max-workers 8`;
 
       // The download command above blocks (over SSH) until the whole transfer finishes —
       // for a multi-hundred-GB fetch that's hours with the job's phase never changing.

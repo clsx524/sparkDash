@@ -5,9 +5,9 @@ import path from "node:path";
  * A test that spawns `server/index.js` must pass these (pointing into a temp dir),
  * or it reads and writes the real install's files: a "running" bench checkpoint
  * would be marked interrupted, an archive moved aside, and so on.
- * `isolatedEnv.test.js` fails when server code starts using a path variable missing here.
  */
 export const CONFIG_PATH_VARS = [
+  "DEPLOYMENT_PLAN_JSON_PATH",
   "SPARKS_JSON_PATH",
   "SPARKS_SECRETS_PATH",
   "SECRETS_KEY_PATH",

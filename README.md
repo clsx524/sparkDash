@@ -1148,16 +1148,20 @@ SparkDash does not hardcode Kasa or any other controller. Each Spark can carry a
 
 ### Recipe activation and node readiness
 
-**Recipes → Activate** (or **Refresh** for the active recipe) can be used while
-compute nodes are offline. Each definition in `server/config/recipes.json`
-declares `tp` and `requiredNodes` separately from its launcher commands:
+**Recipes → Deployment topology planner** selects a large-model recipe and
+small-service placements. Drag cards between hosts or use their selectors, then
+**Build plan** to measure host capacity and **Apply plan** to execute the built
+revision. Distributed ranks retain their explicit physical topology. Definitions
+in `server/config/recipes.json` declare `tp` and `requiredNodes` separately from
+launcher commands; `server/config/services.json` declares small runtimes.
 
 | Recipe | TP | Required physical nodes |
 |--------|----|-------------------------|
 | GLM-5.3-Flash EXL3 | 2 | Head (`spark-1`), worker (`spark-2`) |
 | Qwen3.8-Flash-Next | 2 | Head (`spark-1`), worker (`spark-2`) |
 | MiniMax H3 | 1 | Worker (`spark-2`) |
-| DeepSeek-V4.1-Flash | 3 | Head (`spark-1`), worker (`spark-2`), Atom (`atom`) |
+| DeepSeek V4.1 Flash · LakyFx v4.0.2 / TP3 1.2.8 (default) | 3 | Head (`spark-1`), worker (`spark-2`), Atom (`atom`) |
+| DeepSeek V4.1 Flash · MiaAI | 2 | Head (`spark-1`), worker (`spark-2`) |
 
 The shipped fleet definitions use explicit Spark IDs for both dependencies and
 launcher targets: `spark-1`, `spark-2`, and `atom`. Multiple nodes can therefore have
@@ -1176,19 +1180,28 @@ selectors and launcher `nodes[].sparkId` in the recipe definition. Overrides via
   activation without running stop, cleanup, model-sync or start commands. Progress
   identifies pending nodes. A final reachability check before starting catches
   a dependency that dropped during the switch.
-- GLM does not wake or wait for Atom. Unrelated offline nodes are excluded from
-  recipe-status probes and container cleanup. Fleet power actions and recipe
-  activation cannot run concurrently.
-- Apply skips **all SHA256 verification**. If manifest-listed model files are
-  already present and nonempty on the target, a quick target-only check skips
-  registry access and transfer entirely, allowing GLM with a powered-off Atom
-  registry. Missing files (or a missing manifest) retain the normal rsync
-  quick-check/transfer, which requires the registry host to be reachable.
-  Stage weights beforehand through **Model Registry → Sync** to avoid that
-  dependency; explicit Sync still performs checksum verification.
-- The fast path checks presence, not integrity. Normal stop/conflict cleanup,
-  launcher commands, and model-server health checks remain in place; model loading
-  still takes the time required by the model and hardware.
+- A plan wakes its compute/service hosts and the canonical registry host.
+  Wake all restores the last committed plan, including services-only plans;
+  capacity is revalidated after hosts are online and before any stop.
+- Build combines conservative runtime budgets, startup overhead and a 12 GiB
+  reserve against measured total RAM. Disk checks account for staged data and
+  explicitly planned alternate-DeepSeek eviction. These are estimates, not
+  measured peak guarantees; Apply rechecks actual available memory before starts.
+- Apply validates canonical artifacts and transfer prerequisites before stopping
+  models, removes only explicitly owned model containers, stages selected files
+  with SHA256 verification, prepares images/runtime assets, then starts and
+  health-checks small services sequentially before the large model. Followers
+  precede the head; native TP3 readiness also requires `warming=false`.
+- The successful draft is committed to private `config/deployment.json`
+  (`DEPLOYMENT_PLAN_JSON_PATH` overrides it). Stable streaming routes under
+  `/inference/{embeddings,tts,asr,images}` use only committed placements and return
+  503 when unassigned. A draft never changes serving routes.
+- The default includes Qwen ASR on Spark 1 and Qwen TTS/embedding on Spark 2.
+  Qwen Image is available but unassigned. Drama is disabled. Canonical weights
+  stay on Atom; only the selected DeepSeek cache is kept on Spark 1/2.
+- Optional NFS mappings may require `"transport": "rdma"`. Sync then requires
+  the exact read-only source with `proto=rdma`; a TCP mount fails without
+  fallback. Host modules, service configuration and mounts remain Ansible's job.
 
 #### Persistent Apply sessions
 
@@ -1247,7 +1260,9 @@ are visible; inability to persist a new session prevents starting its Apply.
 
 | API | Purpose |
 |-----|---------|
-| `POST /api/recipes/:id/activate` | Start Apply; returns `sessionId` with the accepted target |
+| `GET /api/deployment` | Catalog, draft, committed placements and resource budgets |
+| `POST /api/deployment/preview` | Validate/measure and save a draft; returns its revision and ordered steps |
+| `POST /api/deployment/apply` | Apply the built `{ revision }`; stale revisions return 409, accepted plans return `sessionId` |
 | `POST /api/recipes/sessions/:id/cancel` | Cancel that running Apply and return its settled session; finished sessions are returned unchanged |
 | `GET /api/recipes/sessions/current` | Latest session, including entered stages and retained output |
 | `GET /api/recipes/sessions` | Terminal-session summaries, newest first |

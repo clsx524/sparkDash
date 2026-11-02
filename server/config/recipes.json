@@ -1,10 +1,110 @@
 [
   {
+    "id": "deepseek-v41-lakyfx-tp3",
+    "label": "DeepSeek V4.1 Flash \u00b7 LakyFx v4.0.2 / TP3 1.2.8",
+    "group": "distributed-text-gen",
+    "tp": 3,
+    "requiredNodes": [
+      {
+        "sparkId": "spark-1"
+      },
+      {
+        "sparkId": "spark-2"
+      },
+      {
+        "sparkId": "atom"
+      }
+    ],
+    "resources": {
+      "spark-1": {
+        "memoryGiB": 100,
+        "diskGiB": 270
+      },
+      "spark-2": {
+        "memoryGiB": 92,
+        "diskGiB": 270
+      },
+      "atom": {
+        "memoryGiB": 92,
+        "diskGiB": 130
+      }
+    },
+    "nodes": [
+      {
+        "role": "rank-0",
+        "sparkId": "spark-1",
+        "workdir": "~/.local/share/sparkdash-models",
+        "runtimeId": "deepseek-v41-lakyfx-tp3",
+        "prepareCmd": "python3 ~/.local/share/sparkdash-models/model-runtime.py prepare deepseek-v41-lakyfx-tp3",
+        "startCmd": "python3 ~/.local/share/sparkdash-models/model-runtime.py start deepseek-v41-lakyfx-tp3",
+        "stopCmd": "python3 ~/.local/share/sparkdash-models/model-runtime.py stop deepseek-v41-lakyfx-tp3",
+        "statusCmd": "python3 ~/.local/share/sparkdash-models/model-runtime.py status deepseek-v41-lakyfx-tp3",
+        "runningPattern": "^running$",
+        "containerName": "deepseek-lakyfx-rank0",
+        "modelIds": [
+          "DeepSeek-V4.1-Flash-1017-EXL3-3.5bpw-TensorFold"
+        ],
+        "modelFiles": {
+          "DeepSeek-V4.1-Flash-1017-EXL3-3.5bpw-TensorFold": "models/TF351-1017/* rank-cache/TF351-1017/rank0of3.* engram-tp3/rank0.sparse.tar engram-tp3/rank0/SOURCE.json RELEASE-MANIFEST.json"
+        },
+        "startOrder": 20,
+        "llmPort": 8888,
+        "waitForWarmup": true,
+        "healthTimeoutMs": 1800000
+      },
+      {
+        "role": "rank-1",
+        "sparkId": "spark-2",
+        "workdir": "~/.local/share/sparkdash-models",
+        "runtimeId": "deepseek-v41-lakyfx-tp3",
+        "prepareCmd": "python3 ~/.local/share/sparkdash-models/model-runtime.py prepare deepseek-v41-lakyfx-tp3",
+        "startCmd": "python3 ~/.local/share/sparkdash-models/model-runtime.py start deepseek-v41-lakyfx-tp3",
+        "stopCmd": "python3 ~/.local/share/sparkdash-models/model-runtime.py stop deepseek-v41-lakyfx-tp3",
+        "statusCmd": "python3 ~/.local/share/sparkdash-models/model-runtime.py status deepseek-v41-lakyfx-tp3",
+        "runningPattern": "^running$",
+        "containerName": "deepseek-lakyfx-rank1",
+        "modelIds": [
+          "DeepSeek-V4.1-Flash-1017-EXL3-3.5bpw-TensorFold"
+        ],
+        "modelFiles": {
+          "DeepSeek-V4.1-Flash-1017-EXL3-3.5bpw-TensorFold": "models/TF351-1017/* rank-cache/TF351-1017/rank1of3.* engram-tp3/rank1.sparse.tar engram-tp3/rank1/SOURCE.json RELEASE-MANIFEST.json"
+        },
+        "startOrder": 10
+      },
+      {
+        "role": "rank-2",
+        "sparkId": "atom",
+        "workdir": "~/.local/share/sparkdash-models",
+        "runtimeId": "deepseek-v41-lakyfx-tp3",
+        "prepareCmd": "python3 ~/.local/share/sparkdash-models/model-runtime.py prepare deepseek-v41-lakyfx-tp3",
+        "startCmd": "python3 ~/.local/share/sparkdash-models/model-runtime.py start deepseek-v41-lakyfx-tp3",
+        "stopCmd": "python3 ~/.local/share/sparkdash-models/model-runtime.py stop deepseek-v41-lakyfx-tp3",
+        "statusCmd": "python3 ~/.local/share/sparkdash-models/model-runtime.py status deepseek-v41-lakyfx-tp3",
+        "runningPattern": "^running$",
+        "containerName": "deepseek-lakyfx-rank2",
+        "modelIds": [
+          "DeepSeek-V4.1-Flash-1017-EXL3-3.5bpw-TensorFold"
+        ],
+        "modelFiles": {
+          "DeepSeek-V4.1-Flash-1017-EXL3-3.5bpw-TensorFold": "models/TF351-1017/* rank-cache/TF351-1017/rank2of3.* engram-tp3/rank2.sparse.tar engram-tp3/rank2/SOURCE.json RELEASE-MANIFEST.json"
+        },
+        "startOrder": 10
+      }
+    ]
+  },
+  {
     "id": "glm53-exl3",
     "label": "GLM-5.3-Flash EXL3 (TP2, TensorFold)",
     "group": "dual-text-gen",
     "tp": 2,
-    "requiredNodes": [{ "sparkId": "spark-1" }, { "sparkId": "spark-2" }],
+    "requiredNodes": [
+      {
+        "sparkId": "spark-1"
+      },
+      {
+        "sparkId": "spark-2"
+      }
+    ],
     "nodes": [
       {
         "role": "head",
@@ -16,16 +116,53 @@
         "runningPattern": "Up \\d",
         "containerName": "glm53-flash-tf",
         "llmPort": 8888,
-        "modelIds": ["GLM-5.3-Flash-EXL3-4bpw-TensorFold", "GLM-5.3-Flash-DFlash2-bf582e4"]
+        "modelIds": [
+          "GLM-5.3-Flash-EXL3-4bpw-TensorFold",
+          "GLM-5.3-Flash-DFlash2-bf582e4"
+        ],
+        "prepareCmd": "python3 ~/.local/share/sparkdash-models/model-runtime.py bridge glm53-exl3 && ./link-registry-weights.sh && ./scripts/prepare.sh",
+        "startOrder": 20
+      },
+      {
+        "role": "worker",
+        "sparkId": "spark-2",
+        "workdir": "~/.local/share/sparkdash-models",
+        "prepareCmd": "python3 ~/.local/share/sparkdash-models/model-runtime.py bridge glm53-exl3",
+        "stopCmd": "python3 ~/.local/share/sparkdash-models/model-runtime.py stop glm53-flash-tf",
+        "statusCmd": "docker ps --filter 'name=^glm53-flash-tf$' --format '{{.Status}}'",
+        "runningPattern": "^Up ",
+        "containerName": "glm53-flash-tf",
+        "modelIds": [
+          "GLM-5.3-Flash-EXL3-4bpw-TensorFold",
+          "GLM-5.3-Flash-DFlash2-bf582e4"
+        ],
+        "startOrder": 10
       }
-    ]
+    ],
+    "resources": {
+      "spark-1": {
+        "memoryGiB": 96,
+        "diskGiB": 210
+      },
+      "spark-2": {
+        "memoryGiB": 96,
+        "diskGiB": 210
+      }
+    }
   },
   {
     "id": "qwen38-flash-next",
     "label": "Qwen3.8-Flash-Next (TP2+EP+MTP3)",
     "group": "dual-text-gen",
     "tp": 2,
-    "requiredNodes": [{ "sparkId": "spark-1" }, { "sparkId": "spark-2" }],
+    "requiredNodes": [
+      {
+        "sparkId": "spark-1"
+      },
+      {
+        "sparkId": "spark-2"
+      }
+    ],
     "nodes": [
       {
         "role": "head",
@@ -36,16 +173,49 @@
         "statusCmd": "docker inspect --format '{{.State.Status}}' vllm-fn",
         "runningPattern": "running",
         "containerName": "vllm-fn",
-        "llmPort": 8888
+        "llmPort": 8888,
+        "modelIds": [
+          "Qwen3.8-Flash-Next-NVFP4"
+        ],
+        "prepareCmd": "python3 ~/.local/share/sparkdash-models/model-runtime.py bridge qwen38-flash-next && bash -ec '. ./.env; docker image inspect \"$IMAGE\" >/dev/null 2>&1 || docker pull \"$IMAGE\"; ssh -o BatchMode=yes \"${WORKER_USER:+$WORKER_USER@}$WORKER_IP\" \"docker image inspect \\\"$IMAGE\\\" >/dev/null 2>&1 || docker pull \\\"$IMAGE\\\"\"'",
+        "startOrder": 20
+      },
+      {
+        "role": "worker",
+        "sparkId": "spark-2",
+        "workdir": "~/.local/share/sparkdash-models",
+        "prepareCmd": "python3 ~/.local/share/sparkdash-models/model-runtime.py bridge qwen38-flash-next",
+        "stopCmd": "python3 ~/.local/share/sparkdash-models/model-runtime.py stop vllm-fn",
+        "statusCmd": "docker inspect --format '{{.State.Status}}' vllm-fn",
+        "runningPattern": "^running$",
+        "containerName": "vllm-fn",
+        "modelIds": [
+          "Qwen3.8-Flash-Next-NVFP4"
+        ],
+        "startOrder": 10
       }
-    ]
+    ],
+    "resources": {
+      "spark-1": {
+        "memoryGiB": 99,
+        "diskGiB": 170
+      },
+      "spark-2": {
+        "memoryGiB": 99,
+        "diskGiB": 170
+      }
+    }
   },
   {
     "id": "minimax-h3",
     "label": "MiniMax H3 (single-node, worker)",
     "group": "single-node",
     "tp": 1,
-    "requiredNodes": [{ "sparkId": "spark-2" }],
+    "requiredNodes": [
+      {
+        "sparkId": "spark-2"
+      }
+    ],
     "nodes": [
       {
         "role": "worker",
@@ -56,16 +226,34 @@
         "statusCmd": "make status",
         "runningPattern": "HTTP 200",
         "containerName": "minimax-h3-fl2va",
-        "llmPort": 8000
+        "llmPort": 8000,
+        "modelIds": [
+          "MiniMax-H3-FL2VA"
+        ],
+        "prepareCmd": "python3 ~/.local/share/sparkdash-models/model-runtime.py bridge minimax-h3",
+        "startOrder": 20
       }
-    ]
+    ],
+    "resources": {
+      "spark-2": {
+        "memoryGiB": 104,
+        "diskGiB": 180
+      }
+    }
   },
   {
     "id": "deepseek-v41-flash",
     "label": "DeepSeek-V4.1-Flash 1017 (EXL3 EAQ v1 2.9bpw, TP2)",
     "group": "dual-text-gen",
     "tp": 2,
-    "requiredNodes": [{ "sparkId": "spark-1" }, { "sparkId": "spark-2" }],
+    "requiredNodes": [
+      {
+        "sparkId": "spark-1"
+      },
+      {
+        "sparkId": "spark-2"
+      }
+    ],
     "nodes": [
       {
         "role": "head",
@@ -77,8 +265,22 @@
         "runningPattern": "Up \\d",
         "containerName": "dsv41-1017-exl3-tf",
         "llmPort": 8888,
-        "modelIds": ["DeepSeek-V4.1-Flash-1017-EXL3-EAQ-v1-2.9-bpw", "DeepSeek-V4.1-Flash-1017-Engram-1bae0e1"]
+        "modelIds": [
+          "DeepSeek-V4.1-Flash-1017-EXL3-EAQ-v1-2.9-bpw",
+          "DeepSeek-V4.1-Flash-1017-Engram-1bae0e1"
+        ],
+        "startOrder": 20
       }
-    ]
+    ],
+    "resources": {
+      "spark-1": {
+        "memoryGiB": 104,
+        "diskGiB": 535
+      },
+      "spark-2": {
+        "memoryGiB": 104,
+        "diskGiB": 335
+      }
+    }
   }
 ]

@@ -288,7 +288,7 @@ for (const phase of ["mount probe", "transfer"]) {
     const running = new Promise((resolve) => { entered = resolve; });
     globalThis.modelSyncRsyncExec = async (host, command, options) => {
       if ((phase === "mount probe" && command.startsWith("findmnt ")) ||
-          (phase === "transfer" && command.includes("rsync -aL "))) {
+          (phase === "transfer" && /\brsync\b/.test(command))) {
         assert.equal(host.id, h.target.id);
         const waiting = exec("sh", ["-c", "exec sleep 30"], { signal: options.signal });
         entered();
@@ -314,7 +314,7 @@ test("NFS parallel cancellation drains every shard and removes temporary file li
   let started = 0;
   let settled = 0;
   globalThis.modelSyncRsyncExec = async (host, command, options) => {
-    if (!command.startsWith("rsync -aL ")) return h.execute(host, command, options);
+    if (!/^\s*rsync\b/.test(command)) return h.execute(host, command, options);
     assert.equal(host.id, h.target.id);
     const waiting = exec("sh", ["-c", "exec sleep 30"], { signal: options.signal });
     if (++started === 3) entered();

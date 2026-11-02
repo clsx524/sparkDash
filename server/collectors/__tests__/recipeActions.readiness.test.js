@@ -40,7 +40,7 @@ function setup(t, { tp = 2, online = ["spark1", "spark2"], sameTarget = false } 
     { id: "atom", name: "Atom", role: "worker", lanIp: "192.168.1.13" },
   ];
   const registry = new RecipeRegistry({ sparks });
-  const launcher = { role: "head", sparkId: "spark1", workdir: "~/recipe", statusCmd: "status", startCmd: "start", stopCmd: "stop", runningPattern: "running", llmPort: 8888 };
+  const launcher = { role: "head", sparkId: "spark1", workdir: "~/recipe", statusCmd: "status", startCmd: "start", stopCmd: "stop", runningPattern: "running", llmPort: 8888, containerName: "owned-model" };
   const recipe = {
     id: "target", label: "Target", tp,
     requiredNodes: [{ sparkId: "spark1" }, { sparkId: "spark2" }, ...(tp === 3 ? [{ sparkId: "atom" }] : [])],
@@ -243,7 +243,7 @@ test("recipe list skips status commands for unrelated offline dependencies", asy
   assert.ok(h.commands.every(({ command }) => !command.includes("~/deepseek")));
 });
 
-function modelRegistry(verifyFilesOnHost) {
+function modelRegistry(verifyFilesOnHost = async () => ["weight"]) {
   return {
     registryHost: () => ({ id: "registry", ssh: { user: "op", host: "registry.test" } }),
     getRegistryConfig: () => ({ directory: "/registry" }),
@@ -252,16 +252,6 @@ function modelRegistry(verifyFilesOnHost) {
   };
 }
 
-test("Apply model sync skips pre/post SHA but retains rsync quick-check and launcher linking", async (t) => {
-  const h = setup(t);
-  h.recipe.nodes[0].modelIds = ["weights"];
-  h.recipe.nodes[0].startCmd = "./link-registry-weights.sh && start";
-  const models = modelRegistry(async () => { assert.fail("Apply must never hash weight files"); });
-  await h.apply(models);
-  assert.ok(h.commands.some(({ command }) => command.includes("rsync -aL ")));
-  assert.ok(h.commands.some(({ command }) => command.includes("./link-registry-weights.sh && start")));
-  assert.ok(h.commands.every(({ command }) => !command.includes("--checksum")));
-});
 
 test("explicit sync retains pre/post verification and rejects post-copy checksum mismatch", async (t) => {
   const h = setup(t);
@@ -269,7 +259,6 @@ test("explicit sync retains pre/post verification and rejects post-copy checksum
   const models = modelRegistry(async () => { verifies++; return ["weight"]; });
   await assert.rejects(syncModelToSpark(models, models.getModel(), h.sparks[0]), /Post-copy checksum verification failed/);
   assert.equal(verifies, 2);
-  assert.ok(h.commands.some(({ command }) => command.includes("rsync -aL ")));
 });
 
 test("verify:false skips registry self-sync checksum as well", async (t) => {
@@ -278,23 +267,6 @@ test("verify:false skips registry self-sync checksum as well", async (t) => {
   assert.deepEqual(await syncModelToSpark(models, models.getModel(), { id: "registry" }, { verify: false }), { destDir: "/registry/weights" });
 });
 
-test("staged GLM weights never contact offline Atom registry, including preflight", async (t) => {
-  const h = setup(t);
-  h.recipe.nodes[0].modelIds = ["weights"];
-  const models = modelRegistry(async () => { assert.fail("Apply must never hash"); });
-  models.registryHost = () => ({ id: "atom", ssh: { user: "op", host: "atom.test" } });
-  globalThis.recipeTestSsh = async (spark, command) => {
-    h.commands.push({ id: spark.id, command });
-    assert.notEqual(spark.id, "atom", "no registry file listing");
-    assert.ok(!command.includes("atom.test"), "no target-to-registry preflight or transfer");
-    if (command.includes("for file in")) return "__PRESENT__";
-    return "stopped";
-  };
-  await h.apply(models);
-  assert.deepEqual(h.wakes, []);
-  assert.ok(h.commands.some(({ command }) => command.includes("for file in")));
-  assert.ok(h.commands.some(({ command }) => command === "cd ~/recipe && start"));
-});
 
 test("live recipe conflicts still block apply after readiness", async (t) => {
   const h = setup(t);
@@ -393,79 +365,6 @@ test("failed launcher session retains node output, exit context and failed stage
   }
 });
 
-test("shipped recipes apply using only their required Sparks, never Atom", async (t) => {
-  const definitions = JSON.parse(fs.readFileSync(new URL("../../config/recipes.json", import.meta.url), "utf8"));
-  const expected = {
-    "glm53-exl3": { required: ["spark-1", "spark-2"], launcher: "spark-1" },
-    "qwen38-flash-next": { required: ["spark-1", "spark-2"], launcher: "spark-1" },
-    "minimax-h3": { required: ["spark-2"], launcher: "spark-2" },
-    "deepseek-v41-flash": { required: ["spark-1", "spark-2"], launcher: "spark-1" },
-  };
-  for (const definition of definitions) {
-    const h = setup(t, { online: [] });
-    h.sparks[0].id = "spark-1";
-    h.sparks[1].id = "spark-2";
-    h.registry._recipes = [definition];
-    h.options.wakeNodes = async (targets) => {
-      h.wakes.push(targets.map((spark) => spark.id));
-      for (const spark of targets) h.onlineIds.add(spark.id);
-    };
-    const stagedModels = {
-      registryHost: () => h.sparks[0],
-      getRegistryConfig: () => ({ directory: "/staged" }),
-      getModel: (id) => ({ id, subfolder: id, manifest: [] }),
-      verifyFilesOnHost: async () => { assert.fail("Apply must not hash staged weights"); },
-    };
-    await switchRecipe(h.registry, stagedModels, definition.id,
-      (state) => h.phases.push(state), h.options);
-    const topology = expected[definition.id];
-    assert.deepEqual(h.wakes, [topology.required], definition.id);
-    const starts = h.commands.filter(({ command }) => definition.nodes.some(
-      (node) => command === `cd ${node.workdir} && ${node.startCmd}`
-    ));
-    assert.deepEqual(starts.map(({ id }) => id), [topology.launcher], definition.id);
-    assert.ok(h.commands.every(({ id }) => id !== "atom"), definition.id);
-    assert.equal(h.phases.at(-1).phase, "done");
-  }
-});
-test("DeepSeek TP2 stages both registry models on the head before launch without contacting Atom", async (t) => {
-  const definitions = JSON.parse(fs.readFileSync(new URL("../../config/recipes.json", import.meta.url), "utf8"));
-  const definition = definitions.find(({ id }) => id === "deepseek-v41-flash");
-  const head = definition.nodes[0];
-  const h = setup(t);
-  h.sparks[0].id = "spark-1";
-  h.sparks[1].id = "spark-2";
-  h.onlineIds.add("spark-1");
-  h.onlineIds.add("spark-2");
-  h.registry._recipes = [definition];
-  const resolved = [];
-  const models = modelRegistry(async () => { assert.fail("Apply must never hash"); });
-  models.registryHost = () => ({ id: "atom", ssh: { user: "op", host: "atom.test" } });
-  models.getModel = (id) => {
-    resolved.push(id);
-    return { id, subfolder: id, manifest: [{ path: `${id}.safetensors`, sha256: "abc" }] };
-  };
-  globalThis.recipeTestSsh = async (spark, command) => {
-    h.commands.push({ id: spark.id, command });
-    assert.notEqual(spark.id, "atom");
-    assert.ok(!command.includes("atom.test"));
-    if (command.includes("for file in")) return "__PRESENT__";
-    return "stopped";
-  };
-  await switchRecipe(h.registry, models, definition.id,
-    (state) => h.phases.push(state), h.options);
-  for (const id of head.modelIds) {
-    assert.ok(resolved.includes(id));
-    const staged = h.commands.findIndex(({ command }) =>
-      command.includes("for file in") && command.includes(`${id}.safetensors`));
-    const launched = h.commands.findIndex(({ command }) =>
-      command === "cd ~/DeepSeek-v4.1-Flash-1017-2x-DGX-Sparks && ./link-registry-weights.sh && ./start.sh");
-    assert.ok(staged >= 0 && staged < launched, id);
-    assert.equal(h.commands[staged].id, "spark-1");
-  }
-  assert.deepEqual(h.wakes, []);
-  assert.equal(h.phases.at(-1).phase, "done");
-});
 
 
 test("cancel races a hanging readiness observation and ignores its late online result", async (t) => {
@@ -528,23 +427,21 @@ test("cancelling parallel attached cleanup retains lock until every sibling unwi
   assert.equal(h.commands.some(({ command }) => command.endsWith("&& start")), false);
 });
 
-test("cancelling staged-file preflight escapes fallback and never transfers or launches", async (t) => {
+test("cancelling weight verification never transfers or launches", async (t) => {
   const h = setup(t);
   h.recipe.nodes[0].modelIds = ["weights"];
   const controller = new AbortController();
   h.options.signal = controller.signal;
-  const original = globalThis.recipeTestSsh;
   let entered;
-  const staging = new Promise((resolve) => { entered = resolve; });
-  globalThis.recipeTestSsh = async (spark, command, options) => {
-    if (!command.includes("__PRESENT__")) return original(spark, command, options);
+  const verifying = new Promise((resolve) => { entered = resolve; });
+  const models = modelRegistry(async (_host, _directory, _manifest, { signal }) => {
     entered();
-    return new Promise((_, reject) => options.signal.addEventListener("abort",
-      () => reject(options.signal.reason), { once: true }));
-  };
-  const applying = h.apply(modelRegistry());
+    return new Promise((_, reject) => signal.addEventListener("abort",
+      () => reject(signal.reason), { once: true }));
+  });
+  const applying = h.apply(models);
   const rejected = assert.rejects(applying, { name: "AbortError" });
-  await staging;
+  await verifying;
   controller.abort();
   await rejected;
   assert.equal(h.phases.at(-1).phase, "cancelled");
@@ -560,7 +457,7 @@ test("cancel aborts an in-flight model transfer without reaching the launcher", 
   let entered;
   const transferring = new Promise((resolve) => { entered = resolve; });
   globalThis.recipeTestSsh = async (spark, command, options) => {
-    if (!command.includes("rsync -aL")) return original(spark, command, options);
+    if (!/\brsync\b/.test(command)) return original(spark, command, options);
     entered();
     return new Promise((_, reject) => options.signal.addEventListener("abort",
       () => reject(options.signal.reason), { once: true }));
@@ -594,4 +491,88 @@ test("cancel aborts an in-flight serving health request rather than reporting fa
   assert.equal(h.phases.at(-1).phase, "cancelled");
   assert.equal(h.phases.some((state) => state.phase === "done" || state.phase === "failed"), false);
   assert.equal(isSwitchInFlight(), false);
+});
+
+test("a built plan prepares all nodes, waits for small service health, then starts the large model and waits out warmup", async (t) => {
+  const h = setup(t);
+  const small = { role: "tts", sparkId: "spark1", serviceId: "tts", memoryGiB: 5,
+    workdir: "~/recipe", prepareCmd: "prepare-small", startCmd: "start-small",
+    stopCmd: "stop-small", statusCmd: "status-small", llmPort: 8891, startOrder: 0 };
+  const large = { ...h.recipe.nodes[0], prepareCmd: "prepare-large", waitForWarmup: true, startOrder: 20 };
+  const target = { ...h.recipe, nodes: [large, small] };
+  h.options.plan = { target, input: { recipeId: h.recipe.id }, requiredNodes: h.sparks.slice(0, 2),
+    resources: new Map([["spark1", { memoryGiB: 100 }], ["spark2", { memoryGiB: 90 }]]) };
+  let releaseSmall;
+  let entered;
+  const checkingSmall = new Promise((resolve) => { entered = resolve; });
+  const smallReady = new Promise((resolve) => { releaseSmall = resolve; });
+  let nativeChecks = 0;
+  let committed = false;
+  const original = globalThis.recipeTestSsh;
+  globalThis.recipeTestSsh = (spark, command, options) =>
+    command.includes("/proc/meminfo") ? Promise.resolve("120") : original(spark, command, options);
+  t.mock.method(globalThis, "fetch", async (url) => {
+    if (url.includes(":8891")) { entered(); await smallReady; return { ok: true }; }
+    nativeChecks++;
+    return { ok: true, json: async () => ({ warming: nativeChecks === 1 }) };
+  });
+  h.options.commitPlan = () => { committed = true; assert.ok(nativeChecks >= 2); };
+  const applying = h.apply();
+  await checkingSmall;
+  assert.equal(committed, false);
+  const commands = () => h.commands.map((entry) => entry.command);
+  assert.ok(commands().indexOf("cd ~/recipe && prepare-large") < commands().indexOf("cd ~/recipe && start-small"));
+  assert.equal(commands().includes("cd ~/recipe && start"), false);
+  releaseSmall();
+  await applying;
+  assert.equal(committed, true);
+  assert.ok(commands().indexOf("cd ~/recipe && start-small") < commands().indexOf("cd ~/recipe && start"));
+  assert.equal(h.phases.at(-1).phase, "done");
+});
+
+test("incomplete canonical artifacts fail before stopping a running model", async (t) => {
+  const h = setup(t, { sameTarget: true });
+  h.recipe.nodes[0].modelIds = ["weights"];
+  h.options.plan = { target: h.recipe, input: { recipeId: h.recipe.id }, requiredNodes: h.sparks.slice(0, 2) };
+  const original = globalThis.recipeTestSsh;
+  globalThis.recipeTestSsh = (spark, command, options) => {
+    if (command.includes("test -s")) throw new Error("Canonical artifact is incomplete");
+    return original(spark, command, options);
+  };
+  await assert.rejects(h.apply(modelRegistry()), /Canonical artifact is incomplete/);
+  assert.equal(h.commands.some(({ command }) => command.includes("&& stop") || command.includes("docker rm") || command.includes("&& start")), false);
+  assert.equal(h.phases.at(-1).phase, "failed");
+});
+
+test("a TCP mount cannot replace an existing deployment when the plan requires RDMA", async (t) => {
+  const h = setup(t, { sameTarget: true });
+  h.recipe.nodes[0].modelIds = ["weights"];
+  h.options.plan = { target: h.recipe, input: { recipeId: h.recipe.id }, requiredNodes: h.sparks.slice(0, 2) };
+  const models = modelRegistry();
+  const mount = { path: "/mnt/registry", source: "10.100.30.2:/registry", transport: "rdma" };
+  models.getRegistryConfig = () => ({ hostId: "registry", directory: "/registry", nfsMounts: { spark1: mount } });
+  const original = globalThis.recipeTestSsh;
+  globalThis.recipeTestSsh = (spark, command, options) =>
+    command.startsWith("findmnt ") ? Promise.resolve(JSON.stringify({ filesystems: [
+      { target: mount.path, source: mount.source, fstype: "nfs4", options: "ro,vers=4.2,proto=tcp" },
+    ] })) : original(spark, command, options);
+  await assert.rejects(h.apply(models), /rdma/i);
+  assert.equal(h.commands.some(({ command }) => command.includes("&& stop") || command.includes("docker rm") || command.includes("&& start")), false);
+  assert.equal(h.phases.at(-1).phase, "failed");
+});
+
+test("resource revalidation waits for wake readiness and rejects capacity drift before any stop", async (t) => {
+  const h = setup(t, { online: [] });
+  h.options.wakeNodes = async (targets) => {
+    h.wakes.push(targets.map((spark) => spark.id));
+    for (const spark of targets) h.onlineIds.add(spark.id);
+  };
+  h.options.validatePlan = async () => {
+    assert.equal(h.onlineIds.has("spark1") && h.onlineIds.has("spark2"), true);
+    throw new Error("Capacity changed since Build");
+  };
+  await assert.rejects(h.apply(), /Capacity changed since Build/);
+  assert.deepEqual(h.wakes, [["spark1", "spark2"]]);
+  assert.deepEqual(h.commands, []);
+  assert.equal(h.phases.at(-1).phase, "failed");
 });

@@ -51,6 +51,7 @@
 import path from "node:path";
 import { sshExec, copyToSpark } from "./ssh.js";
 import { settleAll } from "../util/abort.js";
+import { fetchHfManifest, filterManifestToIncluded } from "./ModelRegistry.js";
 
 const PREFLIGHT_TIMEOUT_MS = 15_000;
 const DEFAULT_SYNC_TIMEOUT_MS = 21_600_000;
@@ -133,8 +134,9 @@ async function nfsSourceDirectory(target, mount, subfolder, commandOptions) {
     const mounted = Array.isArray(filesystems) && filesystems.length === 1 ? filesystems[0] : null;
     const flags = typeof mounted?.options === "string" ? mounted.options.split(",") : [];
     if (!mounted || mounted.target !== root || !["nfs", "nfs4"].includes(mounted.fstype) ||
-        mounted.source !== mount.source || !flags.includes("ro") || flags.includes("rw")) {
-      throw new Error(`expected exact read-only NFS source ${mount.source} at ${root}`);
+        mounted.source !== mount.source || !flags.includes("ro") || flags.includes("rw") ||
+        (mount.transport && !flags.includes(`proto=${mount.transport}`))) {
+      throw new Error(`expected exact read-only ${mount.transport || "NFS"} source ${mount.source} at ${root}`);
     }
   } catch (err) {
     commandOptions.signal?.throwIfAborted();
@@ -176,6 +178,14 @@ export async function syncModelToSpark(modelRegistry, model, targetSpark, option
   if (!registryHost) throw new Error("No Model Registry host configured");
   const registryConfig = modelRegistry.getRegistryConfig();
   if (!registryConfig.directory) throw new Error("No Model Registry directory configured");
+  if (options.requireVerified && (!Array.isArray(model.manifest) || model.manifest.length === 0)) {
+    if (!model.repo || !/^[0-9a-f]{40}$/.test(model.revision)) throw new Error(`Pin and verify ${model.id} in the registry before staging`);
+    model = { ...model, manifest: filterManifestToIncluded(await fetchHfManifest(model.repo, model.revision), model.includePattern) };
+  }
+  if (options.includePattern) {
+    model = { ...model, manifest: filterManifestToIncluded(model.manifest || [], options.includePattern) };
+  }
+  if (options.requireVerified && !model.manifest?.length) throw new Error(`No verified artifact hashes for ${model.id}`);
   // The Model Registry host already holds the canonical files at
   // registryConfig.directory — "syncing" a model onto itself is a no-op by
   // definition. Skip the modelFolder requirement, route selection, and
@@ -190,6 +200,14 @@ export async function syncModelToSpark(modelRegistry, model, targetSpark, option
             `${mismatches.slice(0, 5).join(", ")}${mismatches.length > 5 ? ", …" : ""}`
         );
       }
+    }
+    if (!verify && options.requireVerified) {
+      const checks = model.manifest.map((entry) => Number.isSafeInteger(entry.size)
+        ? `test "$(stat -c %s -- ${shQuote(entry.path)})" = ${shQuote(entry.size)}`
+        : `test -s ${shQuote(entry.path)}`);
+      await sshExec(targetSpark, `cd ${shQuotePath(destDir)} && ${checks.join(" && ")}`, {
+        timeoutMs: PREFLIGHT_TIMEOUT_MS, ...commandOptions,
+      });
     }
     return { destDir };
   }
@@ -206,7 +224,7 @@ export async function syncModelToSpark(modelRegistry, model, targetSpark, option
   let sourceDir = joinRemotePath(registryConfig.directory, model.subfolder);
   const destDir = joinRemotePath(targetSpark.modelFolder, model.subfolder);
 
-  if (!verify && Array.isArray(model.manifest) && model.manifest.length > 0) {
+  if (!options.preflightOnly && !verify && Array.isArray(model.manifest) && model.manifest.length > 0) {
     const fileArgs = model.manifest.map((entry) => shQuote(entry.path)).join(" ");
     try {
       const present = await sshExec(
@@ -239,7 +257,7 @@ export async function syncModelToSpark(modelRegistry, model, targetSpark, option
     sourceHost = targetSpark;
     rsyncTransport = "";
     sourceSpec = shQuotePath(sourceDir + "/");
-    options.onOutput?.({ stream: "stdout", text: `Model transfer mode: NFS (${mount.source} mounted at ${mount.path}); SSH control only\n` });
+    options.onOutput?.({ stream: "stdout", text: `Model transfer mode: NFS${mount.transport === "rdma" ? "/RDMA" : ""} (${mount.source} mounted at ${mount.path}); SSH control only\n` });
   } else {
     const registryAddr = registryHost.ssh.host || registryHost.lanIp;
     if (!registryAddr) throw new Error(`Model Registry host ${registryHost.id} has no reachable address configured`);
@@ -264,10 +282,16 @@ export async function syncModelToSpark(modelRegistry, model, targetSpark, option
     sourceSpec = shQuote(`${registryHost.ssh.user}@${registryAddr}:./`);
     options.onOutput?.({ stream: "stdout", text: `Model transfer mode: SSH (${registryHost.id})\n` });
   }
+  if (options.preflightOnly) return { destDir };
   const mkdirCmd = `mkdir -p ${shQuotePath(destDir)}`;
   const syncTimeout = options.timeoutMs || DEFAULT_SYNC_TIMEOUT_MS;
 
-  const files = await listSyncFiles(sourceHost, sourceDir, signal);
+  let files = await listSyncFiles(sourceHost, sourceDir, signal);
+  files = files.filter((name) => !name.startsWith(".cache/"));
+  if (options.includePattern) {
+    files = filterManifestToIncluded(files.map((name) => ({ path: name })), options.includePattern).map((entry) => entry.path);
+    if (!files.length) throw new Error(`No selected rank artifacts in ${sourceDir}`);
+  }
   signal?.throwIfAborted();
   const shards = shardFiles(files, MAX_SYNC_SHARDS);
 
@@ -275,7 +299,7 @@ export async function syncModelToSpark(modelRegistry, model, targetSpark, option
     // Too few files to shard (or listing failed): one whole-directory rsync.
     await sshExec(
       targetSpark,
-      `${mkdirCmd} && rsync -aL ${rsyncTransport}${sourceSpec} ${shQuotePath(destDir + "/")}`,
+      `${mkdirCmd} && rsync -aLS ${rsyncTransport}${options.includePattern ? `--include='*/' ${options.includePattern.split(/\s+/).map((pattern) => `--include=${shQuote(pattern)}`).join(" ")} --exclude='*' ` : "--exclude=.cache/ "}${sourceSpec} ${shQuotePath(destDir + "/")}`,
       { timeoutMs: syncTimeout, multiplex: false, onOutput: options.onOutput, ...commandOptions }
     );
   } else {
@@ -293,7 +317,7 @@ export async function syncModelToSpark(modelRegistry, model, targetSpark, option
         shards.map((_, idx) =>
           sshExec(
             targetSpark,
-            `rsync -aL ${rsyncTransport}--files-from=${shQuotePath(listPaths[idx])} ${sourceSpec} ${shQuotePath(destDir + "/")}`,
+            `rsync -aLS ${rsyncTransport}--files-from=${shQuotePath(listPaths[idx])} ${sourceSpec} ${shQuotePath(destDir + "/")}`,
             { timeoutMs: syncTimeout, multiplex: false, onOutput: options.onOutput, ...commandOptions }
           )
         )

@@ -1,14 +1,10 @@
 /**
  * recipeActions — the recipe-switching state machine.
  *
- * Mirrors comfyActions.js's precedent (a recipe-level mutation action living outside the HTTP
- * route handler), scaled up to a multi-node, multi-minute operation: sync each node's model
- * (using rsync quick-check, without hashing weights), stop whatever recipe is currently live,
- * confirm it actually stopped, start the target recipe's node(s), then poll each node's own
- * API until it reports healthy. Every phase transition calls `onProgress` so the caller
- * (index.js) can push it over the WebSocket immediately — this can run for many minutes (cold
- * model loads, multi-hundred-GB syncs), and a caller watching a static "in progress" spinner
- * with no detail is worse than no dashboard at all.
+ * Wake dependencies, validate resources/artifacts/transport before stopping,
+ * remove owned model containers, stage verified artifacts, prepare runtimes,
+ * warm small services first, then start large ranks and check serving health.
+ * Progress and attached output feed the existing persisted Apply sessions.
  *
  * Refuses to run a second switch concurrently and refuses to proceed on a detected conflict
  * (two recipes' nodes both reporting running at once) rather than guessing which one to stop.
@@ -96,95 +92,40 @@ async function runNodeCommand(recipeRegistry, node, cmd, timeoutMs, options, act
   }
 }
 
-const CLEAR_CONTAINERS_TIMEOUT_MS = 30_000;
-/** Containers that persist across every recipe switch — never touched by the sweep below.
- *  portainer_agent is the fleet's own persistent infrastructure. qwen3-embedding (spark1),
- *  semif (spark2), qwen3-tts (spark1) and qwen3-asr (spark2) are standalone always-on
- *  services, independent of whichever recipe is active — none is a recipe container
- *  (no recipes.json entry, no start.sh), so the sweep below treated them as unrecognized
- *  cruft on every recipe switch (confirmed live 2026-09-20: embedding and semif removed
- *  the moment GLM was reactivated). The rest are
- *  kernel-nfsd exporters (DSpark, deepseek-v41-flash-exl3, and any future recipe using the
- *  same "share weights over NFSv4 instead of copying them onto the worker" pattern) —
- *  every one of those recipes' own start scripts already prefers reusing a live exporter
- *  over rebuilding it (nfs_ensure_server()'s nfs_live_container() check), specifically
- *  because a privileged --network host container holding kernel-level NFS state (rpc.nfsd,
- *  /proc/fs/nfsd) can take Docker's kill well past its wait timeout even though it does
- *  genuinely exit — confirmed live 2026-09-14: every deepseek-v41-flash-exl3 retry hit
- *  "could not kill container: tried to kill container, but did not receive an exit event"
- *  because this sweep force-killed dsv41-exl3-nfs on every single attempt, throwing away
- *  the reuse path's entire point and re-triggering the same slow teardown each time. Only
- *  one kernel nfsd can ever be live host-wide regardless of which named container started
- *  it ("a second nfsd will not start" — see nfs-share.sh), so leaving a stray one running
- *  across a recipe switch can never itself conflict with whatever starts next. */
-export const PERSISTENT_CONTAINER_NAMES = [
-  "portainer_agent",
-  "qwen3-embedding",
-  "semif",
-  "qwen3-tts",
-  "qwen3-asr",
-  "vllm-fn-nfs",
-  "glm53-nfs",
-  "dsv41-nfs",
-  "dsv41-exl3-nfs",
-  "dspark-nfs",
-];
+const CLEAR_CONTAINERS_TIMEOUT_MS = 60_000;
 
-/**
- * Force-stop and remove every running container on online head/worker Sparks and
- * the target's required compute nodes, except the fleet's persistent infrastructure
- * (PERSISTENT_CONTAINER_NAMES above), regardless of live recipe detection.
- * Offline unrelated nodes are skipped, never contacted or woken by this sweep.
- *
- * Exists because that detection can be wrong (a runningPattern that doesn't match a
- * recipe's real status text, a crashed sparkDash losing track, a container started by
- * hand), and because several TP2 recipes only declare a head node in recipes.json — their
- * worker-side container on the other physical Spark is invisible to target.nodes entirely,
- * so a check scoped to just the target's own declared nodes would still miss it. Confirmed
- * live 2026-09-13: GLM's runningPattern ("running") never matched its actual `Up 8 hours`
- * status text, so the normal "stopping" phase below silently skipped it — both its head and
- * worker containers were still running (host networking, so `docker ps`'s own Ports column
- * shows nothing there either — port-based detection doesn't work for this fleet's
- * containers) when the next switch's start.sh hit "PORT=8888 is already bound" on the head
- * and a worker-container conflict on the other node.
- *
- * The target's explicit dependencies include all TP ranks, even when one head-side
- * launcher starts the whole cluster. Online head/worker nodes are also swept to
- * preserve conflict cleanup when moving between single-node and multi-node recipes.
- * Other tracked hosts (such as an unrelated Model Registry) are never swept.
- */
+/** Remove only explicitly owned model containers, including half-started ranks. */
 async function clearStaleContainers(recipeRegistry, requiredNodes, getOnline, options) {
-  const requiredIds = new Set(requiredNodes.map((spark) => spark.id));
-  const sparks = recipeRegistry.sparkRegistry.sparks.filter(
-    (spark) => (requiredIds.has(spark.id) || spark.role === "head" || spark.role === "worker") &&
-      getOnline(spark.id) === true
-  );
-  const excludeArgs = PERSISTENT_CONTAINER_NAMES.map((name) => `-e ${JSON.stringify(name)}`).join(" ");
-  const sweepCmd = `docker ps --format '{{.Names}}' | grep -vx ${excludeArgs} | xargs -r docker rm -f`;
-  await settleAll(
-    sparks.map(async (spark) => {
-      options.signal?.throwIfAborted();
-      report(options, spark, "Clearing conflicting containers; preserving standalone services");
-      await sshExec(spark, sweepCmd, {
-        timeoutMs: CLEAR_CONTAINERS_TIMEOUT_MS,
-        signal: options.signal, cancelRemote: true,
-        onOutput: options.onLog ? (line) => report(options, spark, line.text, line.stream) : undefined,
-      });
-      report(options, spark, "Container cleanup completed");
-    })
-  );
+  const ids = new Set([...requiredNodes.map((spark) => spark.id), ...(options.cleanupHostIds || [])]);
+  const names = new Set([
+    ...recipeRegistry.all().flatMap((recipe) => recipe.nodes.map((node) => node.containerName).filter(Boolean)),
+    ...(options.ownedContainers || []),
+  ]);
+  if (names.size === 0) return;
+  const quoted = [...names].map((name) => "'" + name.replaceAll("'", "'\\''") + "'").join(" ");
+  const command = `for name in ${quoted}; do if docker container inspect "$name" >/dev/null 2>&1; then docker rm -f "$name" || exit $?; fi; done`;
+  await settleAll(recipeRegistry.sparkRegistry.sparks.filter((spark) =>
+    (ids.has(spark.id) || spark.role === "head" || spark.role === "worker") && getOnline(spark.id) === true
+  ).map(async (spark) => {
+    report(options, spark, "Stopping owned model containers; preserving unrelated containers and NFS");
+    await sshExec(spark, command, { timeoutMs: CLEAR_CONTAINERS_TIMEOUT_MS, signal: options.signal, cancelRemote: true,
+      onOutput: options.onLog ? (line) => report(options, spark, line.text, line.stream) : undefined });
+  }));
 }
 
-/**
- * Sync every node's tied models (recipe node's optional `modelIds` array, each referencing
- * a Model Registry entry) onto that node's own configured model folder. Already-staged
- * manifest files need only a target-side presence check; missing files use rsync's
- * size/mtime quick-check, never SHA256. Nodes with no modelIds are left alone. Syncs
- * run sequentially per model — two
- * large concurrent transfers to the same node would split one link's bandwidth across both
- * rather than actually finishing either sooner, and needlessly doubles concurrent SSH
- * connections against modelSync's own MaxStartups-conscious shard count.
- */
+async function checkMemory(plan, loaded, options) {
+  if (!plan) return;
+  for (const spark of plan.requiredNodes) {
+    const remaining = plan.resources.get(spark.id).memoryGiB - (loaded.get(spark.id) || 0);
+    const command = "python3 -c 'from pathlib import Path; print(next(int(x.split()[1])/1024**2 for x in Path(\"/proc/meminfo\").read_text().splitlines() if x.startswith(\"MemAvailable:\")))'";
+    const available = Number(await sshExec(spark, command, { timeoutMs: 15_000, signal: options.signal, cancelRemote: true }));
+    if (!Number.isFinite(available) || available < remaining + 8) {
+      throw new RecipeSwitchError(`${spark.name || spark.id}: need ${(remaining + 8).toFixed(1)} GiB available for remaining models and reserve, have ${Number.isFinite(available) ? available.toFixed(1) : "unknown"}`);
+    }
+  }
+}
+
+/** Stage each node's selected artifacts, or stat the canonical files before any stop. */
 export async function syncModelsForRecipe(recipeRegistry, modelRegistry, recipe, options = {}) {
   for (const node of recipe.nodes) {
     options.signal?.throwIfAborted();
@@ -195,7 +136,7 @@ export async function syncModelsForRecipe(recipeRegistry, modelRegistry, recipe,
         `Recipe ${recipe.id} node ${node.role} references model(s) ${modelIds.join(", ")} but no Model Registry is configured`
       );
     }
-    const spark = recipeRegistry._sparkForNode(node);
+    const spark = options.sourceOnly ? modelRegistry.registryHost() : recipeRegistry._sparkForNode(node);
     if (!spark) throw new RecipeSwitchError(`no Spark configured for role ${node.role}`);
     for (const modelId of modelIds) {
       options.signal?.throwIfAborted();
@@ -203,12 +144,22 @@ export async function syncModelsForRecipe(recipeRegistry, modelRegistry, recipe,
       if (!model) {
         throw new RecipeSwitchError(`Recipe ${recipe.id} references unknown model ${modelId}`);
       }
-      report(options, spark, `Checking staged files for ${modelId} (no checksum pass)`);
+      report(options, spark, `${options.sourceOnly ? "Checking canonical" : "Verifying staged"} artifacts for ${modelId}`);
       const result = await syncModelToSpark(modelRegistry, model, spark, {
-        verify: false,
+        verify: !options.sourceOnly,
+        requireVerified: Boolean(options.plan),
+        includePattern: node.modelFiles?.[modelId],
         signal: options.signal,
         onOutput: options.onLog ? (line) => report(options, spark, line.text, line.stream) : undefined,
       });
+      if (options.sourceOnly) {
+        const destination = recipeRegistry._sparkForNode(node);
+        if (!destination) throw new RecipeSwitchError(`no Spark configured for role ${node.role}`);
+        await syncModelToSpark(modelRegistry, model, destination, {
+          verify: false, requireVerified: true, preflightOnly: true,
+          includePattern: node.modelFiles?.[modelId], signal: options.signal,
+        });
+      }
       report(options, spark, result.skipped
         ? `${modelId}: files already staged; registry access and transfer skipped`
         : `${modelId}: model files ready`);
@@ -224,8 +175,18 @@ async function waitForNodeHealth(recipeRegistry, node, options) {
   if (!isAllowedTargetHost(host)) {
     throw new RecipeSwitchError(`Invalid or disallowed health-check host: ${host}`);
   }
-  const url = `http://${host}:${node.llmPort}/health`;
-  const deadline = Date.now() + HEALTH_TIMEOUT_MS;
+  if (node.llmPort == null) {
+    const deadline = Date.now() + HEALTH_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      options.signal?.throwIfAborted();
+      const status = await recipeRegistry._probeNode(node, options);
+      if (status.running) return;
+      await sleep(HEALTH_POLL_MS, options.signal);
+    }
+    throw new RecipeSwitchError(`${node.role} rank did not become running`);
+  }
+  const url = `http://${host}:${node.llmPort}${node.healthPath || "/health"}`;
+  const deadline = Date.now() + (node.healthTimeoutMs || HEALTH_TIMEOUT_MS);
   let lastError = "no attempt made";
   let reportedError = null;
   report(options, spark, `Waiting for serving health at ${url}`);
@@ -238,10 +199,15 @@ async function waitForNodeHealth(recipeRegistry, node, options) {
       const res = await fetch(url, { signal });
       options.signal?.throwIfAborted();
       if (res.ok) {
-        report(options, spark, "Serving health passed (HTTP 200)");
-        return;
+        if (node.waitForWarmup && (await res.json()).warming !== false) {
+          lastError = "native engine is warming";
+        } else {
+          report(options, spark, "Serving health passed");
+          return;
+        }
+      } else {
+        lastError = `HTTP ${res.status}`;
       }
-      lastError = `HTTP ${res.status}`;
     } catch (err) {
       options.signal?.throwIfAborted();
       lastError = err.message;
@@ -420,7 +386,7 @@ export async function switchRecipe(recipeRegistry, modelRegistry, targetId, onPr
   if (_switchInFlight) {
     throw new RecipeSwitchError("a recipe switch is already in progress");
   }
-  const target = recipeRegistry.get(targetId);
+  const target = options.plan?.target ?? recipeRegistry.get(targetId);
   if (!target) throw new RecipeSwitchError(`Unknown recipe: ${targetId}`);
 
   _switchInFlight = true;
@@ -456,16 +422,21 @@ export async function switchRecipe(recipeRegistry, modelRegistry, targetId, onPr
     if (options.isPowerActionInFlight?.()) {
       throw new RecipeSwitchError("a fleet power action is already in progress");
     }
-    const requiredNodes = recipeRegistry.resolveRequiredNodes(target);
+    const requiredNodes = options.plan?.requiredNodes ?? recipeRegistry.resolveRequiredNodes(target);
     if (typeof options.getOnline !== "function" || typeof options.checkOnlineNow !== "function") {
       throw new RecipeSwitchError("Recipe node readiness is not configured");
     }
     await waitForRequiredNodes(requiredNodes, options, emit);
+    if (options.validatePlan) await bounded(options.validatePlan, MODEL_SYNC_PHASE_TIMEOUT_MS, "revalidating the deployment plan timed out");
     const requiredIds = new Set(requiredNodes.map((spark) => spark.id));
     const probeOptions = {
       signal: options.signal,
       getOnline: (id) => requiredIds.has(id) || options.getOnline(id) === true,
     };
+    if (options.plan && target.nodes.some((node) => node.modelIds?.length)) {
+      await bounded(() => syncModelsForRecipe(recipeRegistry, modelRegistry, target, { ...options, sourceOnly: true }),
+        MODEL_SYNC_PHASE_TIMEOUT_MS, "checking canonical artifacts timed out");
+    }
     emit("checking-current-state");
     const snapshot = await abortable(() => recipeRegistry.list(probeOptions), options.signal);
     if (snapshot.conflict) {
@@ -479,7 +450,7 @@ export async function switchRecipe(recipeRegistry, modelRegistry, targetId, onPr
     if (current) {
       emit("stopping", { from: current.id });
       await bounded(
-        () => settleAll(current.nodes.map((n) => runNodeCommand(recipeRegistry, n, n.stopCmd, STOP_TIMEOUT_MS, options, "Stop recipe"))),
+        () => settleAll(current.nodes.filter((node) => node.stopCmd).map((n) => runNodeCommand(recipeRegistry, n, n.stopCmd, STOP_TIMEOUT_MS, options, "Stop recipe"))),
         STOP_TIMEOUT_MS + 10_000,
         `stopping ${current.id} timed out`
       );
@@ -496,12 +467,29 @@ export async function switchRecipe(recipeRegistry, modelRegistry, targetId, onPr
       "clearing stray containers timed out"
     );
 
+    if (options.plan?.input.recipeId?.startsWith("deepseek-")) {
+      emit("preparing", { message: "Retaining only the selected DeepSeek deployment cache" });
+      for (const spark of requiredNodes.filter((spark) => spark.id !== modelRegistry?.getRegistryConfig().hostId)) {
+        await sshExec(spark, `python3 ~/.local/share/sparkdash-models/model-runtime.py evict ${target.id}`, {
+          timeoutMs: 300_000, signal: options.signal, cancelRemote: true,
+          onOutput: options.onLog ? (line) => report(options, spark, line.text, line.stream) : undefined,
+        });
+      }
+    }
     if (target.nodes.some((node) => node.modelIds?.length)) {
       emit("syncing-model", { from: current?.id ?? null });
       await bounded(
         () => syncModelsForRecipe(recipeRegistry, modelRegistry, target, options),
         MODEL_SYNC_PHASE_TIMEOUT_MS,
         `syncing model(s) for ${target.id} timed out`
+      );
+    }
+    emit("preparing");
+    const ordered = [...target.nodes].sort((a, b) => (a.startOrder ?? 20) - (b.startOrder ?? 20));
+    for (const node of ordered) {
+      if (node.prepareCmd) await bounded(
+        () => runNodeCommand(recipeRegistry, node, node.prepareCmd, MODEL_SYNC_PHASE_TIMEOUT_MS, options, "Prepare model"),
+        MODEL_SYNC_PHASE_TIMEOUT_MS, `preparing ${node.role} timed out`
       );
     }
 
@@ -516,12 +504,22 @@ export async function switchRecipe(recipeRegistry, modelRegistry, targetId, onPr
     if (dropped.length) {
       throw new RecipeSwitchError(`Required nodes went offline before start: ${dropped.map((spark) => spark.name || spark.id).join(", ")}`);
     }
-    emit("starting", { from: current?.id ?? null });
-    await bounded(
-      () => settleAll(target.nodes.map((n) => runNodeCommand(recipeRegistry, n, n.startCmd, START_TIMEOUT_MS, options, "Start recipe"))),
-      START_TIMEOUT_MS + 10_000,
-      `starting ${target.id} timed out`
-    );
+    emit("starting");
+    const loaded = new Map();
+    await checkMemory(options.plan, loaded, options);
+    for (const node of ordered.filter((node) => node.serviceId)) {
+      await runNodeCommand(recipeRegistry, node, node.startCmd, START_TIMEOUT_MS, options, "Start small service");
+      await waitForNodeHealth(recipeRegistry, node, options);
+      loaded.set(node.sparkId, (loaded.get(node.sparkId) || 0) + node.memoryGiB);
+      await checkMemory(options.plan, loaded, options);
+    }
+    await checkMemory(options.plan, loaded, options);
+    for (const node of ordered.filter((node) => !node.serviceId && node.startCmd)) {
+      await bounded(
+        () => runNodeCommand(recipeRegistry, node, node.startCmd, START_TIMEOUT_MS, options, "Start large model"),
+        START_TIMEOUT_MS + 10_000, `starting ${node.role} timed out`
+      );
+    }
 
 
     emit("health-checking", { from: current?.id ?? null });
@@ -547,6 +545,7 @@ export async function switchRecipe(recipeRegistry, modelRegistry, targetId, onPr
     }
     options.signal.throwIfAborted();
     switchHistory.record(target.id, Date.now() - loadStartedAt);
+    options.commitPlan?.();
 
     emit("done", { from: current?.id ?? null });
   } catch (err) {
