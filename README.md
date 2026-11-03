@@ -1167,9 +1167,13 @@ helper, catalog and pinned build sources beforehand.
 Apply requires matching prepared image manifests before stopping the current
 deployment. Each worker imports selected images directly from the verified
 read-only NFS/RDMA mount; there is no worker build, pull, SSH image-copy fallback
-or extra local archive. Exact cached image IDs skip import. Checksums and final
-image IDs/platform are verified, while rank weights/topology remain outside the
-image. Image preparation requires no final deployment topology.
+or extra local archive. Schema 2 manifests pin the saved configuration's SHA-256,
+not Docker's store-specific image ID. Archive checksums, configuration digests and
+platform are verified. Local receipts bind that configuration to the host's native
+ID so unchanged images skip import. This supports Atom's containerd image store and
+legacy Docker workers without weakening the LakyFx base pin. Reprovision the image
+helper on all three hosts and prepare again for schema 1 caches. Rank weights and
+topology remain outside the image; preparation requires no final deployment topology.
 
 | Recipe | TP | Required physical nodes |
 |--------|----|-------------------------|
