@@ -1174,6 +1174,10 @@ ID so unchanged images skip import. This supports Atom's containerd image store 
 legacy Docker workers without weakening the LakyFx base pin. Reprovision the image
 helper on all three hosts and prepare again for schema 1 caches. Rank weights and
 topology remain outside the image; preparation requires no final deployment topology.
+Prebuilt images go directly from their registry to complete Docker archives through
+`skopeo` on Atom, avoiding incomplete Docker/containerd exports. Preparation verifies
+all referenced layers, configuration, platform and required labels. Custom builds
+still export through Docker, selecting ARM64 explicitly only for platform indexes.
 
 | Recipe | TP | Required physical nodes |
 |--------|----|-------------------------|
