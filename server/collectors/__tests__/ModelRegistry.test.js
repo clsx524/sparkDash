@@ -89,6 +89,12 @@ test("reconcileNames: tracks every on-disk folder not already tracked", () => {
   assert.equal(r.getModel("model-a").subfolder, "model-a");
 });
 
+test("registry scans do not expose runtime image archives as model weights", () => {
+  const r = fresh();
+  r.reconcileNames([".sparkdash-images", "actual-model"]);
+  assert.deepEqual(r.all().map((model) => model.subfolder), ["actual-model"]);
+});
+
 test("reconcileNames: never re-discovers a folder already tracked by subfolder", () => {
   const r = fresh();
   r.addModel({ id: "custom-id", subfolder: "model-a", repo: "org/repo" });

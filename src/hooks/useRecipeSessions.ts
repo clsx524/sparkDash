@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  applyDeploymentPlan, cancelRecipeSession, fetchCurrentRecipeSession, fetchRecipeSession,
+  applyDeploymentPlan, prepareModelImages, cancelRecipeSession, fetchCurrentRecipeSession, fetchRecipeSession,
   fetchRecipeSessions, fetchRecipes,
 } from "../api/client";
 import type { RecipeListResponse, RecipeSessionDetail, RecipeSessionSummary } from "../api/types";
@@ -178,14 +178,14 @@ export function useRecipeSessions(open: boolean, wireSummary: RecipeSessionSumma
     }
   }, [open, wireSummary?.id, wireSummary?.version, wireSummary?.status]);
 
-  const apply = useCallback(async (targetId: string) => {
+  const apply = useCallback(async (targetId: string, imagesOnly = false) => {
     const authoritative = sessionAuthority(latest.current, wire.current);
     if (!active.current || !hydrated.current || requestPending.current || cancellation.current || awaitingSession.current || authoritative?.status === "running") return;
     requestPending.current = true;
     setPendingId(targetId);
     setActionError(null);
     try {
-      const response = await applyDeploymentPlan(targetId);
+      const response = await (imagesOnly ? prepareModelImages() : applyDeploymentPlan(targetId));
       awaitingSession.current = response.sessionId;
       if (cache.current.has(response.sessionId)) awaitingSession.current = null;
       if (active.current) await refresh.current(true, true);
@@ -238,6 +238,7 @@ export function useRecipeSessions(open: boolean, wireSummary: RecipeSessionSumma
   return {
     data, current: displayedCurrent, history: history.filter((session) => session.id !== authority?.id),
     selectedId, selected, selectHistory, selectionError, error: actionError ?? error, loading, ready, pendingId, apply,
+    prepareImages: () => apply("model-images", true),
     cancel, cancelPending: cancelPendingId != null,
     cancelling: authority?.status === "running" && (cancelPendingId === authority.id || authority.phase === "cancelling"),
     cancelError: cancelFailure?.id === authority?.id ? cancelFailure?.message : null,

@@ -21,6 +21,7 @@ export class DeploymentPlanner {
     this.models = models;
     this.execute = execute;
     this.services = services ?? JSON.parse(fs.readFileSync(path.join(ROOT, '../config/services.json'), 'utf8'));
+    this.images = JSON.parse(fs.readFileSync(path.join(ROOT, '../config/images.json'), 'utf8'));
     this.file = file ?? process.env.DEPLOYMENT_PLAN_JSON_PATH ?? path.join(path.dirname(process.env.MODELS_JSON_PATH || path.join(ROOT, '../../config/models.json')), 'deployment.json');
     this.state = { draft: this.defaults(), active: null };
     try { this.state = JSON.parse(fs.readFileSync(this.file, 'utf8')); }
@@ -49,13 +50,14 @@ export class DeploymentPlanner {
     const target = base ? structuredClone(base) : { id: 'services-only', label: 'Standalone model services', tp: 1, nodes: [], requiredNodes: [] };
     const required = base ? this.recipes.resolveRequiredNodes(base) : [];
     const registryConfig = this.models.getRegistryConfig();
-    for (const node of target.nodes.filter((node) => node.runtimeId)) {
+    for (const node of target.nodes) node.imageId = base.imageId || base.id;
+    for (const node of target.nodes) {
       const host = this.recipes._sparkForNode(node);
       const modelRoot = host.id === registryConfig.hostId ? registryConfig.directory : host.modelFolder;
       if (!modelRoot) throw new Error('Configure the model registry and target model folder first');
       const prefix = `SPARKDASH_MODEL_ROOT=${shQuotePath(modelRoot)} `;
-      node.prepareCmd = prefix + node.prepareCmd;
-      node.startCmd = prefix + node.startCmd;
+      if (node.prepareCmd) node.prepareCmd = prefix + node.prepareCmd;
+      if (node.startCmd) node.startCmd = prefix + node.startCmd;
     }
     const seen = new Set();
     const placements = input.placements.map((placement) => {
@@ -69,7 +71,7 @@ export class DeploymentPlanner {
       const modelRoot = host.id === registry.hostId ? registry.directory : host.modelFolder;
       if (!modelRoot) throw new Error('Configure the Atom model registry before applying');
       const cmd = `SPARKDASH_MODEL_ROOT=${shQuotePath(modelRoot)} python3 ${RUNTIME}/model-runtime.py`;
-      target.nodes.push({ role: service.id, sparkId: host.id, serviceId: service.id, workdir: RUNTIME,
+      target.nodes.push({ role: service.id, sparkId: host.id, serviceId: service.id, imageId: service.id, workdir: RUNTIME,
         prepareCmd: `${cmd} prepare ${service.id}`, startCmd: `${cmd} start ${service.id}`, stopCmd: `${cmd} stop ${service.id}`,
         statusCmd: `${cmd} status ${service.id}`, runningPattern: '^running$', containerName: service.id,
         llmPort: service.port, healthPath: service.healthPath, modelIds: service.modelIds,
@@ -103,7 +105,7 @@ export class DeploymentPlanner {
     }
     const normalized = { recipeId: base?.id ?? null, placements };
     return { input: normalized, target, requiredNodes: required, resources,
-      revision: hash({ input: normalized, target, services: this.services, registry: this.models.getRegistryConfig() }) };
+      revision: hash({ input: normalized, target, services: this.services, images: this.images, registry: this.models.getRegistryConfig() }) };
   }
 
   async preview(input, { save = false, signal } = {}) {
@@ -118,6 +120,7 @@ export class DeploymentPlanner {
         ? ['.cache/huggingface/DeepSeek-V4.1-Flash-1017-EXL3-3.5bpw-TensorFold', '.cache/huggingface/sparkdash-tp3']
         : plan.input.recipeId === 'deepseek-v41-lakyfx-tp3'
           ? ['.cache/huggingface/tensorfold-dsv41/45ee5d0f', '.cache/huggingface/DeepSeek-V4.1-Flash-1017-EXL3-EAQ-v1-2.9-bpw', '.cache/huggingface/hub/models--Mia-AiLab--DeepSeek-V4.1-Flash-1017-EXL3-EAQ-v1-2.9-bpw', '.cache/huggingface/DeepSeek-V4.1-Flash-1017-Engram-1bae0e1', '.cache/huggingface/hub/models--deepseek-ai--DeepSeek-V4.1-Flash-1017', '.cache/dsv41-tensorfold/rank-cache-45ee5d0f', '.cache/dsv41-tensorfold/engram-1bae0e10'] : [];
+      const otherModelFolders = otherCache.filter((folder) => folder.startsWith('.cache/huggingface/DeepSeek-')).map((folder) => path.posix.basename(folder));
       const probe = [
         'import json,os,pathlib,platform,subprocess',
         `r=pathlib.Path(os.path.expanduser(${JSON.stringify(modelRoot)}))`,
@@ -131,6 +134,7 @@ export class DeploymentPlanner {
         ' if not items: return 0',
         " return int(subprocess.check_output(['du','-scB1',*map(str,items)],text=True).splitlines()[-1].split()[0])/2**30",
         `evict=[pathlib.Path.home()/f for f in ${JSON.stringify(host.id === registry.hostId ? [] : otherCache)} if (pathlib.Path.home()/f).is_dir()]`,
+        `evict.extend(r/f for f in ${JSON.stringify(host.id === registry.hostId ? [] : otherModelFolders)} if (r/f).is_dir())`,
         "print(json.dumps(dict(totalGiB=m['MemTotal'],availableGiB=m['MemAvailable'],diskFreeGiB=s.f_bavail*s.f_frsize/2**30,stagedGiB=allocated(folders),evictableGiB=allocated(evict),machine=platform.machine())))",
       ].join('\n');
       try {
@@ -151,9 +155,10 @@ export class DeploymentPlanner {
     const errors = hosts.flatMap((host) => host.errors.map((error) => `${host.name}: ${error}`));
     for (const node of plan.target.nodes) for (const id of node.modelIds || []) if (!this.models.getModel(id)) errors.push(`Register model ${id} before applying`);
     const steps = [
+      'Verify that all selected runtime images were prepared on Atom and their RDMA sources are available',
       'Stop conflicting model containers only; unrelated containers and host NFS remain untouched',
       ...(plan.input.recipeId?.startsWith('deepseek-') ? ['Evict the other DeepSeek deployment cache on Spark1/2 only; preserve Atom registry weights'] : []),
-      'Stage the selected artifacts from Atom and prepare images/runtime files before loading models',
+      'Import the selected prepared images through NFS/RDMA and stage the selected weights; no worker image builds or pulls',
       'Start and warm the selected small services, one at a time',
       ...(plan.input.recipeId ? ['Recheck live memory on every rank; start the selected large model and wait for serving readiness'] : []),
       'Commit the plan and switch stable inference routes to healthy placements',

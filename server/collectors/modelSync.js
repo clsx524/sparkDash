@@ -118,7 +118,7 @@ async function listSyncFiles(host, dir, signal) {
   }
 }
 
-async function nfsSourceDirectory(target, mount, subfolder, commandOptions) {
+export async function nfsSourceDirectory(target, mount, subfolder, commandOptions) {
   const fail = (reason) => new Error(
     `${target.id} NFS Model Registry mount ${mount.path}: ${reason}; refusing transfer (no SSH fallback)`
   );

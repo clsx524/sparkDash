@@ -433,6 +433,7 @@ export class ModelRegistry {
     const trackedSubfolders = new Set(this._models.map((m) => m.subfolder));
     const discovered = [];
     for (const name of names) {
+      if (name === ".sparkdash-images") continue; // Runtime image artifacts are not model weights.
       if (trackedSubfolders.has(name)) continue;
       const id = this._uniqueDiscoveredId(name);
       if (!id) continue; // nothing usable left after sanitizing — skip rather than guess

@@ -1155,6 +1155,22 @@ revision. Distributed ranks retain their explicit physical topology. Definitions
 in `server/config/recipes.json` declare `tp` and `requiredNodes` separately from
 launcher commands; `server/config/services.json` declares small runtimes.
 
+**Prepare all images on Atom** is independent of the selected recipe and service
+placements. `POST /api/deployment/images/prepare` prepares every entry in
+`server/config/images.json` on the canonical registry host and publishes Docker
+archives under `<registry>/.sparkdash-images/`. It uses the existing persisted
+session, output and cancellation APIs, excludes concurrent Apply/fleet power operations,
+and never starts/stops model containers or downloads weights. Custom images are
+built once; prebuilt images are acquired once. Ansible must provision the image
+helper, catalog and pinned build sources beforehand.
+
+Apply requires matching prepared image manifests before stopping the current
+deployment. Each worker imports selected images directly from the verified
+read-only NFS/RDMA mount; there is no worker build, pull, SSH image-copy fallback
+or extra local archive. Exact cached image IDs skip import. Checksums and final
+image IDs/platform are verified, while rank weights/topology remain outside the
+image. Image preparation requires no final deployment topology.
+
 | Recipe | TP | Required physical nodes |
 |--------|----|-------------------------|
 | GLM-5.3-Flash EXL3 | 2 | Head (`spark-1`), worker (`spark-2`) |
@@ -1189,7 +1205,7 @@ selectors and launcher `nodes[].sparkId` in the recipe definition. Overrides via
   measured peak guarantees; Apply rechecks actual available memory before starts.
 - Apply validates canonical artifacts and transfer prerequisites before stopping
   models, removes only explicitly owned model containers, stages selected files
-  with SHA256 verification, prepares images/runtime assets, then starts and
+  with SHA256 verification, imports prepared images and prepares runtime assets, then starts and
   health-checks small services sequentially before the large model. Followers
   precede the head; native TP3 readiness also requires `warming=false`.
 - The successful draft is committed to private `config/deployment.json`

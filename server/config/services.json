@@ -8,7 +8,6 @@
     "memoryGiB": 3,
     "startupGiB": 4,
     "diskGiB": 12,
-    "image": "ghcr.io/huggingface/text-embeddings-inference:121-1.9",
     "modelIds": [
       "Qwen3-Embedding-0.6B"
     ],
@@ -30,7 +29,6 @@
     "memoryGiB": 8,
     "startupGiB": 9,
     "diskGiB": 40,
-    "image": "vllm/vllm-openai:v0.31.0-aarch64",
     "entrypoint": "vllm",
     "modelIds": [
       "Qwen3-ASR-1.7B-NVFP4"
@@ -61,7 +59,6 @@
     "memoryGiB": 9,
     "startupGiB": 10,
     "diskGiB": 55,
-    "image": "vllm/vllm-omni:v0.30.0-aarch64",
     "entrypoint": "/bin/bash",
     "modelIds": [
       "Qwen3-TTS-12Hz-1.7B-NVFP4"
@@ -80,8 +77,6 @@
     "memoryGiB": 13,
     "startupGiB": 14,
     "diskGiB": 60,
-    "image": "qwen-image-sd:local",
-    "dockerfile": "qwen-image-Dockerfile",
     "modelIds": [
       "Qwen-Image-2.1-Turbo-Denoiser",
       "Qwen-Image-2.1-Turbo-Encoder",

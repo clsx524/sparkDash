@@ -1,0 +1,77 @@
+[
+  {
+    "id": "deepseek-v41-lakyfx-tp3",
+    "image": "deepseek-lakyfx:4.0.2-tp3-1.2.8",
+    "context": "deepseek",
+    "dockerfile": "Dockerfile",
+    "inputs": ["deepseek/Dockerfile", "deepseek/runtime.py"],
+    "sourceRevision": "a7be406b2dc7cec2ef1fabd62c3f93ae8afbc98a",
+    "fetchBase": true
+  },
+  {
+    "id": "deepseek-v41-flash",
+    "image": "tensorfold-dsv41:exl3-tp2-7d71dcdf7f2f",
+    "context": "image-sources/deepseek-v41-flash",
+    "dockerfile": "zig/Dockerfile",
+    "source": {
+      "repo": "https://github.com/MiaAI-Lab/DeepSeek-v4.1-Flash-1017-2x-DGX-Sparks.git",
+      "revision": "0e7d421eb4797d98dc781dad764b8f86d34118ae"
+    },
+    "buildArgs": {
+      "BASE_IMAGE": "nvcr.io/nvidia/pytorch:26.07-py3",
+      "TF_REPO": "https://github.com/bertholomus/TensorFold.git",
+      "TF_REF": "fbbc97132cd004237d9887b8d3185896efaedc5c",
+      "INPUTS_REF": "59402086381a42c74d53053443224eec2790b4c5",
+      "ZIG_VERSION": "0.17.0",
+      "ZIG_SHA256": "9e8d11661d4ae3bd57702a3832781e23ad151dde5798e16a5ccd503f65234ff8",
+      "ZIG_MIRRORS": "https://zig.linus.dev/zig",
+      "PATCHES_HASH": "7d71dcdf7f2f",
+      "SM": "121"
+    },
+    "labels": {"tf.patches": "7d71dcdf7f2f"}
+  },
+  {
+    "id": "glm53-exl3",
+    "image": "tensorfold-glm53:v0.6.0",
+    "pull": "ghcr.io/miaai-lab/glm-5.3-flash-exl3-2x-dgx-sparks-tensorfold@sha256:99fe7496d7002fd8f2ca3b1beb0aa07513835cd09989ca657b65875d60f69956",
+    "labels": {"tf.patches": "789e8f3bdfa2"}
+  },
+  {
+    "id": "qwen38-flash-next",
+    "image": "vllm/vllm-openai:qwen38-flash-next",
+    "pull": "vllm/vllm-openai:qwen38-flash-next"
+  },
+  {
+    "id": "minimax-h3",
+    "image": "minimax-h3-dgx-spark:sm121-fp8",
+    "context": "image-sources/minimax-h3",
+    "dockerfile": "Dockerfile",
+    "source": {
+      "repo": "https://github.com/joeynyc/MiniMax-H3-DGX-Spark.git",
+      "revision": "7bd148f133e95733bb4994350cb34869a243440c"
+    },
+    "inputs": ["minimax-h3-image-Dockerfile", "minimax-h3-multiproc-executor.py", "minimax-h3-diffusion-engine.py", "minimax-h3-security-common.sh"]
+  },
+  {
+    "id": "qwen3-embedding",
+    "image": "ghcr.io/huggingface/text-embeddings-inference:121-1.9",
+    "pull": "ghcr.io/huggingface/text-embeddings-inference:121-1.9"
+  },
+  {
+    "id": "qwen3-asr",
+    "image": "vllm/vllm-openai:v0.31.0-aarch64",
+    "pull": "vllm/vllm-openai:v0.31.0-aarch64"
+  },
+  {
+    "id": "qwen3-tts",
+    "image": "vllm/vllm-omni:v0.30.0-aarch64",
+    "pull": "vllm/vllm-omni:v0.30.0-aarch64"
+  },
+  {
+    "id": "qwen-image",
+    "image": "qwen-image-sd:local",
+    "context": ".",
+    "dockerfile": "qwen-image-Dockerfile",
+    "inputs": ["qwen-image-Dockerfile"]
+  }
+]

@@ -924,6 +924,10 @@ export function applyDeploymentPlan(revision: string): Promise<RecipeActivateRes
   return apiFetch("/api/deployment/apply", { method: "POST", body: JSON.stringify({ revision }) });
 }
 
+export function prepareModelImages(): Promise<RecipeActivateResponse> {
+  return apiFetch("/api/deployment/images/prepare", { method: "POST" });
+}
+
 export function fetchRecipeSessions(): Promise<{ sessions: RecipeSessionSummary[] }> {
   return apiFetch("/api/recipes/sessions");
 }

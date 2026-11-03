@@ -561,6 +561,21 @@ test("a TCP mount cannot replace an existing deployment when the plan requires R
   assert.equal(h.phases.at(-1).phase, "failed");
 });
 
+test("missing prepared images leave the current deployment running", async (t) => {
+  const h = setup(t, { sameTarget: true });
+  h.recipe.nodes[0].imageId = "required-runtime";
+  h.options.plan = { target: h.recipe, input: { recipeId: h.recipe.id }, requiredNodes: h.sparks.slice(0, 2) };
+  const original = globalThis.recipeTestSsh;
+  globalThis.recipeTestSsh = (spark, command, options) => {
+    if (command.includes("model_images.py check")) throw new Error("Prepare all images on Atom first");
+    return original(spark, command, options);
+  };
+  const models = { registryHost: () => h.sparks[2], getRegistryConfig: () => ({ hostId: "atom", directory: "/registry" }) };
+  await assert.rejects(h.apply(models), /Prepare all images on Atom first/);
+  assert.equal(h.commands.some(({ command }) => command.includes("&& stop") || command.includes("docker rm") || command.includes("&& start")), false);
+  assert.equal(h.phases.at(-1).phase, "failed");
+});
+
 test("resource revalidation waits for wake readiness and rejects capacity drift before any stop", async (t) => {
   const h = setup(t, { online: [] });
   h.options.wakeNodes = async (targets) => {

@@ -60,7 +60,7 @@ export function RecipesDialog({ open, onClose, recipeSession }: RecipesDialogPro
                 {history.map((session) => <li key={session.id}>
                   <button type="button" aria-pressed={selectedId === session.id} onClick={() => sessions.selectHistory(session.id)}
                     className={`flex w-full flex-wrap justify-between gap-1 rounded border p-2 text-left text-[10px] ${selectedId === session.id ? "border-accent bg-accent-soft" : "border-border bg-surface-elevated"}`}>
-                    <span>{session.label} · TP{session.tp}</span>
+                    <span>{session.label}{session.targetId !== "model-images" && ` · TP${session.tp}`}</span>
                     <span>{session.status} · {new Date(session.startedAt).toLocaleString()} · {Math.max(0, Math.round(((session.finishedAt ?? session.updatedAt) - session.startedAt) / 1000))}s</span>
                   </button>
                 </li>)}
@@ -72,7 +72,7 @@ export function RecipesDialog({ open, onClose, recipeSession }: RecipesDialogPro
             </section>
           </div>
           <DeploymentPlanner disabled={running || cancelPending || pendingId != null || !ready}
-            applying={running || pendingId != null} onApply={sessions.apply} />
+            applying={running || pendingId != null} onApply={sessions.apply} onPrepareImages={sessions.prepareImages} />
         </div>
         <div className="mt-3 flex shrink-0 justify-end border-t border-border pt-3">
           <button type="button" onClick={onClose} className="rounded border border-border bg-surface-elevated px-3 py-1.5 text-xs text-muted hover:bg-surface-hover">Close</button>

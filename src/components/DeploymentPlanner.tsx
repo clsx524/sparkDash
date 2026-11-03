@@ -6,9 +6,10 @@ interface Props {
   disabled: boolean;
   applying: boolean;
   onApply: (revision: string) => Promise<void>;
+  onPrepareImages: () => Promise<void>;
 }
 
-export function DeploymentPlanner({ disabled, applying, onApply }: Props) {
+export function DeploymentPlanner({ disabled, applying, onApply, onPrepareImages }: Props) {
   const [catalog, setCatalog] = useState<DeploymentCatalog | null>(null);
   const [input, setInput] = useState<DeploymentInput | null>(null);
   const [preview, setPreview] = useState<DeploymentPreview | null>(null);
@@ -73,6 +74,9 @@ export function DeploymentPlanner({ disabled, applying, onApply }: Props) {
   const recipe = catalog?.recipes.find((item) => item.id === input?.recipeId);
   return <section aria-label="Deployment topology planner" className="mt-4 space-y-3 border-t border-border pt-4">
     <h3 className="text-sm font-semibold text-text-strong">Deployment topology planner</h3>
+    <p className="text-[10px] text-muted">Prepare all recipe and service images once on Atom, independently of placement. Apply imports only the selected images and stages their required weights over RDMA.</p>
+    <button type="button" disabled={disabled} onClick={() => { void onPrepareImages(); }}
+      className="rounded border border-border bg-surface-elevated px-3 py-2 text-xs font-medium text-text-strong disabled:opacity-50">Prepare all images on Atom</button>
     {error && <p role="alert" className="text-xs text-danger">{error} <button type="button" className="underline" onClick={() => setReload((value) => value + 1)}>Reload planner</button></p>}
     {!catalog || !input ? <p className="text-xs text-muted">Loading model definitions and saved placement…</p> : <>
       <label className="block text-xs text-muted">Large model recipe

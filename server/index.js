@@ -66,6 +66,7 @@ import { RecipeRegistry } from "./collectors/RecipeRegistry.js";
 import { ModelRegistry } from "./collectors/ModelRegistry.js";
 import { switchRecipe, isSwitchInFlight, RecipeSwitchError } from "./collectors/recipeActions.js";
 import { DeploymentPlanner } from "./collectors/deploymentPlan.js";
+import { prepareAllImages } from "./collectors/modelImages.js";
 import { RecipeSessionStore, isValidRecipeSessionId } from "./recipes/RecipeSessionStore.js";
 import { LastActiveRecipeStore } from "./recipes/LastActiveRecipeStore.js";
 import { createPowerOrchestrator } from "./power/powerOrchestrator.js";
@@ -2193,7 +2194,7 @@ const powerOrchestrator = createPowerOrchestrator({
   powerClient,
   shutdownSpark: initiateSparkShutdown,
   wakeSpark: wakeSparkWol,
-  isSwitchInFlight,
+  isSwitchInFlight: () => isSwitchInFlight() || recipeApply != null,
   beforeShutdown: async () => {
     const observedAt = Date.now();
     const snapshot = await recipeRegistry.list({
@@ -2216,8 +2217,8 @@ app.post("/api/sparks/shutdown-all", (req, res) => {
   if (powerOrchestrator.isInFlight()) {
     return res.status(409).json({ error: "A power action is already in progress" });
   }
-  if (isSwitchInFlight()) {
-    return res.status(409).json({ error: "A recipe switch is in progress" });
+  if (isSwitchInFlight() || recipeApply) {
+    return res.status(409).json({ error: "A model deployment or image preparation is in progress" });
   }
   res.json({ success: true, started: true });
   powerOrchestrator.shutdownAll().catch((err) => {
@@ -2232,8 +2233,8 @@ app.post("/api/sparks/wake-all", async (req, res) => {
   if (powerOrchestrator.isInFlight()) {
     return res.status(409).json({ error: "A power action is already in progress" });
   }
-  if (isSwitchInFlight()) {
-    return res.status(409).json({ error: "A recipe switch is in progress" });
+  if (isSwitchInFlight() || recipeApply) {
+    return res.status(409).json({ error: "A model deployment or image preparation is in progress" });
   }
   if (!deploymentPlanner.state.active && !lastActiveRecipe.get()) {
     try {
@@ -2245,8 +2246,8 @@ app.post("/api/sparks/wake-all", async (req, res) => {
     } catch (err) {
       return res.status(500).json({ error: `Cannot determine the active recipe: ${err.message}` });
     }
-    if (powerOrchestrator.isInFlight() || isSwitchInFlight()) {
-      return res.status(409).json({ error: "A power action or recipe switch is already in progress" });
+    if (powerOrchestrator.isInFlight() || isSwitchInFlight() || recipeApply) {
+      return res.status(409).json({ error: "A power action, model deployment or image preparation is already in progress" });
     }
   }
   const remembered = lastActiveRecipe.get();
@@ -2522,6 +2523,39 @@ async function startRecipeApply(recipeId, preparedPlan = null) {
   });
   return { started: true, targetId: recipe.id, sessionId: session.id };
 }
+
+app.post("/api/deployment/images/prepare", (_req, res) => {
+  if (isSwitchInFlight() || recipeApply || powerOrchestrator.isInFlight()) {
+    return res.status(409).json({ error: "Another deployment, image preparation, or power action is running" });
+  }
+  const source = modelRegistry.registryHost();
+  if (!source || !modelRegistry.getRegistryConfig().directory) {
+    return res.status(400).json({ error: "Configure Atom as the canonical Model Registry first" });
+  }
+  const secrets = registry.sparks.flatMap((spark) => [
+    spark.ssh?.password, spark.powerToken, ...Object.values(spark.llmApiKeys || {}),
+  ]).filter(Boolean);
+  if (process.env.SPARKDASH_TOKEN) secrets.push(process.env.SPARKDASH_TOKEN);
+  const session = recipeSessions.start({
+    targetId: "model-images", label: "Prepare all recipe and service images on Atom", tp: 1,
+    requiredNodes: [{ id: source.id, name: source.name || source.id }],
+  }, { secrets });
+  recipeSessions.recordProgress(session.id, { phase: "preparing", message: "Preparing all images on Atom, independent of model placement; no model containers are stopped or started" });
+  const operation = { id: session.id, controller: new AbortController(), settled: null };
+  recipeApply = operation;
+  operation.settled = prepareAllImages(modelRegistry, {
+    signal: operation.controller.signal, onLog: (line) => recipeSessions.appendLog(session.id, line),
+  }).then(() => {
+    recipeSessions.recordProgress(session.id, { phase: "done" });
+  }).catch((error) => {
+    recipeSessions.recordProgress(session.id, operation.controller.signal.aborted
+      ? { phase: "cancelled", message: "Image preparation cancelled; published images were retained" }
+      : { phase: "failed", error: error.message });
+  }).finally(() => {
+    if (recipeApply === operation) recipeApply = null;
+  });
+  res.json({ started: true, targetId: "model-images", sessionId: session.id });
+});
 
 deploymentPlanner.register(app, startRecipeApply);
 

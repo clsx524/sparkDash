@@ -8,7 +8,7 @@ import { flush, render } from "../testing/render";
 import { RecipesDialog } from "./RecipesDialog";
 
 vi.mock("../api/client", () => ({
-  applyDeploymentPlan: vi.fn(), buildDeploymentPlan: vi.fn(), fetchDeploymentCatalog: vi.fn(),
+  applyDeploymentPlan: vi.fn(), prepareModelImages: vi.fn(), buildDeploymentPlan: vi.fn(), fetchDeploymentCatalog: vi.fn(),
   cancelRecipeSession: vi.fn(), fetchRecipes: vi.fn(), fetchCurrentRecipeSession: vi.fn(),
   fetchRecipeSession: vi.fn(), fetchRecipeSessions: vi.fn(),
 }));
@@ -80,11 +80,13 @@ describe("persistent recipe Apply views", () => {
     const { container } = render(<RecipesDialog open onClose={onClose} recipeSession={null} />);
     await flush();
     const buttons = [...container.querySelectorAll<HTMLButtonElement>('[aria-label="Deployment topology planner"] button')];
-    expect(buttons[1].disabled).toBe(true);
-    act(() => buttons[0].click());
+    const build = buttons.find((button) => button.textContent === "Build plan")!;
+    const apply = buttons.find((button) => button.textContent === "Apply plan")!;
+    expect(apply.disabled).toBe(true);
+    act(() => build.click());
     await flush();
-    expect(buttons[1].disabled).toBe(false);
-    act(() => { buttons[1].click(); buttons[1].click(); });
+    expect(apply.disabled).toBe(false);
+    act(() => { apply.click(); apply.click(); });
     expect(applyDeploymentPlan).toHaveBeenCalledTimes(1);
     expect(applyDeploymentPlan).toHaveBeenCalledWith("plan-v1");
     expect(buttons.every((button) => button.disabled)).toBe(true);
@@ -336,9 +338,9 @@ describe("persistent recipe Apply views", () => {
     const { container, root } = render(<RecipesDialog open onClose={onClose} recipeSession={null} />);
     await flush();
     const buttons = [...container.querySelectorAll<HTMLButtonElement>('[aria-label="Deployment topology planner"] button')];
-    act(() => buttons[0].click());
+    act(() => buttons.find((button) => button.textContent === "Build plan")!.click());
     await flush();
-    const button = buttons[1];
+    const button = buttons.find((entry) => entry.textContent === "Apply plan")!;
     act(() => button.click());
     const done = session("quick", { status: "succeeded", finishedAt: 2000 });
     vi.mocked(fetchCurrentRecipeSession).mockResolvedValue({ session: done });

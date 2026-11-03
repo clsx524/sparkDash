@@ -62,7 +62,7 @@ export function RecipeSessionDetails({ session }: { session: RecipeSessionDetail
     <div className="space-y-2 text-xs" data-session-id={session.id}>
       <div className="flex flex-wrap items-center gap-2">
         <strong className="text-text-strong">{session.label}</strong>
-        <span>TP{session.tp}</span>
+        {session.targetId !== "model-images" && <span>TP{session.tp}</span>}
         <span className={`rounded border border-border px-2 py-0.5 ${session.status === "failed" || session.status === "interrupted" ? "text-danger" : session.status === "cancelled" ? "text-muted" : "text-accent"}`} role="status">{session.status === "running" && session.phase === "cancelling" ? "cancelling" : session.status}</span>
       </div>
       <div className="text-[10px] text-muted">

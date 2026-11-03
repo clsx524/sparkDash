@@ -12,7 +12,8 @@
 import { isAllowedTargetHost } from "../validate.js";
 import { llmProbeHost } from "./llmHost.js";
 import { sshExec } from "./ssh.js";
-import { syncModelToSpark } from "./modelSync.js";
+import { syncModelToSpark, shQuotePath } from "./modelSync.js";
+import { stageRecipeImages } from "./modelImages.js";
 import {
   probeNodeShardProgress,
   estimateNodeProgress,
@@ -437,6 +438,9 @@ export async function switchRecipe(recipeRegistry, modelRegistry, targetId, onPr
       await bounded(() => syncModelsForRecipe(recipeRegistry, modelRegistry, target, { ...options, sourceOnly: true }),
         MODEL_SYNC_PHASE_TIMEOUT_MS, "checking canonical artifacts timed out");
     }
+    if (options.plan) await bounded(
+      () => stageRecipeImages(recipeRegistry, modelRegistry, target, { ...options, preflightOnly: true }),
+      MODEL_SYNC_PHASE_TIMEOUT_MS, "checking prepared images timed out");
     emit("checking-current-state");
     const snapshot = await abortable(() => recipeRegistry.list(probeOptions), options.signal);
     if (snapshot.conflict) {
@@ -470,11 +474,16 @@ export async function switchRecipe(recipeRegistry, modelRegistry, targetId, onPr
     if (options.plan?.input.recipeId?.startsWith("deepseek-")) {
       emit("preparing", { message: "Retaining only the selected DeepSeek deployment cache" });
       for (const spark of requiredNodes.filter((spark) => spark.id !== modelRegistry?.getRegistryConfig().hostId)) {
-        await sshExec(spark, `python3 ~/.local/share/sparkdash-models/model-runtime.py evict ${target.id}`, {
+        await sshExec(spark, `SPARKDASH_MODEL_ROOT=${shQuotePath(spark.modelFolder)} python3 ~/.local/share/sparkdash-models/model-runtime.py evict ${target.id}`, {
           timeoutMs: 300_000, signal: options.signal, cancelRemote: true,
           onOutput: options.onLog ? (line) => report(options, spark, line.text, line.stream) : undefined,
         });
       }
+    }
+    if (options.plan) {
+      emit("preparing", { message: "Importing prepared images from Atom over RDMA" });
+      await bounded(() => stageRecipeImages(recipeRegistry, modelRegistry, target, options),
+        MODEL_SYNC_PHASE_TIMEOUT_MS, "importing prepared images timed out");
     }
     if (target.nodes.some((node) => node.modelIds?.length)) {
       emit("syncing-model", { from: current?.id ?? null });
