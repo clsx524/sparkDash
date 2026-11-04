@@ -1223,6 +1223,10 @@ selectors and launcher `nodes[].sparkId` in the recipe definition. Overrides via
 - The default includes Qwen ASR on Spark 1 and Qwen TTS/embedding on Spark 2.
   Qwen Image is available but unassigned. Drama is disabled. Canonical weights
   stay on Atom; only the selected DeepSeek cache is kept on Spark 1/2.
+  TTS uses a 6% talker and 2% audio-decoder GPU allocation, keeping 4096 talker
+  tokens and four concurrent sequences. Its planner budgets are 11 GiB running
+  and 12 GiB startup. Provision the TTS runtime YAML and redeploy the updated
+  planner catalog, then build/apply a fresh plan; no TTS image rebuild is needed.
 - Optional NFS mappings may require `"transport": "rdma"`. Sync then requires
   the exact read-only source with `proto=rdma`; a TCP mount fails without
   fallback. Host modules, service configuration and mounts remain Ansible's job.

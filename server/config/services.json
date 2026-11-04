@@ -56,8 +56,8 @@
     "defaultHost": "spark-2",
     "port": 8891,
     "healthPath": "/v1/audio/voices",
-    "memoryGiB": 9,
-    "startupGiB": 10,
+    "memoryGiB": 11,
+    "startupGiB": 12,
     "diskGiB": 55,
     "entrypoint": "/bin/bash",
     "modelIds": [
