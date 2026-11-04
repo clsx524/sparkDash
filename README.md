@@ -1163,6 +1163,12 @@ session, output and cancellation APIs, excludes concurrent Apply/fleet power ope
 and never starts/stops model containers or downloads weights. Custom images are
 built once; prebuilt images are acquired once. Ansible must provision the image
 helper, catalog and pinned build sources beforehand.
+Preparation overlaps two registry-copy jobs with one serial stream of custom
+build/export jobs. Native compilations stay serial to avoid multiplying peak
+memory demand. Per-image elapsed times are logged. Base-image verification is
+reused only when its pinned configuration and immutable Docker ID still match;
+archive SHA-256 checks remain intact. Provision the updated helper on Atom;
+installing this scheduling change does not invalidate existing prepared images.
 
 Apply requires matching prepared image manifests before stopping the current
 deployment. Each worker imports selected images directly from the verified
