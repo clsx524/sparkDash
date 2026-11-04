@@ -1216,6 +1216,10 @@ selectors and launcher `nodes[].sparkId` in the recipe definition. Overrides via
   with SHA256 verification, imports prepared images and prepares runtime assets, then starts and
   health-checks small services sequentially before the large model. Followers
   precede the head; native TP3 readiness also requires `warming=false`.
+  The TP3 container adapter uses upstream's launcher/helper and mirrors its NVMe
+  companion service: restart a failed helper after five seconds without killing
+  the native rank, and stop the helper when that rank exits. It does not add
+  independent native-rank or cluster restarts.
 - The successful draft is committed to private `config/deployment.json`
   (`DEPLOYMENT_PLAN_JSON_PATH` overrides it). Stable streaming routes under
   `/inference/{embeddings,tts,asr,images}` use only committed placements and return
