@@ -1199,6 +1199,15 @@ audit fix, retaining TP3 1.2.8) and MiaAI DeepSeek `f424dfe` (TP2 image
 Model and Engram revisions are unchanged. Provision updated sources/catalogs,
 then prepare the changed images and build/apply a fresh plan.
 
+The TP3 image builds a private NCCL transport using the pinned upstream
+`tensorfold/tp4/build_nccl_ring.py` builder. Extended four-rail IPv4 advertisement,
+PCI-domain-preserving port selection and cross-NIC connections support the
+three-host direct-connect fabric; TP3's engine, weights and collective algorithms
+are unchanged, and TP4's ring-only mode is not enabled. Reprovision `model-images`
+on all three hosts and prepare the TP3 image again before Apply. No host-network
+reconfiguration or weight download is required. CUDA compilation and live
+three-rank serving must be qualified separately from CPU routing checks.
+
 The shipped fleet definitions use explicit Spark IDs for both dependencies and
 launcher targets: `spark-1`, `spark-2`, and `atom`. Multiple nodes can therefore have
 the `worker` role without changing which machines a recipe wakes or starts.
