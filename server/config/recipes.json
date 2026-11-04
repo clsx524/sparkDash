@@ -1,7 +1,7 @@
 [
   {
     "id": "deepseek-v41-lakyfx-tp3",
-    "label": "DeepSeek V4.1 Flash \u00b7 LakyFx v4.0.2 / TP3 1.2.8",
+    "label": "DeepSeek V4.1 Flash \u00b7 LakyFx v4.0.4 / TP3 1.2.8",
     "group": "distributed-text-gen",
     "tp": 3,
     "requiredNodes": [

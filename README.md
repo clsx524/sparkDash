@@ -1184,8 +1184,14 @@ still export through Docker, selecting ARM64 explicitly only for platform indexe
 | GLM-5.3-Flash EXL3 | 2 | Head (`spark-1`), worker (`spark-2`) |
 | Qwen3.8-Flash-Next | 2 | Head (`spark-1`), worker (`spark-2`) |
 | MiniMax H3 | 1 | Worker (`spark-2`) |
-| DeepSeek V4.1 Flash · LakyFx v4.0.2 / TP3 1.2.8 (default) | 3 | Head (`spark-1`), worker (`spark-2`), Atom (`atom`) |
+| DeepSeek V4.1 Flash · LakyFx v4.0.4 / TP3 1.2.8 (default) | 3 | Head (`spark-1`), worker (`spark-2`), Atom (`atom`) |
 | DeepSeek V4.1 Flash · MiaAI | 2 | Head (`spark-1`), worker (`spark-2`) |
+
+Recipe sources are pinned to LakyFx `805ee2f` (v4.0.4 plus the portable-kernel
+audit fix, retaining TP3 1.2.8) and MiaAI DeepSeek `f424dfe` (TP2 image
+`exl3-tp2-9d0f4a04af7f`, including the GET/DELETE request-body drain fix).
+Model and Engram revisions are unchanged. Provision updated sources/catalogs,
+then prepare the changed images and build/apply a fresh plan.
 
 The shipped fleet definitions use explicit Spark IDs for both dependencies and
 launcher targets: `spark-1`, `spark-2`, and `atom`. Multiple nodes can therefore have
