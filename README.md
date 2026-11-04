@@ -1167,19 +1167,19 @@ Preparation overlaps two registry-copy jobs with one serial stream of custom
 build/export jobs. Native compilations stay serial to avoid multiplying peak
 memory demand. Per-image elapsed times are logged. Base-image verification is
 reused only when its pinned configuration and immutable Docker ID still match;
-archive SHA-256 checks remain intact. Provision the updated helper on Atom;
-installing this scheduling change does not invalidate existing prepared images.
+preparation-time archive SHA-256 checks remain intact. Build jobs have no
+minimum-free-RAM gate; archive exports retain their disk-space checks.
 
 Apply requires matching prepared image manifests before stopping the current
 deployment. Each worker imports selected images directly from the verified
 read-only NFS/RDMA mount; there is no worker build, pull, SSH image-copy fallback
 or extra local archive. Schema 2 manifests pin the saved configuration's SHA-256,
-not Docker's store-specific image ID. Archive checksums, configuration digests and
-platform are verified. Local receipts bind that configuration to the host's native
-ID so unchanged images skip import. This supports Atom's containerd image store and
-legacy Docker workers without weakening the LakyFx base pin. Reprovision the image
-helper on all three hosts and prepare again for schema 1 caches. Rank weights and
-topology remain outside the image; preparation requires no final deployment topology.
+not Docker's store-specific image ID. Preparation verifies archives once. Apply
+checks manifest/size/platform and the small saved configuration without hashing
+all layers or re-exporting the loaded image. Local receipts bind the configuration
+to the host's native ID so unchanged images skip import. Reprovision the image
+helper on all three hosts; schema 1 caches require image preparation again.
+Rank weights and topology remain outside the image; preparation requires no final placement.
 Prebuilt images go directly from their registry to complete Docker archives through
 `skopeo` on Atom, avoiding incomplete Docker/containerd exports. Preparation verifies
 all referenced layers, configuration, platform and required labels. Custom builds
@@ -1199,14 +1199,12 @@ audit fix, retaining TP3 1.2.8) and MiaAI DeepSeek `f424dfe` (TP2 image
 Model and Engram revisions are unchanged. Provision updated sources/catalogs,
 then prepare the changed images and build/apply a fresh plan.
 
-The TP3 image builds a private NCCL transport using the pinned upstream
-`tensorfold/tp4/build_nccl_ring.py` builder. Extended four-rail IPv4 advertisement,
-PCI-domain-preserving port selection and cross-NIC connections support the
-three-host direct-connect fabric; TP3's engine, weights and collective algorithms
-are unchanged, and TP4's ring-only mode is not enabled. Reprovision `model-images`
-on all three hosts and prepare the TP3 image again before Apply. No host-network
-reconfiguration or weight download is required. CUDA compilation and live
-three-rank serving must be qualified separately from CPU routing checks.
+The TP3 image uses the preserved upstream 1.2.8/v128 build and launcher and
+the pinned base's NCCL 2.30.7 wheel. It does not invoke the separate TP4 NCCL
+builder or set its transport extensions. Weights, Engram and KV geometry are
+unchanged. Reprovision `model-images` on all three hosts and prepare the changed
+TP3 image before Apply; other valid images are reused. No weight download is
+required. Image compilation is not live three-rank routing/inference qualification.
 
 The shipped fleet definitions use explicit Spark IDs for both dependencies and
 launcher targets: `spark-1`, `spark-2`, and `atom`. Multiple nodes can therefore have
@@ -1228,15 +1226,17 @@ selectors and launcher `nodes[].sparkId` in the recipe definition. Overrides via
 - A plan wakes its compute/service hosts and the canonical registry host.
   Wake all restores the last committed plan, including services-only plans;
   capacity is revalidated after hosts are online and before any stop.
-- Build combines conservative runtime budgets, startup overhead and a 12 GiB
-  reserve against measured total RAM. Disk checks account for staged data and
-  explicitly planned alternate-DeepSeek eviction. These are estimates, not
-  measured peak guarantees; Apply rechecks actual available memory before starts.
-- Apply validates canonical artifacts and transfer prerequisites before stopping
+- Build shows runtime/startup RAM estimates without reserving memory or rejecting
+  RAM overcommit. Disk checks still account for staged data and explicitly planned
+  alternate-DeepSeek eviction. Apply has no available-memory gate, low-memory
+  watchdog, cooling delay or memory-wait loop; native allocation/OOM decides failure.
+- Apply checks canonical file sizes and transfer prerequisites before stopping
   models, removes only explicitly owned model containers, stages selected files
-  with SHA256 verification, imports prepared images and prepares runtime assets, then starts and
-  health-checks small services sequentially before the large model. Followers
-  precede the head; native TP3 readiness also requires `warming=false`.
+  without full SHA256 passes, imports prepared images and prepares runtime assets.
+  Explicit Model Registry Sync retains checksum verification. Small services start
+  concurrently, including services sharing a host; every small service must become
+  healthy before large-model startup. Followers precede the head; native TP3
+  readiness also requires `warming=false`.
   The TP3 container adapter uses upstream's launcher/helper and mirrors its NVMe
   companion service: restart a failed helper after five seconds without killing
   the native rank, and stop the helper when that rank exits. It does not add

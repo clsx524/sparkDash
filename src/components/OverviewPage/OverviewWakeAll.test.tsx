@@ -50,7 +50,7 @@ beforeEach(() => {
   vi.mocked(fetchCurrentRecipeSession).mockResolvedValue({ session: current });
   vi.mocked(fetchRecipeSessions).mockResolvedValue({ sessions: [current] });
   vi.mocked(fetchRecipeSession).mockResolvedValue({ session: current });
-  vi.mocked(fetchDeploymentCatalog).mockResolvedValue({ recipes: [], services: [], hosts: [], draft: { recipeId: null, placements: [] }, active: null, reserveGiB: 12, budgetBasis: "Conservative budgets" });
+  vi.mocked(fetchDeploymentCatalog).mockResolvedValue({ recipes: [], services: [], hosts: [], draft: { recipeId: null, placements: [] }, active: null, budgetBasis: "Memory estimates" });
 });
 afterEach(() => vi.useRealTimers());
 

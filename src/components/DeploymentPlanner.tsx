@@ -57,7 +57,7 @@ export function DeploymentPlanner({ disabled, applying, onApply, onPrepareImages
       onDragStart={(event) => { event.dataTransfer.setData('text/plain', service.id); event.dataTransfer.effectAllowed = 'move'; }}
       className="rounded border border-border bg-surface-elevated p-3">
       <h4 className="text-xs font-semibold text-text-strong">{service.label}</h4>
-      <p className="my-1 text-[10px] text-muted">{service.memoryGiB} GiB runtime budget · {service.startupGiB} GiB startup</p>
+      <p className="my-1 text-[10px] text-muted">{service.memoryGiB} GiB runtime estimate · {service.startupGiB} GiB startup estimate</p>
       <label className="block text-[10px] text-muted">Placement
         <select aria-label={`${service.label} placement`} value={host} disabled={disabled}
           onChange={(event) => place(service.id, event.target.value)}
@@ -96,7 +96,7 @@ export function DeploymentPlanner({ disabled, applying, onApply, onPrepareImages
             className="min-h-40 space-y-2 rounded border border-border bg-surface p-3">
             <h4 className="text-xs font-semibold text-text-strong">{host.name || host.id}</h4>
             {capacity && <p className={`text-[10px] ${capacity.errors.length ? 'text-danger' : 'text-muted'}`}>
-              {capacity.neededGiB?.toFixed(1) ?? '?'} / {capacity.totalGiB?.toFixed(1) ?? '?'} GiB planned, including startup/reserve<br />
+              {capacity.neededGiB?.toFixed(1) ?? '?'} / {capacity.totalGiB?.toFixed(1) ?? '?'} GiB estimated; not enforced<br />
               +{capacity.additionalDiskGiB?.toFixed(1) ?? '?'} GiB disk / {capacity.diskFreeGiB?.toFixed(1) ?? '?'} GiB free
             </p>}
             {rank >= 0 && <div className="rounded border border-accent bg-accent-soft p-2 text-[10px] text-accent">{recipe?.label}<br />Fixed compute member {rank + 1} / {recipe?.tp}</div>}
@@ -117,7 +117,7 @@ export function DeploymentPlanner({ disabled, applying, onApply, onPrepareImages
           className="rounded bg-accent px-3 py-2 text-xs font-semibold text-white disabled:opacity-50">{applying ? 'Applying…' : 'Apply plan'}</button>
       </div>
       {preview && <section aria-label="Plan preview" className="rounded border border-border p-3 text-xs">
-        <h4 className={preview.valid ? 'text-accent' : 'text-danger'}>{preview.valid ? 'Fits configured budgets; live admission remains required' : 'Plan blocked'}</h4>
+        <h4 className={preview.valid ? 'text-accent' : 'text-danger'}>{preview.valid ? 'Plan ready; memory estimates are not enforced' : 'Plan blocked'}</h4>
         {preview.errors.length > 0 && <ul role="alert" className="my-2 list-disc pl-4 text-danger">{preview.errors.map((message) => <li key={message}>{message}</li>)}</ul>}
         <ol className="mt-2 list-decimal space-y-1 pl-4 text-muted">{preview.steps.map((step) => <li key={step}>{step}</li>)}</ol>
       </section>}

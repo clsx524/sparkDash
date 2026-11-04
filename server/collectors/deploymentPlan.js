@@ -38,8 +38,7 @@ export class DeploymentPlanner {
       services: this.services.map(({ id, label, memoryGiB, startupGiB, diskGiB }) => ({ id, label, memoryGiB, startupGiB, diskGiB })),
       hosts: this.recipes.sparkRegistry.sparks.filter((host) => host.platform !== 'darwin' && host.platform !== 'windows' && host.modelFolder).map(({ id, name, modelFolder }) => ({ id, name, modelFolder })),
       draft: this.state.draft, active: this.state.active,
-      reserveGiB: 12,
-      budgetBasis: 'Conservative configuration budgets, including weights and image/build disk allowance, not measured peaks. Live memory admission is rechecked before each start.',
+      budgetBasis: 'Memory estimates are informational only. Apply does not reserve RAM or stop models for low memory; native allocation errors or OOM determine failure.',
     };
   }
 
@@ -139,12 +138,11 @@ export class DeploymentPlanner {
       ].join('\n');
       try {
         const measured = JSON.parse(await this.execute(host, `python3 -c ${quote(probe)}`, { timeoutMs: 20_000, cancelRemote: true, signal }));
-        if (![measured.totalGiB, measured.availableGiB, measured.diskFreeGiB, measured.stagedGiB, measured.evictableGiB].every(Number.isFinite)) throw new Error('Invalid host resource measurement');
-        const neededGiB = budget.memoryGiB + budget.startupExtraGiB + 12;
+        if (![measured.diskFreeGiB, measured.stagedGiB, measured.evictableGiB].every(Number.isFinite)) throw new Error('Invalid host disk measurement');
+        const neededGiB = budget.memoryGiB + budget.startupExtraGiB;
         const additionalDiskGiB = Math.max(0, budget.diskGiB - measured.stagedGiB);
         const errors = [];
         if (!['aarch64', 'arm64'].includes(measured.machine)) errors.push('The supplied runtime images require ARM64');
-        if (neededGiB > measured.totalGiB) errors.push(`Needs ${neededGiB.toFixed(1)} GiB including startup and reserve; host has ${measured.totalGiB.toFixed(1)}`);
         if (additionalDiskGiB + 10 > measured.diskFreeGiB + measured.evictableGiB) errors.push(`Needs ${additionalDiskGiB.toFixed(1)} GiB additional disk plus 10 GiB reserve after planned cache eviction`);
         return { id: host.id, name: host.name || host.id, ...budget, ...measured, neededGiB, additionalDiskGiB, errors };
       } catch (error) {
@@ -159,8 +157,8 @@ export class DeploymentPlanner {
       'Stop conflicting model containers only; unrelated containers and host NFS remain untouched',
       ...(plan.input.recipeId?.startsWith('deepseek-') ? ['Evict the other DeepSeek deployment cache on Spark1/2 only; preserve Atom registry weights'] : []),
       'Import the selected prepared images through NFS/RDMA and stage the selected weights; no worker image builds or pulls',
-      'Start and warm the selected small services, one at a time',
-      ...(plan.input.recipeId ? ['Recheck live memory on every rank; start the selected large model and wait for serving readiness'] : []),
+      'Start and warm all selected small services concurrently',
+      ...(plan.input.recipeId ? ['Start the selected large model after every small service is healthy; wait for serving readiness'] : []),
       'Commit the plan and switch stable inference routes to healthy placements',
     ];
     if (save) { this.state.draft = plan.input; this.save(); }

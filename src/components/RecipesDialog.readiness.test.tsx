@@ -52,7 +52,7 @@ beforeEach(() => {
   vi.mocked(fetchDeploymentCatalog).mockResolvedValue({
     recipes: [glm, deepseek], services: [],
     hosts: [{ id: "one", name: "Spark 1", modelFolder: "/models" }, { id: "two", name: "Spark 2", modelFolder: "/models" }],
-    draft: { recipeId: "glm", placements: [] }, active: null, reserveGiB: 12, budgetBasis: "Fixture budgets",
+    draft: { recipeId: "glm", placements: [] }, active: null, budgetBasis: "Fixture estimates",
   });
   vi.mocked(buildDeploymentPlan).mockResolvedValue({
     input: { recipeId: "glm", placements: [] }, revision: "plan-v1", valid: true, errors: [], hosts: [], steps: [],

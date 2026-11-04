@@ -114,18 +114,6 @@ async function clearStaleContainers(recipeRegistry, requiredNodes, getOnline, op
   }));
 }
 
-async function checkMemory(plan, loaded, options) {
-  if (!plan) return;
-  for (const spark of plan.requiredNodes) {
-    const remaining = plan.resources.get(spark.id).memoryGiB - (loaded.get(spark.id) || 0);
-    const command = "python3 -c 'from pathlib import Path; print(next(int(x.split()[1])/1024**2 for x in Path(\"/proc/meminfo\").read_text().splitlines() if x.startswith(\"MemAvailable:\")))'";
-    const available = Number(await sshExec(spark, command, { timeoutMs: 15_000, signal: options.signal, cancelRemote: true }));
-    if (!Number.isFinite(available) || available < remaining + 8) {
-      throw new RecipeSwitchError(`${spark.name || spark.id}: need ${(remaining + 8).toFixed(1)} GiB available for remaining models and reserve, have ${Number.isFinite(available) ? available.toFixed(1) : "unknown"}`);
-    }
-  }
-}
-
 /** Stage each node's selected artifacts, or stat the canonical files before any stop. */
 export async function syncModelsForRecipe(recipeRegistry, modelRegistry, recipe, options = {}) {
   for (const node of recipe.nodes) {
@@ -145,9 +133,9 @@ export async function syncModelsForRecipe(recipeRegistry, modelRegistry, recipe,
       if (!model) {
         throw new RecipeSwitchError(`Recipe ${recipe.id} references unknown model ${modelId}`);
       }
-      report(options, spark, `${options.sourceOnly ? "Checking canonical" : "Verifying staged"} artifacts for ${modelId}`);
+      report(options, spark, `${options.sourceOnly ? "Checking canonical" : "Staging"} artifacts for ${modelId}`);
       const result = await syncModelToSpark(modelRegistry, model, spark, {
-        verify: !options.sourceOnly,
+        verify: false,
         requireVerified: Boolean(options.plan),
         includePattern: node.modelFiles?.[modelId],
         signal: options.signal,
@@ -514,15 +502,11 @@ export async function switchRecipe(recipeRegistry, modelRegistry, targetId, onPr
       throw new RecipeSwitchError(`Required nodes went offline before start: ${dropped.map((spark) => spark.name || spark.id).join(", ")}`);
     }
     emit("starting");
-    const loaded = new Map();
-    await checkMemory(options.plan, loaded, options);
-    for (const node of ordered.filter((node) => node.serviceId)) {
+    await Promise.all(ordered.filter((node) => node.serviceId).map((node) => bounded(async () => {
       await runNodeCommand(recipeRegistry, node, node.startCmd, START_TIMEOUT_MS, options, "Start small service");
       await waitForNodeHealth(recipeRegistry, node, options);
-      loaded.set(node.sparkId, (loaded.get(node.sparkId) || 0) + node.memoryGiB);
-      await checkMemory(options.plan, loaded, options);
-    }
-    await checkMemory(options.plan, loaded, options);
+    }, START_TIMEOUT_MS + (node.healthTimeoutMs || HEALTH_TIMEOUT_MS) + 10_000,
+    `starting ${node.role} timed out`)));
     for (const node of ordered.filter((node) => !node.serviceId && node.startCmd)) {
       await bounded(
         () => runNodeCommand(recipeRegistry, node, node.startCmd, START_TIMEOUT_MS, options, "Start large model"),

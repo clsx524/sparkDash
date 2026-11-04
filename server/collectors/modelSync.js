@@ -19,10 +19,9 @@
  * against — no manifest means "already there" can't be told apart from
  * "silently incomplete", so that case still requires a real sync.
  *
- * Apply Recipe opts out of hashing: it first checks only that every manifest-listed
- * file is nonempty on the target, so already-staged weights need no registry connection
- * (the registry can be offline). This is a presence check, not an integrity guarantee;
- * explicit Sync retains SHA256 verification. Missing files or no manifest use rsync.
+ * Apply Recipe opts out of hashing: it checks manifest-listed file sizes (or
+ * presence when no size is available). This is not a fresh integrity scrub;
+ * explicit Sync retains SHA256 verification. Missing/truncated files use rsync.
  *
  * The sync command always runs FROM the target host, pulling FROM the
  * registry — never
@@ -225,11 +224,13 @@ export async function syncModelToSpark(modelRegistry, model, targetSpark, option
   const destDir = joinRemotePath(targetSpark.modelFolder, model.subfolder);
 
   if (!options.preflightOnly && !verify && Array.isArray(model.manifest) && model.manifest.length > 0) {
-    const fileArgs = model.manifest.map((entry) => shQuote(entry.path)).join(" ");
+    const checks = model.manifest.map((entry) => Number.isSafeInteger(entry.size)
+      ? `test "$(stat -c %s -- ${shQuote(entry.path)})" = ${shQuote(entry.size)}`
+      : `test -s ${shQuote(entry.path)}`);
     try {
       const present = await sshExec(
         targetSpark,
-        `cd ${shQuotePath(destDir)} && for file in ${fileArgs}; do test -s "$file" || exit 1; done && printf '__PRESENT__'`,
+        `cd ${shQuotePath(destDir)} && ${checks.join(" && ")} && printf '__PRESENT__'`,
         { timeoutMs: PREFLIGHT_TIMEOUT_MS, ...commandOptions }
       );
       if (present === "__PRESENT__") return { destDir, skipped: true };

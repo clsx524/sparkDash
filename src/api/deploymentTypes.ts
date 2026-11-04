@@ -10,7 +10,6 @@ export interface DeploymentCatalog {
   hosts: Array<{ id: string; name: string; modelFolder: string }>;
   draft: DeploymentInput;
   active: DeploymentInput | null;
-  reserveGiB: number;
   budgetBasis: string;
 }
 export interface DeploymentPreview {

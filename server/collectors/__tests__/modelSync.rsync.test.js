@@ -107,6 +107,16 @@ function nfsFixture(t, { fileCount = 3, filesystem = {} } = {}) {
   const targetFolder = path.join(targetHome, "models");
   fs.mkdirSync(source, { recursive: true });
   fs.mkdirSync(targetHome);
+  // macOS realpath lacks -e/--; use the same existing-path semantics on its real
+  // filesystem so cancellation and escape checks reach their intended boundary.
+  const bin = path.join(root, "bin");
+  fs.mkdirSync(bin);
+  fs.writeFileSync(path.join(bin, "realpath"), `#!${process.execPath}\n` +
+    `try { console.log(require("node:fs").realpathSync(process.argv.at(-1))); }\n` +
+    `catch (error) { console.error(error.message); process.exitCode = 1; }\n`, { mode: 0o755 });
+  fs.writeFileSync(path.join(bin, "stat"), `#!${process.execPath}\n` +
+    `try { console.log(require("node:fs").lstatSync(process.argv.at(-1)).size); }\n` +
+    `catch (error) { console.error(error.message); process.exitCode = 1; }\n`, { mode: 0o755 });
   const files = ["config.json", "nested dir/weights'$(touch INJECTED).bin", "tokenizer.json"].slice(0, fileCount);
   const manifest = files.map((name, index) => {
     const bytes = Buffer.from(`NFS checkpoint ${index}\n`);
@@ -144,7 +154,7 @@ function nfsFixture(t, { fileCount = 3, filesystem = {} } = {}) {
     commands.push({ command, options });
     if (command.startsWith("findmnt ")) return JSON.stringify(probe);
     const result = await exec("sh", ["-c", command], {
-      env: { ...process.env, HOME: targetHome }, cwd: targetHome,
+      env: { ...process.env, HOME: targetHome, PATH: `${bin}${path.delimiter}${process.env.PATH}` }, cwd: targetHome,
       timeout: 15_000, signal: options.signal,
     });
     return result.stdout.trim();
@@ -345,4 +355,20 @@ test("NFS self-sync skips invalid target mapping and transport entirely", async 
   const result = await h.sync({ verify: false });
   assert.equal(result.destDir, `~/.cache/huggingface/registry/${h.model.subfolder}`);
   assert.deepEqual(h.commands, []);
+});
+
+test("fast staged-file checks skip complete weights but reject a truncated cache before trusting it", async (t) => {
+  const h = nfsFixture(t);
+  const destination = path.join(h.targetFolder, h.model.subfolder);
+  for (const entry of h.model.manifest) {
+    const bytes = fs.readFileSync(path.join(h.source, entry.path));
+    entry.size = bytes.length;
+    fs.mkdirSync(path.dirname(path.join(destination, entry.path)), { recursive: true });
+    fs.writeFileSync(path.join(destination, entry.path), bytes);
+  }
+  h.probe.filesystems = [];
+  assert.equal((await h.sync({ verify: false })).skipped, true);
+  fs.writeFileSync(path.join(destination, h.files[0]), "x");
+  await assert.rejects(h.sync({ verify: false }), /mount verification failed/);
+  assert.equal(h.verifies(), 0);
 });

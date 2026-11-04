@@ -33,13 +33,12 @@ async function listen(t, handler) {
   return `http://127.0.0.1:${server.address().port}`;
 }
 
-test('placement fits at the startup boundary and blocks memory/disk overcommit or unavailable measurements', async (t) => {
+test('memory estimates do not block deployment; disk capacity and measurement failures still do', async (t) => {
   const { planner, measurements } = fixture(t);
   const input = { recipeId: 'distributed', placements: [{ serviceId: 'qwen3-asr', sparkId: 'one' }] };
-  assert.equal((await planner.preview(input)).valid, true); // 90 + 8 + 2 startup + 12 reserve = 112.
-  measurements.get('one').totalGiB = 111.99;
-  assert.equal((await planner.preview(input)).valid, false);
-  measurements.get('one').totalGiB = 112;
+  measurements.get('one').totalGiB = 16;
+  measurements.get('one').availableGiB = 0.1;
+  assert.equal((await planner.preview(input)).valid, true);
   measurements.get('one').diskFreeGiB = 160;
   assert.match((await planner.preview(input)).errors.join(';'), /additional disk/);
   measurements.get('one').diskFreeGiB = 164;
