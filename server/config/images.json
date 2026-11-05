@@ -1,11 +1,12 @@
 [
   {
     "id": "deepseek-v41-lakyfx-tp3",
-    "image": "deepseek-lakyfx:4.0.4-tp3-1.2.8",
+    "image": "deepseek-lakyfx:tp3-1.3.0",
     "context": "deepseek",
     "dockerfile": "Dockerfile",
-    "inputs": ["deepseek/Dockerfile", "deepseek/runtime.py"],
-    "sourceRevision": "805ee2fb3ca7c34166042edd43aedf698c2e2d4a",
+    "inputs": ["deepseek/Dockerfile", "deepseek/runtime.py", "deepseek/nccl.conf"],
+    "sourceRevision": "cede58cb9607f80edc945678387d8f87ae6221db",
+    "labels": {"sparkdash.profile": "TP3-1.3.0", "sparkdash.transport": "four-rail-roce"},
     "fetchBase": true
   },
   {

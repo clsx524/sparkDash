@@ -1190,21 +1190,34 @@ still export through Docker, selecting ARM64 explicitly only for platform indexe
 | GLM-5.3-Flash EXL3 | 2 | Head (`spark-1`), worker (`spark-2`) |
 | Qwen3.8-Flash-Next | 2 | Head (`spark-1`), worker (`spark-2`) |
 | MiniMax H3 | 1 | Worker (`spark-2`) |
-| DeepSeek V4.1 Flash · LakyFx v4.0.4 / TP3 1.2.8 (default) | 3 | Head (`spark-1`), worker (`spark-2`), Atom (`atom`) |
+| DeepSeek V4.1 Flash · LakyFx TP3 1.3.0 (default) | 3 | Head (`spark-1`), worker (`spark-2`), Atom (`atom`) |
 | DeepSeek V4.1 Flash · MiaAI | 2 | Head (`spark-1`), worker (`spark-2`) |
 
-Recipe sources are pinned to LakyFx `805ee2f` (v4.0.4 plus the portable-kernel
-audit fix, retaining TP3 1.2.8) and MiaAI DeepSeek `f424dfe` (TP2 image
-`exl3-tp2-9d0f4a04af7f`, including the GET/DELETE request-body drain fix).
-Model and Engram revisions are unchanged. Provision updated sources/catalogs,
-then prepare the changed images and build/apply a fresh plan.
+Recipe sources are pinned to LakyFx TP3 1.3.0 `cede58c` and MiaAI DeepSeek
+`f424dfe` (TP2 image `exl3-tp2-9d0f4a04af7f`, including the GET/DELETE
+request-body drain fix). Model and Engram revisions are unchanged.
 
-The TP3 image uses the preserved upstream 1.2.8/v128 build and launcher and
-the pinned base's NCCL 2.30.7 wheel. It does not invoke the separate TP4 NCCL
-builder or set its transport extensions. Weights, Engram and KV geometry are
-unchanged. Reprovision `model-images` on all three hosts and prepare the changed
-TP3 image before Apply; other valid images are reused. No weight download is
-required. Image compilation is not live three-rank routing/inference qualification.
+TP3 uses upstream `tensorfold.tp3.v130.build` staging/installation and the
+upstream CLI, including its payload validation and environment sanitization.
+The packaged 1.3.0 profile contains the qualified 1.2.9 native engine; no local
+Zig/native rebuild is required. Host topology maps the existing cables into
+upstream's canonical triangle masks. Graph-controller state has a writable bind
+mount; weights stay read-only.
+
+The explicit site adaptation is the NCCL library: pinned NVIDIA 2.30.7 source,
+the credited shared four-IPv4/PCI-domain routing patch and CTS acquire fence.
+Image-local `nccl.conf` activates routing independently of inherited shell
+variables. The library is preloaded explicitly; there is no base-wheel fallback.
+No TP4 launcher/build script or ring-only mode is selected, and collective
+algorithms/channel limits are not forced. Source, patch and produced-library
+identities and notices remain in the image.
+
+Provision `model-images` on **all three hosts**, redeploy SparkDash, prepare the
+changed TP3 image, then build/apply a fresh plan. Other valid images are reused;
+no weight download is required. Qualify the exact rebuilt NCCL/image with a
+small three-rank collective and actual connected GID pairs before claiming live
+serving success. This is not an automatic Apply gate. The native API stays on
+8888; the separate optional upstream JSON/vision gateway is not installed here.
 
 The shipped fleet definitions use explicit Spark IDs for both dependencies and
 launcher targets: `spark-1`, `spark-2`, and `atom`. Multiple nodes can therefore have
