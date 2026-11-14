@@ -35,6 +35,27 @@ export interface SparkConfig {
   macAddress?: string | null;
   /** Last MAC read from enP7s7 while the Spark was online (read-only). */
   detectedMacAddress?: string | null;
+  /**
+   * Optional generic power-control endpoints. SparkDash only speaks HTTP:
+   * `onUrl` / `offUrl` are batch endpoints, `target` identifies this unit in
+   * the batch body (`{"targets": ["1"]}`). The bearer token is stored
+   * server-side and never returned.
+   */
+  powerControl?: {
+    onUrl?: string | null;
+    offUrl?: string | null;
+    target?: string | null;
+    method?: "GET" | "POST" | "PUT" | "PATCH";
+    headers?: Record<string, string>;
+    body?: unknown;
+    timeoutMs?: number;
+    tokenHeader?: string;
+    tokenPrefix?: string;
+  } | null;
+  /** Response-only: true when a power-control token is stored server-side. */
+  hasPowerToken?: boolean;
+  /** Request-only: write-only power-control bearer token. */
+  powerToken?: string;
   isLocal: boolean;
   ssh: {
     host: string;
@@ -108,9 +129,105 @@ export interface SparkConfig {
   atticMonitoring?: boolean;
   /** When true, storage is only updated on manual refresh, not auto-polled. */
   storagePollDisabled?: boolean;
+  /**
+   * Model Registry integration — plain user-entered value, no assumed default.
+   * Where synced model weights land on this host.
+   */
+  modelFolder?: string;
 }
 
 export type SparkRole = "head" | "worker" | "standalone";
+
+// ─── Model Registry ────────────────────────────────────────
+/** Which tracked host holds the canonical model files, and where. */
+export interface ModelRegistryConfig {
+  hostId: string | null;
+  directory: string;
+  /** Target host id → pre-provisioned read-only NFS mount; SSH remains the control transport. */
+  nfsMounts?: Record<string, { path: string; source: string; transport?: "tcp" | "rdma" }>;
+}
+
+/** Result of PUT /api/model-registry or POST /api/model-registry/rescan — a
+ *  directory scan reconciles the tracked list against disk every time the
+ *  registry host/directory is set or changed. */
+export interface ModelRegistryScanResult {
+  discovered: string[];
+  scanError: string | null;
+}
+
+/** Live-probed Hugging Face login state on the registry host — never a stored flag; the
+ *  token itself lives only in hf-cli's own auth file there, never in this app's config. */
+export interface HfTokenStatus {
+  hasToken: boolean;
+  username: string | null;
+  error: string | null;
+}
+
+export interface ModelFileManifestEntry {
+  path: string;
+  sha256: string;
+}
+
+/**
+ * One tracked model. Either operator-declared (Add model, always has a
+ * repo) or disk-discovered by reconcileWithDisk (repo: null until an
+ * operator edits one in — a directory name alone doesn't reveal its
+ * Hugging Face source).
+ */
+export interface ModelEntry {
+  id: string;
+  label: string;
+  subfolder: string;
+  repo: string | null;
+  revision: string;
+  /** One or more hf-cli --include globs, space/newline-separated (e.g. a repo where only
+   *  a few files should be fetched out of many). */
+  includePattern?: string | null;
+  manifest?: ModelFileManifestEntry[] | null;
+  verifiedAt?: string | null;
+  /** Snapshot of includePattern at the moment it was last actually verified against disk.
+   *  Mismatched against the live includePattern means an edit happened since (e.g. adding a
+   *  file to an existing partial fetch) that hasn't been synced yet — that's the disabled/
+   *  enabled signal for the Sync button, distinct from "not downloaded at all". */
+  includePatternAtVerify?: string | null;
+}
+
+/** Live-probed availability on the registry host — never a stored flag. */
+export interface ModelStatus {
+  id: string;
+  available: boolean;
+  sizeBytes?: number | null;
+  /** Set when the probe itself failed (SSH unreachable, auth rejected, timed
+   *  out, ...) — distinct from a clean "not downloaded yet" (null). */
+  error?: string | null;
+}
+
+export interface ModelsListResponse {
+  registry: ModelRegistryConfig;
+  models: ModelEntry[];
+  statuses: Record<string, ModelStatus>;
+}
+
+export interface ModelJobState {
+  modelId: string;
+  kind: "download" | "delete";
+  phase: "running" | "verifying" | "done" | "failed";
+  message?: string;
+  error?: string;
+  /** Live progress while phase is "running" — a du -sb poll on the destination directory,
+   *  since a multi-hundred-GB download's own phase never changes for hours otherwise.
+   *  null before the first poll tick and once verification starts. */
+  bytesDownloaded?: number | null;
+  bytesPerSecond?: number | null;
+  updatedAt: string;
+}
+
+/** GET /api/models/:id/job's shape when no job has ever run for that model. Deliberately
+ *  `Omit<ModelJobState, "phase"> & {...}`, not a plain intersection with ModelJobState —
+ *  intersecting two differing declarations of the same property computes the intersection
+ *  of their types, which silently drops "idle" since ModelJobState's own phase field never
+ *  included it. */
+export type ModelJobStateOrIdle = Omit<ModelJobState, "phase"> & { phase: "idle" | ModelJobState["phase"] };
 
 // ─── Hermes Agent status ───────────────────────────────
 /** Opt-in Hermes Agent update monitoring state, pushed in every snapshot. */
@@ -452,12 +569,46 @@ export interface NetworkInterface {
   disabled?: boolean;
 }
 
+/**
+ * One RDMA/RoCE port, read from the HCA's own sysfs counters.
+ *
+ * Deliberately separate from NetworkInterface: RDMA bypasses the kernel network stack, so
+ * these bytes and the netdev bytes measure different things and must not share a shape.
+ * A busy RoCE link shows large `txBytes` here while its netdev counters barely move.
+ */
+export interface RdmaPortMetrics {
+  /** HCA device, e.g. "rocep1s0f1". */
+  hca: string;
+  port: number;
+  /** Backing Ethernet interface, e.g. "enp1s0f1np1". null when unresolved. */
+  netdev: string | null;
+  /** IPv4 bound to the backing interface. null when unaddressed. */
+  ip: string | null;
+  /** Port state, e.g. "ACTIVE". */
+  state: string | null;
+  /** Physical state, e.g. "LinkUp". */
+  physicalState: string | null;
+  /** "Ethernet" for RoCE, "InfiniBand" for native IB. */
+  linkLayer: string | null;
+  rateGbps: number | null;
+  /** Cumulative bytes (counter words x 4). null when unreadable. */
+  txBytes: number | null;
+  rxBytes: number | null;
+  /** Live rate. null on first sample or after a counter reset — never a fabricated 0. */
+  txBytesPerSecond: number | null;
+  rxBytesPerSecond: number | null;
+  txPackets: number | null;
+  rxPackets: number | null;
+}
+
 export interface NetworkMetrics {
   primaryInterface: string | null;
   linkSpeedMbps: number | null;
   interfaces: NetworkInterface[];
   /** MAC of enP7s7 when present (same value persisted as detectedMacAddress). */
   wolMac?: string | null;
+  /** RDMA/RoCE ports. Empty on hosts without RDMA. */
+  rdma?: RdmaPortMetrics[];
 }
 
 // ─── RoCE / RDMA (server/collectors/roce.js) ──────────────
@@ -1057,6 +1208,8 @@ export interface SparkSnapshot {
   /** LAN IP for browser deep-links (e.g. Open ComfyUI). */
   lanIp?: string;
   isLocal?: boolean;
+  /** True when a generic power endpoint is configured (on/off URL). */
+  hasPowerControl?: boolean;
   disabledDevices: string[];
   disabledInterfaces: string[];
   storagePollDisabled?: boolean;
@@ -1103,6 +1256,134 @@ export interface SparkSnapshot {
   conversations?: Record<string, ConversationRow[]>;
 }
 
+// ─── Recipe registry / switching ──────────────────────────
+export interface RecipeNodeStatus {
+  role: string;
+  running: boolean;
+  detail: string;
+}
+
+export type RecipeRequiredNode = { role: "head" | "worker" } | { sparkId: string };
+
+export interface RecipeInfo {
+  id: string;
+  label: string;
+  group: string;
+  tp: number;
+  requiredNodes: RecipeRequiredNode[];
+  nodes: { role: string; workdir: string }[];
+  active: boolean;
+  nodeStatus: RecipeNodeStatus[];
+}
+
+export interface RecipeSwitchProgress {
+  percent: number;
+  etaSeconds: number | null;
+  /** "log": a real shard-loading percent parsed from container output.
+   * "estimate": no log signal (shards done, or this loader never prints one) — driven by
+   * elapsed time against past switches' average duration, capped below 100%. */
+  source: "log" | "estimate";
+}
+
+export type RecipeSessionStatus = "running" | "succeeded" | "failed" | "interrupted" | "cancelled";
+export type RecipeStageStatus = RecipeSessionStatus | "skipped";
+
+export interface RecipeSessionSummary {
+  id: string;
+  targetId: string;
+  label: string;
+  tp: number;
+  requiredNodes: { id: string; name: string }[];
+  status: RecipeSessionStatus;
+  phase: string | null;
+  startedAt: number;
+  updatedAt: number;
+  finishedAt: number | null;
+  error: string | null;
+  version: number;
+  lastSeq: number;
+  logsTruncated: boolean;
+  storageError: string | null;
+}
+
+export interface RecipeSessionLog {
+  seq: number;
+  ts: number;
+  stream: "action" | "stdout" | "stderr";
+  nodeId?: string;
+  nodeName?: string;
+  text: string;
+}
+
+export interface RecipeSessionStage {
+  id: string;
+  phase: string;
+  status: RecipeStageStatus;
+  startedAt: number;
+  updatedAt: number;
+  finishedAt: number | null;
+  pendingNodes: string[];
+  progress: RecipeSwitchProgress | null;
+  message: string | null;
+  logs: RecipeSessionLog[];
+}
+
+export interface RecipeSessionDetail extends RecipeSessionSummary {
+  /** Oldest retained log sequence; removes evicted output from live caches. */
+  firstSeq: number;
+  stages: RecipeSessionStage[];
+}
+
+export interface LastActiveRecipe {
+  id: string;
+  label: string;
+  storageError: string | null;
+}
+
+export interface RecipeListResponse {
+  recipes: RecipeInfo[];
+  activeId: string | null;
+  conflict: boolean;
+  conflictIds: string[];
+  session: RecipeSessionSummary | null;
+  lastActiveRecipe: LastActiveRecipe | null;
+}
+
+/** Progress of a fleet shutdown-all / wake-all (WS `powerAction`). */
+export interface PowerActionState {
+  action: "shutdown-all" | "wake-all";
+  phase:
+    | "starting"
+    | "shutting-down"
+    | "waiting-offline"
+    | "powering-off"
+    | "powering-on"
+    | "waiting-online"
+    | "done"
+    | "failed";
+  startedAt: number;
+  updatedAt: number;
+  total: number;
+  completed: number;
+  current?: string | null;
+  error?: string | null;
+  message?: string | null;
+  results: Array<{
+    id: string;
+    name?: string;
+    ok: boolean;
+    skipped?: boolean;
+    error?: string | null;
+    message?: string | null;
+  }>;
+}
+
+export interface RecipeActivateResponse {
+  started: boolean;
+  targetId: string;
+  sessionId: string;
+}
+
 // ─── WebSocket envelope ───────────────────────────────────
 export interface WsSnapshot {
   type: "snapshot";
@@ -1112,6 +1393,9 @@ export interface WsSnapshot {
   refreshInterval: number;
   /** Alert notifications' firing set — present only while `alertsEnabled` is on. */
   alerts?: { active: AlertInstance[] };
+  recipeSession?: RecipeSessionSummary | null;
+  lastActiveRecipe?: LastActiveRecipe | null;
+  powerAction?: PowerActionState | null;
 }
 
 // ─── Alert notifications (server/alerts) ──────────────────

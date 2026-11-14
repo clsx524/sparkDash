@@ -34,12 +34,6 @@ it("keeps overview filters and the fleet shutdown guard intact while the locale 
   });
   await act(() => [...document.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.trim() === "Shut down all")!.click());
   await flush();
-  const phrase = document.querySelector<HTMLInputElement>(".field-input--mono")!;
-  await act(() => {
-    setter.call(phrase, "poweroff");
-    phrase.dispatchEvent(new Event("input", { bubbles: true }));
-    document.querySelector<HTMLInputElement>('input[type="checkbox"]')!.click();
-  });
   const requestsBeforeLocaleChange = fetchMock.mock.calls.length;
 
   await act(() => setLocale("zh-CN"));
@@ -47,15 +41,11 @@ it("keeps overview filters and the fleet shutdown guard intact while the locale 
   expect(document.querySelector("h1")?.textContent).toBe("总览");
   expect(query.value).toBe("Spark");
   expect(select.value).toBe("online");
-  expect(phrase.value).toBe("poweroff");
-  expect(document.querySelector<HTMLInputElement>('input[type="checkbox"]')?.checked).toBe(true);
   expect(fetchMock).toHaveBeenCalledTimes(requestsBeforeLocaleChange);
   await act(() => setLocale("en"));
   expect(document.querySelector("h1")?.textContent).toBe("Overview");
   expect(query.value).toBe("Spark");
   expect(select.value).toBe("online");
-  expect(phrase.value).toBe("poweroff");
-  expect(document.querySelector<HTMLInputElement>('input[type="checkbox"]')?.checked).toBe(true);
   expect(document.querySelector<HTMLButtonElement>('.modal-sheet__footer .btn--danger')?.disabled).toBe(false);
   expect(fetchMock).toHaveBeenCalledTimes(requestsBeforeLocaleChange);
 });

@@ -5,7 +5,8 @@ import os from "node:os";
 import path from "node:path";
 import { spawn, execFile } from "node:child_process";
 import { validateDir, validateScriptName, normalizeLauncherInput, slugify } from "../validate.js";
-import { LineSplitter, LauncherManager, stripAnsi } from "../LauncherManager.js";
+import { LauncherManager } from "../LauncherManager.js";
+import { LineSplitter, stripAnsi } from "../../util/commandOutput.js";
 import { LauncherStore } from "../LauncherStore.js";
 import { buildStartCommand, LOG_MAX_BYTES } from "../commands.js";
 

@@ -158,7 +158,7 @@ export function createAuthMiddleware() {
     const mutating = method !== "GET" && method !== "HEAD" && method !== "OPTIONS";
     const remote = requireRemoteAuth(process.env.BIND_HOST || "127.0.0.1");
     if (!mutating && !remote && !configuredToken()) return next();
-    if (!mutating && !remote) return next();
+    if (!mutating && !remote && !/^\/inference(\/|$)/.test(req.path || "")) return next();
     if (!mutating && remote && !configuredToken()) {
       if (allowOpenRemote()) return next();
       return res.status(403).json({ error: "Remote access requires SPARKDASH_TOKEN" });
@@ -169,7 +169,7 @@ export function createAuthMiddleware() {
     // GET open). API routes and the WebSocket stay token-gated; the app then
     // authenticates its own calls from localStorage (src/api/authToken.ts).
     // Case-insensitive, like Express routing: /API/sparks reaches the same handler as /api/sparks.
-    if (!mutating && !/^\/(api|ws|metrics)(\/|$)/i.test(req.path || "")) return next();
+    if (!mutating && !/^\/(api|ws|metrics|inference)(\/|$)/i.test(req.path || "")) return next();
     const result = authenticate(req);
     if (!result.ok) return res.status(result.status).json({ error: result.error });
     next();

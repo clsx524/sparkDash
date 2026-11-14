@@ -10,7 +10,7 @@ process.env.SPARKS_SECRETS_PATH = path.join(tmp, "sparks-secrets.json");
 process.env.SECRETS_KEY_PATH = path.join(tmp, ".secrets-key");
 process.env.SPARKDASH_SECRETS_KEY = "test-only-secrets-key";
 
-const { loadSecrets, saveSecrets, saveHelperTokens } = await import("../../secretsStore.js");
+const { loadSecrets, saveSecrets, saveHelperTokens, saveAlertChannelUrls } = await import("../../secretsStore.js");
 
 describe("secret namespaces", { concurrency: 1 }, () => {
 test("clearing LLM keys does not resurrect them and keeps helper tokens", () => {
@@ -24,14 +24,19 @@ test("clearing LLM keys does not resurrect them and keeps helper tokens", () => 
   assert.equal(fs.existsSync(process.env.SPARKS_SECRETS_PATH), true);
 });
 
-test("helper token updates preserve SSH and LLM secrets", () => {
-  saveSecrets(new Map([["spark", "ssh-secret"]]), new Map([["spark", { "8000": "sk-test" }]]));
+test("helper and alert updates preserve SSH, LLM and power secrets", () => {
+  saveSecrets(new Map([["spark", "ssh-secret"]]), new Map([["spark", { "8000": "sk-test" }]]), new Map([["spark", "power-token"]]));
+  saveAlertChannelUrls(new Map([["alerts", "https://example.test/private-topic"]]));
   saveHelperTokens(new Map([["mama", "one"]]));
   saveHelperTokens(new Map([["mama", "two"]]));
+  saveAlertChannelUrls(new Map());
   const loaded = loadSecrets();
   assert.equal(loaded.passwords.get("spark"), "ssh-secret");
   assert.equal(loaded.llmApiKeys.get("spark")["8000"], "sk-test");
   assert.equal(loaded.helperTokens.get("mama"), "two");
+  assert.equal(loaded.powerTokens.get("spark"), "power-token");
+  saveHelperTokens(new Map());
+  assert.equal(loadSecrets().powerTokens.get("spark"), "power-token");
 });
 
 test("deleting the last secret in each order removes only that namespace", () => {

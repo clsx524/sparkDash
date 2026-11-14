@@ -41,6 +41,8 @@ function Probe() {
         last: snapshot.lastValidSnapshotAt,
         count: snapshot.sparks.length,
         alerts: snapshot.serverAlerts?.map((a) => a.key) ?? null,
+        recipeSession: snapshot.recipeSession,
+        lastActiveRecipe: snapshot.lastActiveRecipe,
       })}
     </pre>
   );
@@ -103,6 +105,49 @@ describe("useSnapshot connection lifecycle", () => {
     await flush();
     expect(readProbe()).toMatchObject({ connected: true, error: null });
     expect(readProbe().last).toBeGreaterThanOrEqual(50_000);
+  });
+
+  it("exposes the compact persisted Apply summary across reconnect", async () => {
+    render(<Probe />);
+    const session = {
+      id: "apply-one", targetId: "glm", label: "GLM", tp: 2, requiredNodes: [],
+      status: "running", phase: "starting", startedAt: 1000, updatedAt: 2000,
+      finishedAt: null, error: null, version: 2, lastSeq: 3,
+      logsTruncated: false, storageError: null,
+    };
+    act(() => MockSocket.instances[0].emit({ type: "snapshot", sparks: [], recipeSession: session }));
+    await flush();
+    expect(readProbe().recipeSession).toEqual(session);
+    act(() => MockSocket.instances[0].close());
+    act(() => vi.advanceTimersByTime(2000));
+    const terminal = { ...session, status: "interrupted", version: 3, finishedAt: 3000 };
+    act(() => MockSocket.instances[1].emit({ type: "snapshot", sparks: [], recipeSession: terminal }));
+    await flush();
+    expect(readProbe().recipeSession).toEqual(terminal);
+  });
+
+  it("propagates last active recipe metadata across reconnect and clears absent or null metadata", async () => {
+    render(<Probe />);
+    const saved = { id: "glm", label: "GLM", storageError: null };
+    const first = MockSocket.instances[0];
+    act(() => first.emit({ type: "snapshot", sparks: [], lastActiveRecipe: saved }));
+    await flush();
+    expect(readProbe().lastActiveRecipe).toEqual(saved);
+    act(() => first.close());
+    act(() => vi.advanceTimersByTime(2000));
+    expect(readProbe().lastActiveRecipe).toEqual(saved);
+    const next = MockSocket.instances[1];
+    const unsaved = { ...saved, storageError: "Disk unavailable" };
+    act(() => next.emit({ type: "snapshot", sparks: [], lastActiveRecipe: unsaved }));
+    await flush();
+    expect(readProbe().lastActiveRecipe).toEqual(unsaved);
+    act(() => next.emit({ type: "snapshot", sparks: [], lastActiveRecipe: null }));
+    await flush();
+    expect(readProbe().lastActiveRecipe).toBeNull();
+    act(() => next.emit({ type: "snapshot", sparks: [], lastActiveRecipe: saved }));
+    act(() => next.emit({ type: "snapshot", sparks: [] }));
+    await flush();
+    expect(readProbe().lastActiveRecipe).toBeNull();
   });
 
   it("exposes the server's alerts only while the snapshot carries them", async () => {

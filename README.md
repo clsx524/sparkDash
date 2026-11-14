@@ -1094,7 +1094,7 @@ sparkDash/
 | GET · PUT · DELETE | `/api/sparks/:id/gpu-clock` | GPU clock cap on a Spark unit: status, apply (`maxMHz`, `persist`), remove (see [GPU clock cap](#gpu-clock-cap)) |
 | POST | `/api/sparks/gpu-clock-all` | GPU clock cap on every Spark at once: `{ maxMHz, persist? }`, or `{ reset: true }`; one result per unit (see [GPU clock cap](#gpu-clock-cap)) |
 | GET · PUT | `/api/sparks/:id/gpu-power` | Per-card power limit on a Linux GPU host: status, set (`limits: [{ uuid, watts }]`, `persist`, optional `sudoPassword`) (see [GPU power limit](#gpu-power-limit)) |
-| POST | `/api/sparks/:id/shutdown` · `/wake` · `/api/sparks/shutdown-all` · `/wake-all` | Power controls (see [Power controls](#power-controls-shutdown--wake-on-lan)) |
+| POST | `/api/sparks/:id/shutdown` · `/wake` · `/api/sparks/shutdown-all` · `/wake-all` | Power controls (see [Power controls](#power-controls-shutdown--wake-on-lan)). Wake All applies the remembered recipe and returns `{started:true,targetId,sessionId}`, with persistent Apply progress. Shutdown All and power-only Wake All report WS `powerAction`; `GET /api/power/state` returns that state. |
 | POST | `/api/sparks/:id/refresh/:domain` | Re-poll one domain now (`storage` or `llm` only) |
 | GET/POST/DELETE | `/api/sparks/:id/llm/showcase[/:sessionId]` | Prompt Showcase sessions |
 | GET | `/api/events` | Fleet event log (`limit`, `sparkId`, `sinceId`, `beforeId`; 2000 kept) |
@@ -1396,10 +1396,240 @@ unchanged apart from the platform badge.
   `HOST_PROC_PATH` mount and `privileged: true` the collectors already need. A
   bare-host install calls `sudo` directly. The helper always resolves against
   the **host** filesystem, so it does not need to exist inside the container.
-- **Wake** / **Wake All** send a UDP magic packet (port 9) to **dedicated GPU hosts** whose NIC and firmware support Wake-on-LAN. The MAC is taken from the **enP7s7** interface while the host is online (persisted as `detectedMacAddress`), or from a **MAC override** in Edit Spark. Broadcast is derived as `/24` from LAN IP, or `255.255.255.255` if LAN IP is missing. **DGX Spark does not wake this way** — the GB10 onboard NIC has no Wake-on-LAN — so the Wake control is not offered on Spark units.
+- **Wake** / **Wake All** first use a configured **power endpoint** (see below) for every unit type, including DGX Sparks. Hosts without a power endpoint fall back to a UDP magic packet (port 9) when their NIC supports Wake-on-LAN. The MAC is taken from the **enP7s7** interface while the host is online (persisted as `detectedMacAddress`), or from a **MAC override** in Edit Spark. Broadcast is derived as `/24` from LAN IP, or `255.255.255.255` if LAN IP is missing.
 - On a **Windows PC** shutdown runs `shutdown.exe /s /t 5` over SSH; Wake-on-LAN needs a MAC address entered by hand.
-- Batch shutdown only targets **online** Sparks; offline nodes are skipped.
+- **Shutdown All** gracefully shuts down online remote nodes over SSH concurrently and waits for their offline checks in parallel, then sends one power-off batch per endpoint for eligible outlets. A node whose shutdown fails or whose offline check fails or times out is excluded from power-off. Offline nodes with a configured outlet are also powered off. The dashboard host is shut down last and its own outlet is never cut (that would kill the controller mid-flight).
+- **Wake All** activates the last remembered recipe through the same **Apply** workflow as Recipes → Activate/Refresh: wake only its required offline nodes, wait up to five minutes for all dependencies, then deploy with the normal fast model path and health checks. Other nodes stay as they are. Confirmation names the recipe; accepted requests open **Current Apply** with persistent progress and history. Even if all required nodes are online, this performs the normal recipe refresh.
+- With no remembered or uniquely detected active recipe, **Wake All** falls back to power-only fleet wake; the popup explicitly says no recipe will be applied. A remembered recipe removed from configuration returns an error instead of choosing another recipe or powering the fleet.
+- The last active recipe is saved after successful Apply and when the recipe list or Shutdown All detects one unambiguous live deployment. Offline nodes, conflicts, and failed/interrupted Apply attempts do not erase it. Existing installations seed the pointer from their latest retained successful Apply. The remembered pointer is not proof that a recipe is currently serving; live status still determines active state.
 - Power APIs are mutations: with `SPARKDASH_TOKEN` set they require it; without it they are open on loopback (local trust) **and** on a remote bind, unless `SPARKDASH_ALLOW_OPEN_REMOTE=0` makes that bind fail closed.
+
+#### Generic power endpoints
+
+SparkDash does not hardcode Kasa or any other controller. Each Spark can carry a
+`powerControl` object in Edit Spark:
+
+```json
+"powerControl": {
+  "onUrl": "http://kasa-mcp:8812/outlets/on",
+  "offUrl": "http://kasa-mcp:8812/outlets/off",
+  "target": "1",
+  "method": "POST",
+  "timeoutMs": 10000
+}
+```
+
+- `onUrl` / `offUrl` are **batch** endpoints. SparkDash groups Sparks that share
+  the same endpoint and sends one request with
+  `{"targets": ["1", "2", "3"]}` instead of one request per node.
+- `target` identifies this unit in the batch body. For the Kasa HS300, use the
+  **zero-based** outlet index and label returned by `GET /outlets`, not the
+  printed socket number. Physical sockets 1, 2 and 3 normally correspond to
+  API targets **0, 1 and 2**; verify the labels before configuring or switching.
+- The bearer token is entered in Edit Spark, stored encrypted in
+  `config/sparks-secrets.json`, and sent as `Authorization: Bearer <token>`.
+  It is never returned by the API. `tokenHeader` / `tokenPrefix` can override
+  the header name and prefix for other controllers.
+- The endpoint answers `{"results": [{"target": "1", "ok": true}, ...]}`. A plain
+  2xx without a `results` array is treated as success for every target in that
+  request.
+- Kasa MCP exposes the batch endpoints at `GET /outlets`, `POST /outlets/on`
+  and `POST /outlets/off`; all except `/healthz` require the same bearer token
+  as `/mcp`.
+
+### Recipe activation and node readiness
+
+**Recipes → Deployment topology planner** selects a large-model recipe and
+small-service placements. Drag cards between hosts or use their selectors, then
+**Build plan** to measure host capacity and **Apply plan** to execute the built
+revision. Distributed ranks retain their explicit physical topology. Definitions
+in `server/config/recipes.json` declare `tp` and `requiredNodes` separately from
+launcher commands; `server/config/services.json` declares small runtimes.
+
+**Prepare all images on Atom** is independent of the selected recipe and service
+placements. `POST /api/deployment/images/prepare` prepares every entry in
+`server/config/images.json` on the canonical registry host and publishes Docker
+archives under `<registry>/.sparkdash-images/`. It uses the existing persisted
+session, output and cancellation APIs, excludes concurrent Apply/fleet power operations,
+and never starts/stops model containers or downloads weights. Custom images are
+built once; prebuilt images are acquired once. Ansible must provision the image
+helper, catalog and pinned build sources beforehand.
+Preparation overlaps two registry-copy jobs with one serial stream of custom
+build/export jobs. Native compilations stay serial to avoid multiplying peak
+memory demand. Per-image elapsed times are logged. Base-image verification is
+reused only when its pinned configuration and immutable Docker ID still match;
+preparation-time archive SHA-256 checks remain intact. Build jobs have no
+minimum-free-RAM gate; archive exports retain their disk-space checks.
+
+Apply requires matching prepared image manifests before stopping the current
+deployment. Each worker imports selected images directly from the verified
+read-only NFS/RDMA mount; there is no worker build, pull, SSH image-copy fallback
+or extra local archive. Schema 2 manifests pin the saved configuration's SHA-256,
+not Docker's store-specific image ID. Preparation verifies archives once. Apply
+checks manifest/size/platform and the small saved configuration without hashing
+all layers or re-exporting the loaded image. Local receipts bind the configuration
+to the host's native ID so unchanged images skip import. Reprovision the image
+helper on all three hosts; schema 1 caches require image preparation again.
+Rank weights and topology remain outside the image; preparation requires no final placement.
+Prebuilt images go directly from their registry to complete Docker archives through
+`skopeo` on Atom, avoiding incomplete Docker/containerd exports. Preparation verifies
+all referenced layers, configuration, platform and required labels. Custom builds
+still export through Docker, selecting ARM64 explicitly only for platform indexes.
+
+| Recipe | TP | Required physical nodes |
+|--------|----|-------------------------|
+| GLM-5.3-Flash EXL3 | 2 | Head (`spark-1`), worker (`spark-2`) |
+| Qwen3.8-Flash-Next | 2 | Head (`spark-1`), worker (`spark-2`) |
+| MiniMax H3 | 1 | Worker (`spark-2`) |
+| DeepSeek V4.1 Flash · LakyFx TP3 1.3.0 (default) | 3 | Head (`spark-1`), worker (`spark-2`), Atom (`atom`) |
+| DeepSeek V4.1 Flash · MiaAI | 2 | Head (`spark-1`), worker (`spark-2`) |
+
+Recipe sources are pinned to LakyFx TP3 1.3.0 `cede58c` and MiaAI DeepSeek
+`f424dfe` (TP2 image `exl3-tp2-9d0f4a04af7f`, including the GET/DELETE
+request-body drain fix). Model and Engram revisions are unchanged.
+
+TP3 uses upstream `tensorfold.tp3.v130.build` staging/installation and the
+upstream CLI, including its payload validation and environment sanitization.
+The packaged 1.3.0 profile contains the qualified 1.2.9 native engine; no local
+Zig/native rebuild is required. Host topology maps the existing cables into
+upstream's canonical triangle masks. Graph-controller state has a writable bind
+mount; weights stay read-only.
+
+The explicit site adaptation is the NCCL library: pinned NVIDIA 2.30.7 source,
+the credited shared four-IPv4/PCI-domain routing patch and CTS acquire fence.
+Image-local `nccl.conf` activates routing independently of inherited shell
+variables. The library is preloaded explicitly; there is no base-wheel fallback.
+No TP4 launcher/build script or ring-only mode is selected, and collective
+algorithms/channel limits are not forced. Source, patch and produced-library
+identities and notices remain in the image.
+
+Provision `model-images` on **all three hosts**, redeploy SparkDash, prepare the
+changed TP3 image, then build/apply a fresh plan. Other valid images are reused;
+no weight download is required. Qualify the exact rebuilt NCCL/image with a
+small three-rank collective and actual connected GID pairs before claiming live
+serving success. This is not an automatic Apply gate. The native API stays on
+8888; the separate optional upstream JSON/vision gateway is not installed here.
+
+The shipped fleet definitions use explicit Spark IDs for both dependencies and
+launcher targets: `spark-1`, `spark-2`, and `atom`. Multiple nodes can therefore have
+the `worker` role without changing which machines a recipe wakes or starts.
+Custom definitions may use a role selector only when it resolves to exactly one
+Spark. Every selector must resolve uniquely, and the unique dependency count
+must equal `tp`. If your configured IDs differ, update both `requiredNodes`
+selectors and launcher `nodes[].sparkId` in the recipe definition. Overrides via
+`RECIPES_JSON_PATH` must include the same topology metadata.
+
+- Activation checks every required node over SSH, wakes only offline dependencies
+  through their configured batch power-on endpoint (or host Wake-on-LAN), then
+  polls all dependencies every two seconds for up to five minutes. It proceeds
+  as soon as all are reachable; it does not wait a fixed five minutes.
+- Missing dependencies, failed wake requests, or a readiness timeout fail the
+  activation without running stop, cleanup, model-sync or start commands. Progress
+  identifies pending nodes. A final reachability check before starting catches
+  a dependency that dropped during the switch.
+- A plan wakes its compute/service hosts and the canonical registry host.
+  Wake all restores the last committed plan, including services-only plans;
+  capacity is revalidated after hosts are online and before any stop.
+- Build shows runtime/startup RAM estimates without reserving memory or rejecting
+  RAM overcommit. Disk checks still account for staged data and explicitly planned
+  alternate-DeepSeek eviction. Apply has no available-memory gate, low-memory
+  watchdog, cooling delay or memory-wait loop; native allocation/OOM decides failure.
+- Apply checks canonical file sizes and transfer prerequisites before stopping
+  models, removes only explicitly owned model containers, stages selected files
+  without full SHA256 passes, imports prepared images and prepares runtime assets.
+  Explicit Model Registry Sync retains checksum verification. Small services start
+  concurrently, including services sharing a host; every small service must become
+  healthy before large-model startup. Followers precede the head; native TP3
+  readiness also requires `warming=false`.
+  The TP3 container adapter uses upstream's launcher/helper and mirrors its NVMe
+  companion service: restart a failed helper after five seconds without killing
+  the native rank, and stop the helper when that rank exits. It does not add
+  independent native-rank or cluster restarts.
+- The successful draft is committed to private `config/deployment.json`
+  (`DEPLOYMENT_PLAN_JSON_PATH` overrides it). Stable streaming routes under
+  `/inference/{embeddings,tts,asr,images}` use only committed placements and return
+  503 when unassigned. A draft never changes serving routes.
+- The default includes Qwen ASR on Spark 1 and Qwen TTS/embedding on Spark 2.
+  Qwen Image is available but unassigned. Drama is disabled. Canonical weights
+  stay on Atom; only the selected DeepSeek cache is kept on Spark 1/2.
+  TTS uses a 6% talker and 2% audio-decoder GPU allocation, keeping 4096 talker
+  tokens and four concurrent sequences. Its planner budgets are 11 GiB running
+  and 12 GiB startup. Provision the TTS runtime YAML and redeploy the updated
+  planner catalog, then build/apply a fresh plan; no TTS image rebuild is needed.
+- Optional NFS mappings may require `"transport": "rdma"`. Sync then requires
+  the exact read-only source with `proto=rdma`; a TCP mount fails without
+  fallback. Host modules, service configuration and mounts remain Ansible's job.
+
+#### Persistent Apply sessions
+
+The recipe dialog replaces the single progress banner with two independent views:
+
+- **Current Apply** shows only the latest session, including its final result,
+  until another Apply starts. Refreshing the browser restores the open recipe
+  dialog and reloads the same session from the server.
+- **Apply History** lists prior succeeded, failed, interrupted, and cancelled sessions.
+  Selecting a row opens read-only stage details without replacing Current Apply.
+  The historical selection is remembered across refreshes.
+
+While a session is running, **Current Apply → Cancel Apply** cancels it on the
+server, including after closing and reopening the dialog. The button changes to
+**Cancelling…** while attached commands and transfers stop; another Apply remains
+blocked until that work has settled. The interrupted stage and session then show
+**cancelled**, retaining their logs and remaining in history after refresh.
+Cancellation does not undo completed changes, power nodes off, remove staged
+weights, or stop services that have already detached from their launcher.
+
+Stages are created only when entered. Offline dependencies add **Waking required
+nodes** and **Waiting for required nodes to come online** before deployment.
+Already-online dependencies omit those stages. Stop/confirm stages appear only
+when there is an active recipe to stop, and model-sync appears only for tracked
+models. Repeated boot polls update the existing stage rather than adding log rows.
+
+Each stage retains its outcome, timestamps, duration, pending nodes, loading
+progress, per-node actions, and captured launcher/transfer stdout and stderr.
+Expand a stage for diagnostics; running and failed stages expand automatically.
+Output follows new lines until you scroll up or pause following. Errors include
+the failed stage and command exit context when available; output is rendered as
+plain text, with known credentials and Bearer tokens redacted before storage.
+Estimated model loading is labelled, and terminal stages show their last load
+reading without a stale remaining-time countdown.
+
+Session files live in `config/recipe-sessions/` (override with
+`RECIPE_SESSIONS_DIR`), under the existing persistent `/app/config` container
+mount. Files are private (0600). The store retains the latest 50 terminal sessions
+plus a running session, limits captured output to 2 MiB per session and 16 KiB per
+line, and marks truncation explicitly. Stage outcomes and final errors remain
+available after output eviction. Start, stage transitions, and completion persist
+immediately; output/progress updates are batched for up to 500 ms and flushed on
+graceful shutdown. An abrupt crash can lose the last unflushed output batch.
+
+The last active recipe is stored separately as
+`config/recipe-sessions/last-active-recipe.json` (also under `RECIPE_SESSIONS_DIR`,
+private 0600). It survives server restart and terminal-session eviction. A failed
+write leaves the latest identity in memory and displays a persistence warning;
+graceful shutdown retries pending writes. `GET /api/recipes` and WS snapshots expose
+`lastActiveRecipe` (`id`, `label`, `storageError`) independently of the current session.
+
+A server restart marks unfinished sessions **interrupted** without replaying
+commands. Remote launchers may still be running, so the recorded outcome is
+unknown rather than a claimed deployment failure or success. Storage failures
+are visible; inability to persist a new session prevents starting its Apply.
+
+| API | Purpose |
+|-----|---------|
+| `GET /api/deployment` | Catalog, draft, committed placements and resource budgets |
+| `POST /api/deployment/preview` | Validate/measure and save a draft; returns its revision and ordered steps |
+| `POST /api/deployment/apply` | Apply the built `{ revision }`; stale revisions return 409, accepted plans return `sessionId` |
+| `POST /api/recipes/sessions/:id/cancel` | Cancel that running Apply and return its settled session; finished sessions are returned unchanged |
+| `GET /api/recipes/sessions/current` | Latest session, including entered stages and retained output |
+| `GET /api/recipes/sessions` | Terminal-session summaries, newest first |
+| `GET /api/recipes/sessions/:id?afterSeq=N` | Session details with log lines newer than sequence `N` |
+
+The WebSocket snapshot carries compact `recipeSession` metadata, not the full
+output history. The dialog fetches incremental diagnostics by session and sequence,
+deduplicates reconnect updates, and polls as a fallback. Reading a session or
+refreshing the page never starts or resumes Apply.
+
 
 ### Themes
 

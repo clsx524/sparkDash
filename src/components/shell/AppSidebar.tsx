@@ -23,7 +23,7 @@ import type { AuthMode, SparkSnapshot } from "../../api/types";
 import { isWorkerSpark } from "../../api/sparkRole";
 import { ACTIVITY_ID, API_KEYS_ID, benchId, COST_ID, ENERGY_ID, idToPath, KIOSK_ID, OVERVIEW_ID, SHOWCASE_ID, STORAGE_ID, TEMPS_ID, TOKENS_ID } from "../../constants";
 import { NAV_BENCH_TYPES, benchNavActive } from "../bench/benchCatalog";
-import { BoltIcon, ChevronDownIcon, CoinsIcon, DiskIcon, ExpandIcon, GearIcon, GithubIcon, GlobeIcon, GridIcon, KeyIcon, ListIcon, PanelLeftIcon, PlusIcon, SearchIcon, TerminalIcon, ThermometerIcon, TokensIcon, XLogoIcon } from "../ui/icons";
+import { BoltIcon, ChevronDownIcon, CoinsIcon, DiskIcon, ExpandIcon, FlaskIcon, GearIcon, GithubIcon, GlobeIcon, GridIcon, KeyIcon, ListIcon, PanelLeftIcon, PlusIcon, SearchIcon, ServerIcon, TerminalIcon, ThermometerIcon, TokensIcon, XLogoIcon } from "../ui/icons";
 import { OpenAccessChip } from "../OpenAccessChip";
 import { ThemeSwitch } from "../ThemeSwitch";
 import { isThrottling, railSubLabel } from "./sparkSummary";
@@ -36,6 +36,9 @@ interface AppSidebarProps {
   onAdd: () => void;
   onReorder?: (orderedIds: string[]) => void;
   onOpenSettings: () => void;
+  /** Fork: deployment recipes / Model Registry dialogs (buttons hidden when absent). */
+  onOpenRecipes?: () => void;
+  onOpenModels?: () => void;
   onOpenSearch: () => void;
   /** Benchmark type whose page is showing, if any. */
   benchType?: string | null;
@@ -176,6 +179,8 @@ export function AppSidebar({
   onAdd,
   onReorder,
   onOpenSettings,
+  onOpenRecipes,
+  onOpenModels,
   onOpenSearch,
   benchType = null,
   onSelectBench,
@@ -467,6 +472,18 @@ export function AppSidebar({
       <div className="rail-foot">
         <div className="rail-settings">
           <nav className="rail-list">
+            {onOpenRecipes ? (
+              <button type="button" className="rail-item" onClick={onOpenRecipes}>
+                <FlaskIcon className="h-4 w-4" />
+                <span className="rail-item__name">Recipes</span>
+              </button>
+            ) : null}
+            {onOpenModels ? (
+              <button type="button" className="rail-item" onClick={onOpenModels}>
+                <ServerIcon className="h-4 w-4" />
+                <span className="rail-item__name">Model Registry</span>
+              </button>
+            ) : null}
             <button type="button" className="rail-item" onClick={onOpenSettings}>
               <GearIcon className="h-4 w-4" />
               <span className="rail-item__name">{t("nav.settings")}</span>

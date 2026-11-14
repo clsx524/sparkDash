@@ -27,4 +27,26 @@ describe("dialog overlay close", () => {
     fire(overlay, "click");
     expect(onClose).not.toHaveBeenCalled();
   });
+
+  it("confirms without a typed phrase or acknowledgement checkbox", async () => {
+    const onConfirm = vi.fn();
+    render(
+      <ConfirmShutdownDialog
+        open
+        onClose={() => {}}
+        onConfirm={onConfirm}
+        title="Shut down"
+        description="d"
+      />
+    );
+    const confirm = [...document.querySelectorAll("button")].find((b) =>
+      b.textContent?.includes("Shut down")
+    ) as HTMLButtonElement | undefined;
+    expect(confirm).toBeTruthy();
+    expect(confirm!.disabled).toBe(false);
+    await act(async () => {
+      fire(confirm!, "click");
+    });
+    expect(onConfirm).toHaveBeenCalledTimes(1);
+  });
 });

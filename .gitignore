@@ -65,3 +65,4 @@ __pycache__/
 !/docs/
 /docs/*
 !/docs/I18N-COVERAGE.md
+config/recipe-sessions/

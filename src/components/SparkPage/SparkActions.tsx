@@ -84,7 +84,11 @@ export function SparkActions({ spark, onEdit, className }: SparkActionsProps) {
     setPowerMsg(null);
     try {
       const res = await wakeSpark(spark.id);
-      setPowerMsg({ text: res.message || "", kind: "wakeOk", tone: "ok" });
+      setPowerMsg({
+        text: res.message || (res.method === "power" ? "Power on requested" : "Wake packet sent"),
+        kind: "wakeOk",
+        tone: "ok",
+      });
     } catch (err: unknown) {
       setPowerMsg({
         text: err instanceof Error ? err.message : "", kind: "wakeError",
@@ -167,16 +171,20 @@ export function SparkActions({ spark, onEdit, className }: SparkActionsProps) {
             <PowerOffIcon className="h-3.5 w-3.5" />
             {t("actions.shutdown")}
           </button>
-        ) : spark.kind === "host" ? (
+        ) : spark.hasPowerControl || spark.kind === "host" ? (
           <button
             type="button"
             onClick={() => void handleWake()}
             disabled={powerLoading}
-            title={t("actions.wakeHelp")}
+            title={
+              spark.hasPowerControl
+                ? "Power on through the configured outlet endpoint"
+                : t("actions.wakeHelp")
+            }
             className="btn"
           >
             <PowerOnIcon className="h-3.5 w-3.5" />
-            {t("actions.wake")}
+            {spark.hasPowerControl ? "Power on" : t("actions.wake")}
           </button>
         ) : (
           <span

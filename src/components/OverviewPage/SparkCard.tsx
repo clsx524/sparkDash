@@ -20,9 +20,10 @@ import { HEADROOM_THRESHOLDS_MB, computeVramBreakdown, memoryModelFor, type Vram
 import { ImageIcon, PowerOnIcon } from "../ui/icons";
 import { formatCtx } from "./fleetStats";
 import { ModelLauncher } from "./ModelLauncher";
+import { SHOW_MODEL_LAUNCHERS } from "../../forkFlags";
 
 type Unit = "celsius" | "fahrenheit";
-type WakeMessage = "sent" | "failed" | { raw: string } | null;
+type WakeMessage = "sent" | "power" | "failed" | { raw: string } | null;
 
 const MULTI_RANK_HOLDER = /(?:^|[\s/\\_-])(?:tensorfold|strata|vllm|sglang|mpirun|torchrun)(?:$|[\s._-])/i;
 
@@ -215,7 +216,11 @@ function SparkCardImpl({
     setWakeMsg(null);
     try {
       const res = await wakeSpark(spark.id);
-      setWakeMsg(res.success ? "sent" : res.error || res.message ? { raw: res.error || res.message! } : "failed");
+      setWakeMsg(
+        res.success
+          ? res.method === "power" ? "power" : "sent"
+          : { raw: res.error || res.message || "Wake failed" }
+      );
     } catch (err) {
       setWakeMsg(err instanceof Error ? { raw: err.message } : "failed");
     } finally {
@@ -271,7 +276,8 @@ function SparkCardImpl({
         ? t("card.vramInUseWithHolders", { holders: gpuHolders.join(", "), memory: formatMb(memUsed), usage: Math.round(usage) })
         : t("card.vramInUse", { memory: formatMb(memUsed), usage: Math.round(usage) })
       : null;
-  const showLauncher = role !== "worker" && !llm && !spark.llmMovedTo && spark.llmMonitoring !== false && spark.platform !== "windows";
+  const showLauncher =
+    SHOW_MODEL_LAUNCHERS && role !== "worker" && !llm && !spark.llmMovedTo && spark.llmMonitoring !== false && spark.platform !== "windows";
 
   const showTps = role !== "worker" && !!llm;
   const isStrata = llm?.backend === "strata";
@@ -365,7 +371,7 @@ function SparkCardImpl({
       {!online || !gpu ? (
         <div className="ov-sc__off">
           <span>{online ? t("card.waitingForMetrics") : t("card.hostUnreachable")}</span>
-          {!online && spark.kind === "host" ? (
+          {!online && (spark.hasPowerControl || spark.kind === "host") ? (
             <button
               type="button"
               className="btn btn--primary btn--sm"
@@ -373,10 +379,10 @@ function SparkCardImpl({
               onClick={() => void onWake()}
             >
               <PowerOnIcon className="h-3.5 w-3.5" />
-              {t("card.wakeUp")}
+              {spark.hasPowerControl ? "Power on" : t("card.wakeUp")}
             </button>
           ) : null}
-          {wakeMsg ? <span className="ov-sc__msg">{wakeMsg === "sent" ? t("card.wakePacketSent") : wakeMsg === "failed" ? t("card.wakeFailed") : wakeMsg.raw}</span> : null}
+          {wakeMsg ? <span className="ov-sc__msg">{wakeMsg === "sent" ? t("card.wakePacketSent") : wakeMsg === "power" ? "Power on requested" : wakeMsg === "failed" ? t("card.wakeFailed") : wakeMsg.raw}</span> : null}
           {chips}
         </div>
       ) : (
@@ -459,7 +465,23 @@ function SparkCardImpl({
               ) : null}
             </div>
           </div>
-          {showLauncher ? <ModelLauncher spark={spark} onOpen={onSelect} busy={loadingHint} busyHolders={gpuHolders.length > 0} suggestWorkerRole={suggestWorkerRole} freeMb={memTotal > 0 ? memAvail : null} lowFreeMb={HEADROOM_THRESHOLDS_MB[memoryModelFor(spark.kind, spark.platform)].low} /> : null}
+          {showLauncher ? (
+            <ModelLauncher spark={spark} onOpen={onSelect} busy={loadingHint} busyHolders={gpuHolders.length > 0} suggestWorkerRole={suggestWorkerRole} freeMb={memTotal > 0 ? memAvail : null} lowFreeMb={HEADROOM_THRESHOLDS_MB[memoryModelFor(spark.kind, spark.platform)].low} />
+          ) : loadingHint || suggestWorkerRole ? (
+            <div className="ov-launch ov-launch--worker">
+              {loadingHint ? (
+                <>
+                  <div className="ov-launch__title">
+                    {gpuHolders.length > 0 ? t("launcher.gpuInUse") : t("launcher.somethingLoading")}
+                  </div>
+                  <div className="ov-launch__hint">{loadingHint}</div>
+                </>
+              ) : null}
+              {suggestWorkerRole ? (
+                <div className="ov-launch__hint ov-launch__hint--worker">{t("launcher.workerRoleHint")}</div>
+              ) : null}
+            </div>
+          ) : null}
           {role === "worker" ? (
             <div className="ov-launch ov-launch--worker">
               <div className="eyebrow">{t("card.workerOfLabel")}</div>

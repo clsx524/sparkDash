@@ -1,3 +1,4 @@
+import type { DeploymentCatalog, DeploymentInput, DeploymentPreview } from "./deploymentTypes";
 import type {
   AlertChannel,
   AlertTestResult,
@@ -34,6 +35,16 @@ import type {
   OccupancyCheck,
   OccupancyHelper,
   OccupancyHelperInput,
+  HfTokenStatus,
+  ModelEntry,
+  ModelJobStateOrIdle,
+  ModelRegistryConfig,
+  ModelRegistryScanResult,
+  ModelsListResponse,
+  RecipeActivateResponse,
+  RecipeListResponse,
+  RecipeSessionDetail,
+  RecipeSessionSummary,
   Settings,
   ShowcaseListResponse,
   ShowcaseSessionState,
@@ -646,12 +657,18 @@ export interface PowerResult {
   output?: string;
   mac?: string;
   broadcast?: string;
+  /** Which path the server used: a configured power endpoint or Wake-on-LAN. */
+  method?: "power" | "wol";
   error?: string;
 }
 
 export interface BatchPowerResult {
   success: boolean;
-  results: {
+  /** Progress arrives on `recipeSession` for recipe activation, otherwise `powerAction`. */
+  started?: boolean;
+  targetId?: string;
+  sessionId?: string;
+  results?: {
     id: string;
     ok: boolean;
     error?: string;
@@ -739,7 +756,7 @@ export function shutdownAllSparks(): Promise<BatchPowerResult> {
   return apiFetch("/api/sparks/shutdown-all", { method: "POST" });
 }
 
-/** Send WoL to all registered Sparks that have a MAC configured. */
+/** Activate the last active recipe, or power on the fleet when no recipe is remembered. */
 export function wakeAllSparks(): Promise<BatchPowerResult> {
   return apiFetch("/api/sparks/wake-all", { method: "POST" });
 }
@@ -1189,4 +1206,110 @@ export function fetchAtticInstallFlags(id: string): Promise<{ passwordAllowed: b
 
 export function fetchAtticInstallStatus(id: string): Promise<{ installed: boolean | null }> {
   return apiFetch(`/api/sparks/${encodeURIComponent(id)}/attic/status`);
+// ─── Recipe registry / switching ──────────────────────────
+/** Live-inferred list of deployment recipes plus which one (if any) is running. */
+export function fetchRecipes(): Promise<RecipeListResponse> {
+  return apiFetch("/api/recipes");
+}
+
+export function fetchDeploymentCatalog(): Promise<DeploymentCatalog> {
+  return apiFetch("/api/deployment");
+}
+
+export function buildDeploymentPlan(input: DeploymentInput): Promise<DeploymentPreview> {
+  return apiFetch("/api/deployment/preview", { method: "POST", body: JSON.stringify(input) });
+}
+
+export function applyDeploymentPlan(revision: string): Promise<RecipeActivateResponse> {
+  return apiFetch("/api/deployment/apply", { method: "POST", body: JSON.stringify({ revision }) });
+}
+
+export function prepareModelImages(): Promise<RecipeActivateResponse> {
+  return apiFetch("/api/deployment/images/prepare", { method: "POST" });
+}
+
+export function fetchRecipeSessions(): Promise<{ sessions: RecipeSessionSummary[] }> {
+  return apiFetch("/api/recipes/sessions");
+}
+
+export function fetchCurrentRecipeSession(): Promise<{ session: RecipeSessionDetail | null }> {
+  return apiFetch("/api/recipes/sessions/current");
+}
+
+export function fetchRecipeSession(
+  id: string,
+  afterSeq?: number
+): Promise<{ session: RecipeSessionDetail }> {
+  const query = afterSeq == null ? "" : `?afterSeq=${encodeURIComponent(afterSeq)}`;
+  return apiFetch(`/api/recipes/sessions/${encodeURIComponent(id)}${query}`);
+}
+
+/** Cancel remaining server-side Apply work; completed changes are not rolled back. */
+export function cancelRecipeSession(id: string): Promise<{ session: RecipeSessionDetail }> {
+  return apiFetch(`/api/recipes/sessions/${encodeURIComponent(id)}/cancel`, { method: "POST" });
+}
+
+// ─── Model Registry (generic model tracking/sync) ─────────
+export function fetchModelRegistry(): Promise<ModelRegistryConfig> {
+  return apiFetch("/api/model-registry");
+}
+
+/** Setting/changing the host or directory immediately reconciles the tracked list against disk — see the returned discovered/scanError. */
+export function updateModelRegistry(
+  patch: ModelRegistryConfig
+): Promise<ModelRegistryConfig & ModelRegistryScanResult> {
+  return apiFetch("/api/model-registry", { method: "PUT", body: JSON.stringify(patch) });
+}
+
+/** Re-scan the registry directory on demand (no config change) — for files added on disk after the registry was already configured. */
+export function rescanModelRegistry(): Promise<ModelRegistryScanResult> {
+  return apiFetch("/api/model-registry/rescan", { method: "POST" });
+}
+
+/** Live-probed Hugging Face login state on the registry host (never a stored flag). */
+export function fetchHfTokenStatus(): Promise<HfTokenStatus> {
+  return apiFetch("/api/model-registry/hf-token");
+}
+
+/** Set or replace the Hugging Face login on the registry host — validated by hf auth login itself. */
+export function setHfToken(token: string): Promise<HfTokenStatus> {
+  return apiFetch("/api/model-registry/hf-token", { method: "PUT", body: JSON.stringify({ token }) });
+}
+
+/** Tracked models plus a live availability probe per model (never a stored flag). */
+export function fetchModels(): Promise<ModelsListResponse> {
+  return apiFetch("/api/models");
+}
+
+export function addModel(
+  input: Pick<ModelEntry, "id" | "label" | "subfolder" | "revision" | "includePattern"> & { repo: string }
+): Promise<ModelEntry> {
+  return apiFetch("/api/models", { method: "POST", body: JSON.stringify(input) });
+}
+
+/** Edit an existing tracked model's label/repo/revision/includePattern — e.g. attaching a source repo to a disk-discovered entry. */
+export function updateModel(
+  id: string,
+  patch: Partial<Pick<ModelEntry, "label" | "repo" | "revision" | "includePattern">>
+): Promise<ModelEntry> {
+  return apiFetch(`/api/models/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(patch) });
+}
+
+/** Remove a tracked model entry (metadata only — does not touch downloaded files). */
+export function removeModel(id: string): Promise<ModelEntry> {
+  return apiFetch(`/api/models/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+/** Delete a model's downloaded files from the registry host. Entry stays tracked. */
+export function deleteModelFiles(id: string): Promise<{ started: boolean }> {
+  return apiFetch(`/api/models/${encodeURIComponent(id)}/files`, { method: "DELETE" });
+}
+
+/** Kick off async download + checksum verification. Poll fetchModelJob for progress. */
+export function downloadModel(id: string): Promise<{ started: boolean }> {
+  return apiFetch(`/api/models/${encodeURIComponent(id)}/download`, { method: "POST" });
+}
+
+export function fetchModelJob(id: string): Promise<ModelJobStateOrIdle> {
+  return apiFetch(`/api/models/${encodeURIComponent(id)}/job`);
 }

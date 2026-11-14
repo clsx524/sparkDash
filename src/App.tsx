@@ -44,7 +44,10 @@ import {
   ExpandIcon,
   KeyIcon,
   DiskIcon,
+  FlaskIcon,
 } from "./components/ui/icons";
+import { RecipesDialog } from "./components/RecipesDialog";
+import { ModelsDialog } from "./components/ModelsDialog";
 import { ConnectionBanner } from "./components/ui/ConnectionBanner";
 import { ErrorBanner } from "./components/ui/ErrorBanner";
 import {
@@ -177,6 +180,9 @@ function DashboardApp() {
     setActiveId,
     activeSpark: liveActive,
     connected,
+    recipeSession,
+    lastActiveRecipe,
+    powerAction,
     lastValidSnapshotAt,
     snapshotError,
     refreshInterval,
@@ -222,6 +228,21 @@ function DashboardApp() {
       return next;
     });
   }, []);
+  const [showRecipes, setShowRecipes] = useState(() => {
+    try {
+      return sessionStorage.getItem("sparkdash.recipes.open") === "1";
+    } catch {
+      return false;
+    }
+  });
+  useEffect(() => {
+    try {
+      sessionStorage.setItem("sparkdash.recipes.open", showRecipes ? "1" : "0");
+    } catch {
+      /* the dialog still works when browser storage is unavailable */
+    }
+  }, [showRecipes]);
+  const [showModels, setShowModels] = useState(false);
   const [settings, setSettings] = useState<Settings | null>(null);
   const [authMode, setAuthMode] = useState<AuthMode | null>(null);
   /** Version the running server reports; Settings falls back to this page's own build. */
@@ -531,7 +552,9 @@ function DashboardApp() {
       { id: "act:theme", group: t("commands.actions"), label: t("commands.theme"), hint: t("commands.themeHint"), icon: <SunIcon className="h-4 w-4" />, keywords: "Switch theme appearance dark light", run: () => window.dispatchEvent(new Event("sparkdash:cycle-theme")) },
       { id: "act:sidebar", group: t("commands.actions"), label: t("commands.sidebar"), icon: <PanelLeftIcon className="h-4 w-4" />, keywords: "Show or hide the sidebar collapse expand navigation rail menu", run: toggleSidebar },
       { id: "act:settings", group: t("commands.actions"), label: t("commands.settings"), icon: <GearIcon className="h-4 w-4" />, keywords: "Open settings preferences density refresh", run: () => setShowSettings(true) },
-      { id: "act:harness", group: t("commands.actions"), label: t("commands.harness"), icon: <BotIcon className="h-4 w-4" />, keywords: "Set up harness sessions occupancy openclaw opencode hermes oh-my-pi wizard", run: () => { setHarnessSparkId(undefined); setShowHarness(true); } }
+      { id: "act:harness", group: t("commands.actions"), label: t("commands.harness"), icon: <BotIcon className="h-4 w-4" />, keywords: "Set up harness sessions occupancy openclaw opencode hermes oh-my-pi wizard", run: () => { setHarnessSparkId(undefined); setShowHarness(true); } },
+      { id: "act:recipes", group: t("commands.actions"), label: "Deployment recipes", icon: <FlaskIcon className="h-4 w-4" />, keywords: "recipe switch model launch deploy", run: () => setShowRecipes(true) },
+      { id: "act:models", group: t("commands.actions"), label: "Model Registry", icon: <ServerIcon className="h-4 w-4" />, keywords: "weights download sync checkpoint", run: () => setShowModels(true) },
     );
     if (apiKeysEnabled) {
       cmds.push({ id: "nav:apikeys", group: t("commands.goTo"), label: t("nav.apiKeys"), hint: t("commands.page"), icon: <KeyIcon className="h-4 w-4" />, keywords: "api keys litellm virtual keys spend budget", run: () => navigate(API_KEYS_ID) });
@@ -550,6 +573,8 @@ function DashboardApp() {
           onAdd={() => setShowAdd(true)}
           onReorder={handleReorder}
           onOpenSettings={() => setShowSettings(true)}
+          onOpenRecipes={() => setShowRecipes(true)}
+          onOpenModels={() => setShowModels(true)}
           onOpenSearch={() => setShowPalette(true)}
           benchType={benchType}
           onSelectBench={(type) => navigate(benchId(type))}
@@ -637,6 +662,10 @@ function DashboardApp() {
                   }}
                   showVramBreakdown={settings?.showVramBreakdown ?? true}
                   temperatureUnit={settings?.temperatureUnit ?? "celsius"}
+                  powerAction={powerAction}
+                  lastActiveRecipe={lastActiveRecipe}
+                  recipeSession={recipeSession}
+                  onOpenRecipes={() => setShowRecipes(true)}
                   onSelectSpark={navigate}
                   onNavigate={navigate}
                 />
@@ -728,6 +757,12 @@ function DashboardApp() {
           llmPorts: spark.llmPorts?.length ? spark.llmPorts : [spark.llmPort],
         }))}
       />
+      <RecipesDialog
+        open={showRecipes}
+        onClose={() => setShowRecipes(false)}
+        recipeSession={recipeSession}
+      />
+      <ModelsDialog open={showModels} onClose={() => setShowModels(false)} />
     </div>
   );
 }

@@ -40,6 +40,8 @@ export class SparkRegistry {
     this._passwords = new Map();
     /** @type {Map<string, Record<string, string>>} sparkId -> { portStr -> apiKey } */
     this._llmApiKeys = new Map();
+    /** @type {Map<string, string>} sparkId -> power-control bearer token */
+    this._powerTokens = new Map();
     this._listeners = new Set();
     this._load();
   }
@@ -73,11 +75,12 @@ export class SparkRegistry {
     if (ssh.auth === "pass" || this._passwords.has(spark.id)) {
       ssh.hasPassword = this._passwords.has(spark.id);
     }
-    const { llmApiKeys: _drop, ...rest } = spark;
+    const { llmApiKeys: _drop, powerToken: _dropToken, ...rest } = spark;
     return {
       ...rest,
       ssh,
       llmApiKeyPorts: this.llmApiKeyPorts(spark.id),
+      hasPowerToken: this._powerTokens.has(spark.id),
     };
   }
 
@@ -96,6 +99,7 @@ export class SparkRegistry {
     this._save(nextSparks);
     try {
       this._storePassword(spark.id, config?.ssh?.password);
+      this._storePowerToken(spark.id, config?.powerToken);
     } catch (err) {
       this._save(this._sparks);
       throw err;
@@ -135,8 +139,12 @@ export class SparkRegistry {
     if (idx === -1) throw new Error(`Spark ${id} not found`);
 
     // Client cannot set detectedMacAddress (auto from enP7s7 only)
-    const { id: _ignoreId, detectedMacAddress: _ignoreDetected, ...rawUpdates } =
-      updates || {};
+    const {
+      id: _ignoreId,
+      detectedMacAddress: _ignoreDetected,
+      powerToken,
+      ...rawUpdates
+    } = updates || {};
     const prev = this._sparks[idx];
 
     /** @type {Record<string, unknown>} */
@@ -186,18 +194,28 @@ export class SparkRegistry {
     const llmTarget = (s) => [llmProbeHost(s), !s.isLocal && (s.ssh.host || s.lanIp)].join(" ");
     const prevPasswords = this._passwords;
     const prevLlmApiKeys = this._llmApiKeys;
+    const prevPowerTokens = this._powerTokens;
     this._save(nextSparks);
     try {
       if (sshTarget(nextSparks[idx]) !== sshTarget(prev)) this._storePassword(id, "");
       if (llmTarget(nextSparks[idx]) !== llmTarget(prev)) this.pruneLlmApiKeys(id, []);
       if (hasPasswordUpdate) this._storePassword(id, passwordUpdate);
+      // A power token belongs to the endpoint it was entered for. Clearing the
+      // power config clears it; an explicit empty string also clears it.
+      if (powerToken !== undefined) this._storePowerToken(id, powerToken);
+      else if (!nextSparks[idx].powerControl) this._storePowerToken(id, "");
     } catch (err) {
       this._save(this._sparks);
       // The unit is back on its old host, so its secrets come back too.
-      if (this._passwords !== prevPasswords || this._llmApiKeys !== prevLlmApiKeys) {
-        this._saveSecrets(prevPasswords, prevLlmApiKeys);
+      if (
+        this._passwords !== prevPasswords ||
+        this._llmApiKeys !== prevLlmApiKeys ||
+        this._powerTokens !== prevPowerTokens
+      ) {
+        this._saveSecrets(prevPasswords, prevLlmApiKeys, prevPowerTokens);
         this._passwords = prevPasswords;
         this._llmApiKeys = prevLlmApiKeys;
+        this._powerTokens = prevPowerTokens;
       }
       throw err;
     }
@@ -214,12 +232,14 @@ export class SparkRegistry {
     const nextSparks = this._sparks.filter((s) => s.id !== id);
     const nextPasswords = new Map(this._passwords);
     const nextLlmApiKeys = new Map(this._llmApiKeys);
+    const nextPowerTokens = new Map(this._powerTokens);
     const passwordChanged = nextPasswords.delete(id);
     const llmKeysChanged = nextLlmApiKeys.delete(id);
-    const secretsChanged = passwordChanged || llmKeysChanged;
+    const powerTokenChanged = nextPowerTokens.delete(id);
+    const secretsChanged = passwordChanged || llmKeysChanged || powerTokenChanged;
     this._save(nextSparks);
     try {
-      if (secretsChanged) this._saveSecrets(nextPasswords, nextLlmApiKeys);
+      if (secretsChanged) this._saveSecrets(nextPasswords, nextLlmApiKeys, nextPowerTokens);
     } catch (err) {
       this._save(this._sparks);
       throw err;
@@ -227,6 +247,7 @@ export class SparkRegistry {
     this._sparks = nextSparks;
     this._passwords = nextPasswords;
     this._llmApiKeys = nextLlmApiKeys;
+    this._powerTokens = nextPowerTokens;
     this._emit("remove", removed);
     return this.toPublic(removed);
   }
@@ -270,10 +291,12 @@ export class SparkRegistry {
       const loaded = loadSecrets();
       this._passwords = loaded.passwords || new Map();
       this._llmApiKeys = loaded.llmApiKeys || new Map();
+      this._powerTokens = loaded.powerTokens || new Map();
     } catch (err) {
       console.error("[SparkRegistry] secrets load failed:", err.message);
       this._passwords = new Map();
       this._llmApiKeys = new Map();
+      this._powerTokens = new Map();
     }
 
     try {
@@ -283,12 +306,21 @@ export class SparkRegistry {
       this._sparks = [];
       let migratedSecrets = false;
       for (const s of loaded) {
-        // Migrate: pull plaintext passwords into encrypted store, strip from disk
+        // Migrate: pull plaintext passwords / power tokens into the encrypted
+        // store, strip them from disk.
         if (s?.ssh?.password) {
           this._passwords.set(s.id, s.ssh.password);
           migratedSecrets = true;
           console.warn(
             `[SparkRegistry] Migrated password for ${s.id} from sparks.json into encrypted secrets store; ` +
+              `rotate this credential if it was previously exposed.`
+          );
+        }
+        if (s?.powerToken) {
+          this._powerTokens.set(s.id, s.powerToken);
+          migratedSecrets = true;
+          console.warn(
+            `[SparkRegistry] Migrated power token for ${s.id} from sparks.json into encrypted secrets store; ` +
               `rotate this credential if it was previously exposed.`
           );
         }
@@ -399,10 +431,39 @@ export class SparkRegistry {
     this._passwords = next;
   }
 
+  /**
+   * Store / clear a power-control bearer token. Always persists to the
+   * encrypted secrets file. `""` clears it; null/undefined is a no-op.
+   * @param {string} id
+   * @param {string|null|undefined} token
+   */
+  _storePowerToken(id, token) {
+    if (token == null) return;
+    const next = new Map(this._powerTokens);
+    if (token === "") {
+      if (next.has(id)) {
+        next.delete(id);
+        this._saveSecrets(this._passwords, this._llmApiKeys, next);
+        this._powerTokens = next;
+      }
+      return;
+    }
+    next.set(id, String(token));
+    this._saveSecrets(this._passwords, this._llmApiKeys, next);
+    this._powerTokens = next;
+  }
+
   /** Public helper: set password without other config changes (e.g. from Test / Edit). */
   setPassword(id, password) {
     if (!this._sparks.find((s) => s.id === id)) throw new Error(`Spark ${id} not found`);
     this._storePassword(id, password);
+    return this.toPublic(this.getSpark(id));
+  }
+
+  /** Public helper: set / clear the power-control token without other config changes. */
+  setPowerToken(id, token) {
+    if (!this._sparks.find((s) => s.id === id)) throw new Error(`Spark ${id} not found`);
+    this._storePowerToken(id, token);
     return this.toPublic(this.getSpark(id));
   }
 
@@ -585,12 +646,12 @@ export class SparkRegistry {
   }
 
   _persistSecrets() {
-    this._saveSecrets(this._passwords, this._llmApiKeys);
+    this._saveSecrets(this._passwords, this._llmApiKeys, this._powerTokens);
   }
 
-  _saveSecrets(passwords, llmApiKeys) {
+  _saveSecrets(passwords, llmApiKeys, powerTokens = this._powerTokens) {
     try {
-      saveSecrets(passwords, llmApiKeys);
+      saveSecrets(passwords, llmApiKeys, powerTokens);
     } catch (cause) {
       const err = new Error("Secrets persistence failed", { cause });
       err.status = 500;
@@ -602,12 +663,14 @@ export class SparkRegistry {
     if (!spark) return spark;
     const password = this._passwords.get(spark.id);
     const llmApiKeys = this._llmApiKeys.get(spark.id);
+    const powerToken = this._powerTokens.get(spark.id);
     const ssh = { ...(spark.ssh || {}) };
     if (password) ssh.password = password;
     const out = { ...spark, ssh };
     if (llmApiKeys && Object.keys(llmApiKeys).length > 0) {
       out.llmApiKeys = { ...llmApiKeys };
     }
+    if (powerToken) out.powerToken = powerToken;
     return out;
   }
 
@@ -697,7 +760,71 @@ export class SparkRegistry {
       disabledDevices: Array.isArray(config.disabledDevices) ? config.disabledDevices : [],
       disabledInterfaces: Array.isArray(config.disabledInterfaces) ? config.disabledInterfaces : [],
       storagePollDisabled: Boolean(config.storagePollDisabled),
+      /**
+       * Model Registry integration. Defaults to the standard Hugging Face
+       * cache directory (matches every Spark's existing `hf_home` ansible
+       * group_var and the `hf` CLI's own default) — not a fleet-specific
+       * guess, just the same convention this fleet, and `hf`/`transformers`
+       * generally, already use. Still fully operator-editable per host.
+       */
+      modelFolder: this._normalizeModelFolder(config.modelFolder),
+      /**
+       * Optional generic power-control endpoints. SparkDash only speaks HTTP:
+       * `onUrl` / `offUrl` are batch endpoints, `target` identifies this unit
+       * in the batch body (`{"targets": ["1"]}`). The bearer token lives in the
+       * encrypted secrets store, never here.
+       */
+      powerControl: this._normalizePowerControl(config.powerControl),
     };
+  }
+
+  /** Normalize the optional power-control config; null when no URL is set. */
+  _normalizePowerControl(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+    const onUrl = typeof value.onUrl === "string" ? value.onUrl.trim() : "";
+    const offUrl = typeof value.offUrl === "string" ? value.offUrl.trim() : "";
+    if (!onUrl && !offUrl) return null;
+    const method = ["GET", "POST", "PUT", "PATCH"].includes(String(value.method || "").toUpperCase())
+      ? String(value.method).toUpperCase()
+      : "POST";
+    const target =
+      value.target == null || value.target === ""
+        ? null
+        : String(value.target).trim().slice(0, 64) || null;
+    const headers =
+      value.headers && typeof value.headers === "object" && !Array.isArray(value.headers)
+        ? Object.fromEntries(
+            Object.entries(value.headers)
+              .filter(([k, v]) => typeof k === "string" && typeof v === "string")
+              .slice(0, 20)
+          )
+        : {};
+    const timeoutMs = Number.isInteger(Number(value.timeoutMs))
+      ? Math.min(60_000, Math.max(1_000, Number(value.timeoutMs)))
+      : 10_000;
+    const tokenHeader =
+      typeof value.tokenHeader === "string" && value.tokenHeader.trim()
+        ? value.tokenHeader.trim().slice(0, 64)
+        : "Authorization";
+    const tokenPrefix =
+      typeof value.tokenPrefix === "string" ? value.tokenPrefix.slice(0, 32) : "Bearer ";
+    return {
+      onUrl: onUrl || null,
+      offUrl: offUrl || null,
+      target,
+      method,
+      headers,
+      body: value.body ?? null,
+      timeoutMs,
+      tokenHeader,
+      tokenPrefix,
+    };
+  }
+
+  /** Trim optional model storage folder path; empty falls back to the standard HF cache dir. */
+  _normalizeModelFolder(value) {
+    const trimmed = typeof value === "string" ? value.trim() : "";
+    return trimmed || "~/.cache/huggingface";
   }
 
   /** Normalize ComfyUI port to 1–65535 (default 8188). */

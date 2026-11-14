@@ -5,9 +5,9 @@ import path from "node:path";
  * A test that spawns `server/index.js` must pass these (pointing into a temp dir),
  * or it reads and writes the real install's files: a "running" bench checkpoint
  * would be marked interrupted, an archive moved aside, and so on.
- * `isolatedEnv.test.js` fails when server code starts using a path variable missing here.
  */
 export const CONFIG_PATH_VARS = [
+  "DEPLOYMENT_PLAN_JSON_PATH",
   "SPARKS_JSON_PATH",
   "SPARKS_SECRETS_PATH",
   "SECRETS_KEY_PATH",
@@ -41,10 +41,14 @@ export const CONFIG_PATH_VARS = [
   "MODEL_PRICES_FETCH",
   // Opt-in power meters: the isolated path never exists, so tests run with them off.
   "POWER_METERS_CONFIG_PATH",
+  "RECIPES_JSON_PATH",
+  "RECIPE_SWITCH_HISTORY_JSON_PATH",
+  "MODEL_REGISTRY_JSON_PATH",
+  "MODELS_JSON_PATH",
 ];
 
 /** Variables that point at a directory the server writes into. */
-export const CONFIG_DIR_VARS = ["TOOL_EVAL_RESULTS_DIR", "QUALITY_FIDELITY_DIR"];
+export const CONFIG_DIR_VARS = ["TOOL_EVAL_RESULTS_DIR", "QUALITY_FIDELITY_DIR", "RECIPE_SESSIONS_DIR"];
 
 /** Env entries mapping each config path variable to a file (or directory) inside `dir`. */
 export function isolatedConfigEnv(dir) {

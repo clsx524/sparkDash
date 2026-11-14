@@ -1,9 +1,17 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import type { AlertInstance, SparkSnapshot } from "../../api/types";
+import type {
+  AlertInstance,
+  LastActiveRecipe,
+  PowerActionState,
+  RecipeSessionSummary,
+  SparkSnapshot,
+} from "../../api/types";
 import { isWorkerSpark, resolveSparkRole } from "../../api/sparkRole";
 import { updateAllHermes, wakeAllSparks } from "../../api/client";
 import { ShutdownAll } from "../ShutdownAll";
+import { ConfirmShutdownDialog } from "../ConfirmShutdownDialog";
+import { PowerActionBanner } from "../PowerActionBanner";
 import { FleetEnergyCard } from "./FleetEnergyCard";
 import { FleetAlertStrip } from "./FleetAlertStrip";
 import { FleetTokenTotals } from "./FleetTokenTotals";
@@ -16,6 +24,7 @@ import { ActivityIcon, PowerOnIcon, RotateIcon } from "../ui/icons";
 import { formatMb } from "../../shared/formatBytes";
 import { vramContextFor } from "../../shared/vramBreakdown";
 import { makeHeadResolver } from "../../shared/sparkHead";
+import { ForkClusterTop } from "./ForkCluster";
 import "../../styles/overview.css";
 
 interface OverviewPageProps {
@@ -39,6 +48,12 @@ interface OverviewPageProps {
   /** VRAM bar split by engine / system / free, judged by headroom. On by default. */
   showVramBreakdown?: boolean;
   temperatureUnit?: "celsius" | "fahrenheit";
+  /** Live shutdown-all / wake-all progress from the WS snapshot. */
+  powerAction?: PowerActionState | null;
+  lastActiveRecipe?: LastActiveRecipe | null;
+  recipeSession?: RecipeSessionSummary | null;
+  /** Open the persistent Current Apply view after Wake all starts a recipe session. */
+  onOpenRecipes?: () => void;
   onSelectSpark?: (id: string) => void;
   /** Open a dedicated page (Token totals, Fleet energy, Activity). */
   onNavigate?: (id: string) => void;
@@ -59,6 +74,10 @@ export function OverviewPage({
   kpis,
   showVramBreakdown = true,
   temperatureUnit = "celsius",
+  powerAction = null,
+  lastActiveRecipe = null,
+  recipeSession = null,
+  onOpenRecipes,
   onSelectSpark,
   onNavigate,
 }: OverviewPageProps) {
@@ -108,9 +127,17 @@ export function OverviewPage({
   const [batchMsg, setBatchMsg] = useState<
     | { kind: "hermes"; started: number; skipped: number; failed: number }
     | { kind: "wake"; sent: number; failed: number }
+    | { kind: "text"; text: string; tone: "ok" | "err" }
     | { kind: "error"; reason: "hermesFailed" | "wakeFailed"; rawMessage?: string }
     | null
   >(null);
+  const [wakeAllOpen, setWakeAllOpen] = useState(false);
+  const wakePending = useRef(false);
+  const wakeBlocked = batchLoading || recipeSession?.status === "running"
+    || Boolean(powerAction && powerAction.phase !== "done" && powerAction.phase !== "failed");
+  const wakeDescription = lastActiveRecipe
+    ? `Activate “${lastActiveRecipe.label}” using the same Apply workflow as Deployment recipes. Only its required nodes will be woken; other nodes stay as they are.`
+    : "No recipe has been remembered yet. Power on every offline node with a configured outlet; hosts without an outlet fall back to Wake-on-LAN. This is power-only: no recipe will be applied.";
   /** Spark ids we started a batch Hermes update on; drives the live progress bar. */
   const [batchRun, setBatchRun] = useState<string[] | null>(null);
 
@@ -179,14 +206,22 @@ export function OverviewPage({
     }
   }
 
-  async function handleWakeAll() {
+  async function runWakeAll() {
+    if (wakePending.current || wakeBlocked) return;
+    wakePending.current = true;
     setBatchLoading(true);
     setBatchMsg(null);
     try {
       const res = await wakeAllSparks();
-      const ok = res.results.filter((r) => r.ok).length;
-      const fail = res.results.filter((r) => !r.ok).length;
-      setBatchMsg({ kind: "wake", sent: ok, failed: fail });
+      if (res.sessionId) {
+        onOpenRecipes?.();
+      } else {
+        setBatchMsg({
+          kind: "text",
+          text: res.started ? "Power-only fleet wake started" : "Power-only fleet wake requested",
+          tone: "ok",
+        });
+      }
     } catch (err: unknown) {
       setBatchMsg({
         kind: "error",
@@ -194,12 +229,12 @@ export function OverviewPage({
         rawMessage: err instanceof Error ? err.message : undefined,
       });
     } finally {
+      wakePending.current = false;
       setBatchLoading(false);
-      setTimeout(() => setBatchMsg(null), 6000);
     }
   }
 
-  if (withoutWorkers.length === 0 || (hideOffline && withoutWorkers.every((spark) => !spark.online))) {
+  if (!lastActiveRecipe && (withoutWorkers.length === 0 || (hideOffline && withoutWorkers.every((spark) => !spark.online)))) {
     const allWorkersHidden = hideWorkers && sparks.length > 0 && withoutWorkers.length === 0;
     const allOffline = hideOffline && withoutWorkers.length > 0;
     const title = allWorkersHidden
@@ -240,10 +275,12 @@ export function OverviewPage({
         </div>
         <div className="ov-btns">
           {batchMsg && (
-            <span className={`ov-batchmsg ${batchMsg.kind !== "error" && batchMsg.failed === 0 ? "is-ok" : "is-err"}`} role="status">
+            <span className={`ov-batchmsg ${batchMsg.kind === "text" ? (batchMsg.tone === "ok" ? "is-ok" : "is-err") : batchMsg.kind !== "error" && batchMsg.failed === 0 ? "is-ok" : "is-err"}`} role="status">
               {batchMsg.kind === "error"
                 ? batchMsg.rawMessage ?? (batchMsg.reason === "hermesFailed" ? t("batch.hermesFailed") : t("batch.wakeFailed"))
-                : batchMsg.kind === "hermes"
+                : batchMsg.kind === "text"
+                  ? batchMsg.text
+                  : batchMsg.kind === "hermes"
                   ? [
                       t("batch.hermesStarted", { count: batchMsg.started }),
                       ...(batchMsg.skipped ? [t("batch.skipped", { count: batchMsg.skipped })] : []),
@@ -272,7 +309,7 @@ export function OverviewPage({
               </div>
             </div>
           )}
-          {sparks.length > 0 && (
+          {(sparks.length > 0 || lastActiveRecipe) && (
             <>
               {hermesMonitoredCount > 0 && (
                 <button
@@ -294,21 +331,30 @@ export function OverviewPage({
                   )}
                 </button>
               )}
-              {sparks.some((spark) => spark.kind === "host") && (
+              {(lastActiveRecipe || sparks.some((spark) => spark.hasPowerControl || spark.kind === "host")) && (
                 <button
                   type="button"
-                  onClick={() => void handleWakeAll()}
-                  disabled={batchLoading}
-                  title={t("batch.wakeAllTitle")}
+                  onClick={() => setWakeAllOpen(true)}
+                  disabled={wakeBlocked}
+                  title={wakeDescription}
                   className="btn"
                 >
                   <PowerOnIcon className="h-3.5 w-3.5" />
                   {t("batch.wakeAll")}
                 </button>
               )}
+              {lastActiveRecipe && (
+                <span className="ov-batchmsg">
+                  Last active recipe: {lastActiveRecipe.label}
+                  {lastActiveRecipe.storageError && (
+                    <span className="is-err" role="status"> — Not saved to disk: {lastActiveRecipe.storageError}</span>
+                  )}
+                </span>
+              )}
               <ShutdownAll sparks={sparks} className="ov-shutdown" />
             </>
           )}
+          <PowerActionBanner action={powerAction} />
         </div>
       </div>
 
@@ -344,6 +390,8 @@ export function OverviewPage({
         </div>
       ) : null}
 
+      <ForkClusterTop sparks={visibleSparks} temperatureUnit={temperatureUnit} />
+
       <div className="ov-grid">
         <div className="ov-sparks" data-count={visibleSparks.length}>
           {visibleSparks.length === 0 && (
@@ -378,6 +426,21 @@ export function OverviewPage({
         </div>
         ) : null}
       </div>
+
+      <ConfirmShutdownDialog
+        open={wakeAllOpen}
+        onClose={() => setWakeAllOpen(false)}
+        onConfirm={runWakeAll}
+        disabled={wakeBlocked}
+        title="Wake All"
+        description={wakeDescription}
+        confirmLabel="Wake all"
+        tone="default"
+        warningTitle={lastActiveRecipe ? `Apply ${lastActiveRecipe.label}` : "Power-only fleet wake"}
+        warningDetail={lastActiveRecipe
+          ? "Required nodes may take up to five minutes to become ready. Apply replaces the running deployment without checksum verification. Progress and history appear in Current Apply."
+          : "Waits for woken nodes to come online. No recipes are applied or restored; use Deployment recipes to apply one."}
+      />
     </div>
   );
 }

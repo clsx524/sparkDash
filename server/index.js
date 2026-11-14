@@ -15,6 +15,7 @@ import { LlmProbe } from "./collectors/LlmProbe.js";
 import { detectLlmMovedToWorker, reconcileMovedEngineHints } from "./sparks/LlmMovedToWorker.js";
 import { sshExec } from "./collectors/ssh.js";
 import { comfyCancelJob } from "./collectors/comfyActions.js";
+import { formatPrometheusMetrics } from "./collectors/metricsExport.js";
 import {
   validateSparkTarget,
   normalizeSshPort,
@@ -70,8 +71,17 @@ import {
 import { closeLlmStreamAgent } from "./collectors/LlmStreaming.js";
 import { compareSemver, getLatestRelease } from "./collectors/HermesReleases.js";
 import { createModelPricesHandler } from "./prices/ModelPrices.js";
-import { ALERTS_JSON_PATH, FLEET_ENERGY_JSON_PATH, FLEET_ENERGY_MONTHLY_JSON_PATH, MAX_ACTIVE_BENCH_JOBS, METRICS_HISTORY_JSON_PATH, STORAGE_ACKS_JSON_PATH, STORAGE_SCANS_JSON_PATH, STORAGE_SUDO_JSON_PATH } from "./config.js";
+import { ALERTS_JSON_PATH, FLEET_ENERGY_JSON_PATH, FLEET_ENERGY_MONTHLY_JSON_PATH, MAX_ACTIVE_BENCH_JOBS, METRICS_HISTORY_JSON_PATH, RECIPE_SESSIONS_DIR, STORAGE_ACKS_JSON_PATH, STORAGE_SCANS_JSON_PATH, STORAGE_SUDO_JSON_PATH } from "./config.js";
 import { createAlertsRuntime, registerAlertRoutes } from "./alerts/runtime.js";
+import { RecipeRegistry } from "./collectors/RecipeRegistry.js";
+import { ModelRegistry } from "./collectors/ModelRegistry.js";
+import { switchRecipe, isSwitchInFlight, RecipeSwitchError } from "./collectors/recipeActions.js";
+import { DeploymentPlanner } from "./collectors/deploymentPlan.js";
+import { prepareAllImages } from "./collectors/modelImages.js";
+import { RecipeSessionStore, isValidRecipeSessionId } from "./recipes/RecipeSessionStore.js";
+import { LastActiveRecipeStore } from "./recipes/LastActiveRecipeStore.js";
+import { createPowerOrchestrator } from "./power/powerOrchestrator.js";
+import * as powerClient from "./power/powerClient.js";
 import { FleetEnergyTracker } from "./energy/FleetEnergyTracker.js";
 import { EventLog } from "./events/EventLog.js";
 import { planListenRetry } from "./listenRetry.js";
@@ -324,6 +334,52 @@ const registry = new SparkRegistry();
 const inferenceActivity = new InferenceActivityStore();
 const occupancy = createOccupancyRuntime({ listSparks: () => registry.sparks });
 
+// ─── Recipe registry (deployment recipes, distinct from physical-node config) ──
+const recipeRegistry = new RecipeRegistry(registry);
+// ─── Model Registry (generic model tracking/sync, distinct from recipes) ──
+const modelRegistry = new ModelRegistry(registry);
+const deploymentPlanner = new DeploymentPlanner(recipeRegistry, modelRegistry);
+const recipeSessions = new RecipeSessionStore({
+  dir: RECIPE_SESSIONS_DIR,
+  onChange: queueRecipeSessionBroadcast,
+});
+let recipeSessionBroadcastTimer = null;
+const lastActiveRecipe = new LastActiveRecipeStore({
+  file: path.join(RECIPE_SESSIONS_DIR, "last-active-recipe.json"),
+});
+if (!lastActiveRecipe.get()) {
+  const succeeded = recipeSessions.list().find((session) => session.status === "succeeded");
+  if (succeeded) lastActiveRecipe.remember(succeeded.targetId, succeeded.finishedAt);
+}
+
+function lastActiveRecipeInfo() {
+  const remembered = lastActiveRecipe.get();
+  if (!remembered) return null;
+  return {
+    id: remembered.id,
+    label: recipeRegistry.get(remembered.id)?.label || (remembered.id === "services-only" ? "Standalone model services" : remembered.id),
+    storageError: remembered.storageError,
+  };
+}
+
+function rememberUniqueActiveRecipe(snapshot, observedAt) {
+  const latest = recipeSessions.summary();
+  if (latest?.status === "succeeded" && latest.finishedAt > observedAt) return;
+  if (!isSwitchInFlight() && snapshot.activeId && !snapshot.conflict) {
+    lastActiveRecipe.remember(snapshot.activeId, observedAt);
+  }
+}
+
+function queueRecipeSessionBroadcast() {
+  if (recipeSessionBroadcastTimer) return;
+  recipeSessionBroadcastTimer = setTimeout(() => {
+    recipeSessionBroadcastTimer = null;
+    forceBroadcast();
+  }, 200);
+  recipeSessionBroadcastTimer.unref?.();
+}
+/** Latest shutdown-all / wake-all progress, broadcast to every WS client. */
+let powerActionState = null;
 const fleetEnergyTracker = new FleetEnergyTracker({
   nodeIds: registry.sparkIds,
   filePath: FLEET_ENERGY_JSON_PATH,
@@ -553,7 +609,8 @@ const alertsRuntime = createAlertsRuntime({
 const app = express();
 const server = createServer(app);
 
-app.use(express.json());
+const jsonBody = express.json();
+app.use((req, res, next) => req.path.startsWith("/inference/") ? next() : jsonBody(req, res, next));
 // Registered ahead of the auth middleware: a remote browser holding no token
 // (or a stale one) must still be able to learn that it needs one.
 app.get("/api/auth/status", createHostGuardMiddleware(), (req, res) => {
@@ -728,7 +785,9 @@ app.patch("/api/sparks/:id", (req, res) => {
       body.isLocal != null ||
       body.ssh?.host != null ||
       body.ssh?.user != null ||
-      body.ssh?.port != null
+      body.ssh?.port != null ||
+      body.powerControl !== undefined ||
+      body.powerToken !== undefined
     ) {
       const existing = registry.getSpark(req.params.id);
       if (!existing) return res.status(404).json({ error: "Spark not found" });
@@ -737,6 +796,9 @@ app.patch("/api/sparks/:id", (req, res) => {
         lanIp: body.lanIp ?? existing.lanIp,
         llmHost: body.llmHost ?? existing.llmHost,
         ssh: { ...existing.ssh, ...(body.ssh || {}) },
+        powerControl:
+          body.powerControl !== undefined ? body.powerControl : existing.powerControl,
+        powerToken: body.powerToken,
       };
       const validationError = validateSparkTarget(merged);
       if (validationError) {
@@ -858,6 +920,7 @@ registerUnitHistoryRoutes(app, {
 app.get("/api/sparks/:id/metrics", (req, res) => {
   const monitor = monitors.get(req.params.id);
   if (!monitor) return res.status(404).json({ error: "Spark not found" });
+  // Request/response, not the deduplicated broadcast, so the volatile freshness fields are safe.
   res.json(withMovedEngineHint(monitor.snapshot()));
 });
 
@@ -1129,8 +1192,11 @@ app.post("/api/sparks/:id/refresh/:domain", async (req, res) => {
     const monitor = monitors.get(req.params.id);
     if (!monitor) return res.status(404).json({ error: "Spark not found" });
     const { domain } = req.params;
-    if (domain !== "storage" && domain !== "llm") {
-      return res.status(400).json({ error: "Only 'storage' and 'llm' domains are supported" });
+    // "storage" gets refreshDomain's own dedicated dance (collectStorage() directly, its own
+    // generation/in-flight token); "network" (RDMA Interconnect refresh) and "llm" need nothing
+    // special. Widen this list if another manual-refresh button is ever added.
+    if (domain !== "storage" && domain !== "network" && domain !== "llm") {
+      return res.status(400).json({ error: "Only 'storage', 'network' or 'llm' domains are supported" });
     }
     await monitor.refreshDomain(domain);
     forceBroadcast();
@@ -2426,79 +2492,137 @@ function noteWake(spark) {
   });
 }
 
-/** Batch routes first so they never collide with /:id/* if routing changes. */
-app.post("/api/sparks/shutdown-all", async (_req, res) => {
-  const results = [];
-  // Remotes first, local last — shutting down the dashboard host mid-loop would
-  // skip remaining Sparks.
-  const ordered = [
-    ...registry.sparks.filter((s) => !s.isLocal),
-    ...registry.sparks.filter((s) => s.isLocal),
-  ];
-  for (const spark of ordered) {
-    const monitor = monitors.get(spark.id);
-    if (!monitor?.online) {
-      results.push({ id: spark.id, ok: false, skipped: true, error: "Offline — skipped" });
-      continue;
-    }
-    try {
-      // Local dashboard host: verify the helper first (#379), then acknowledge
-      // before power-off kills this process.
-      if (spark.isLocal) {
-        try {
-          await checkLocalShutdown();
-        } catch (err) {
-          results.push({ id: spark.id, ok: false, error: err.message || String(err) });
-          continue;
-        }
-        results.push({ id: spark.id, ok: true, message: "Shutdown initiated" });
-        setImmediate(() => {
-          void initiateSparkShutdown(spark).catch((err) => {
-            console.error(`[shutdown-all] local ${spark.id}:`, err.message);
-          });
-        });
-        continue;
-      }
-      await initiateSparkShutdown(spark);
-      results.push({ id: spark.id, ok: true });
-    } catch (err) {
-      results.push({ id: spark.id, ok: false, error: err.message || String(err) });
-    }
+/** WoL fallback for hosts without a power endpoint. */
+async function wakeSparkWol(spark) {
+  const cleanMac = effectiveMac(spark);
+  if (!cleanMac) {
+    throw new Error("No MAC address (enP7s7 not seen yet; set override in Edit Spark)");
   }
-  res.json({ success: true, results });
+  const broadcast = broadcastForLanIp(spark.lanIp);
+  const sent = await sendWol(cleanMac, broadcast);
+  noteWake(spark);
+  return sent;
+}
+
+/** Wake only the recipe dependencies selected by the activation state machine. */
+async function wakeRecipeNodes(sparks, onLog, signal) {
+  signal?.throwIfAborted();
+  const log = (spark, text) => onLog?.({
+    stream: "action", nodeId: spark.id, nodeName: spark.name || spark.id, text,
+  });
+  for (const spark of sparks) log(spark, "Requesting power-on");
+  const powered = sparks.filter((spark) => powerClient.hasPowerControl(spark));
+  const results = await powerClient.powerOn(powered, { signal });
+  signal?.throwIfAborted();
+  for (const result of results) {
+    const spark = sparks.find((node) => node.id === result.id);
+    if (spark) log(spark, result.ok
+      ? "Power controller accepted the power-on request"
+      : `Power-on failed: ${result.error || "unknown error"}`);
+  }
+  const failed = results.filter((result) => !result.ok).map((result) => {
+    const spark = sparks.find((node) => node.id === result.id);
+    return `${spark?.name || result.id}: ${result.error || "power-on failed"}`;
+  });
+  await Promise.all(sparks.filter((spark) => !powerClient.hasPowerControl(spark)).map(async (spark) => {
+    signal?.throwIfAborted();
+    try {
+      if (spark.kind !== "host") throw new Error("No power-on endpoint configured");
+      await wakeSparkWol(spark);
+      log(spark, "Wake-on-LAN packet sent");
+    } catch (err) {
+      log(spark, `Wake failed: ${err.message}`);
+      failed.push(`${spark.name || spark.id}: ${err.message}`);
+    }
+  }));
+  if (failed.length > 0) {
+    throw new RecipeSwitchError(`Could not wake required nodes: ${failed.join("; ")}`);
+  }
+}
+
+const powerOrchestrator = createPowerOrchestrator({
+  registry,
+  getOnline: (id) => Boolean(monitors.get(id)?.online),
+  checkOnlineNow: async (id) => {
+    const monitor = monitors.get(id);
+    if (monitor?.checkOnlineNow) await monitor.checkOnlineNow();
+  },
+  powerClient,
+  shutdownSpark: initiateSparkShutdown,
+  wakeSpark: wakeSparkWol,
+  isSwitchInFlight: () => isSwitchInFlight() || recipeApply != null,
+  beforeShutdown: async () => {
+    const observedAt = Date.now();
+    const snapshot = await recipeRegistry.list({
+      getOnline: (id) => Boolean(monitors.get(id)?.online),
+    });
+    rememberUniqueActiveRecipe(snapshot, observedAt);
+  },
+  onProgress: (state) => {
+    powerActionState = { ...state, updatedAt: Date.now() };
+    forceBroadcast();
+  },
+  recordEvent,
 });
 
-app.post("/api/sparks/wake-all", async (_req, res) => {
-  const results = [];
-  for (const spark of registry.sparks) {
-    if (spark.kind !== "host") {
-      results.push({
-        id: spark.id,
-        ok: false,
-        skipped: true,
-        error: "DGX Spark does not support Wake-on-LAN",
-      });
-      continue;
-    }
-    const cleanMac = effectiveMac(spark);
-    if (!cleanMac) {
-      results.push({
-        id: spark.id,
-        ok: false,
-        error: "No MAC address (enP7s7 not seen yet; set override in Edit Spark)",
-      });
-      continue;
-    }
+/** Batch routes first so they never collide with /:id/* if routing changes. */
+app.post("/api/sparks/shutdown-all", (req, res) => {
+  if (!allowDestructive(principalKey(req)) || !allowGlobalDestructive(clientKey(req))) {
+    return rejectLimited(res, "Too many power requests; try again shortly");
+  }
+  if (powerOrchestrator.isInFlight()) {
+    return res.status(409).json({ error: "A power action is already in progress" });
+  }
+  if (isSwitchInFlight() || recipeApply) {
+    return res.status(409).json({ error: "A model deployment or image preparation is in progress" });
+  }
+  res.json({ success: true, started: true });
+  powerOrchestrator.shutdownAll().catch((err) => {
+    console.error("[shutdown-all]", err.message);
+  });
+});
+
+app.post("/api/sparks/wake-all", async (req, res) => {
+  if (!allowDestructive(principalKey(req)) || !allowGlobalDestructive(clientKey(req))) {
+    return rejectLimited(res, "Too many power requests; try again shortly");
+  }
+  if (powerOrchestrator.isInFlight()) {
+    return res.status(409).json({ error: "A power action is already in progress" });
+  }
+  if (isSwitchInFlight() || recipeApply) {
+    return res.status(409).json({ error: "A model deployment or image preparation is in progress" });
+  }
+  if (!deploymentPlanner.state.active && !lastActiveRecipe.get()) {
     try {
-      const broadcast = broadcastForLanIp(spark.lanIp);
-      const sent = await sendWol(cleanMac, broadcast);
-      noteWake(spark);
-      results.push({ id: spark.id, ok: true, mac: sent.mac, broadcast: sent.broadcast });
+      const observedAt = Date.now();
+      const snapshot = await recipeRegistry.list({
+        getOnline: (id) => Boolean(monitors.get(id)?.online),
+      });
+      rememberUniqueActiveRecipe(snapshot, observedAt);
     } catch (err) {
-      results.push({ id: spark.id, ok: false, error: err.message || String(err) });
+      return res.status(500).json({ error: `Cannot determine the active recipe: ${err.message}` });
+    }
+    if (powerOrchestrator.isInFlight() || isSwitchInFlight() || recipeApply) {
+      return res.status(409).json({ error: "A power action, model deployment or image preparation is already in progress" });
     }
   }
-  res.json({ success: true, results });
+  const remembered = lastActiveRecipe.get();
+  if (deploymentPlanner.state.active || remembered) {
+    try {
+      const accepted = await startRecipeApply(deploymentPlanner.state.active ? deploymentPlanner.state.active.recipeId : remembered.id);
+      return res.json({ success: true, ...accepted });
+    } catch (err) {
+      return res.status(err.status || 500).json({ error: err.message, sessionId: err.sessionId });
+    }
+  }
+  res.json({ success: true, started: true });
+  powerOrchestrator.wakeAll().catch((err) => {
+    console.error("[wake-all]", err.message);
+  });
+});
+
+app.get("/api/power/state", (_req, res) => {
+  res.json({ action: powerActionState });
 });
 
 app.post("/api/sparks/:id/shutdown", async (req, res) => {
@@ -2602,9 +2726,32 @@ app.post("/api/sparks/:id/wake", async (req, res) => {
   try {
     const spark = registry.getSpark(req.params.id);
     if (!spark) return res.status(404).json({ error: "Spark not found" });
+
+    // A configured power endpoint works for every unit type, including DGX
+    // Sparks whose onboard NIC has no Wake-on-LAN.
+    if (powerClient.hasPowerControl(spark)) {
+      const [result] = await powerClient.powerOn([spark]);
+      if (!result?.ok) {
+        return res.status(502).json({ error: result?.error || "Power on failed" });
+      }
+      recordEvent({
+        type: "power.on",
+        severity: "info",
+        sparkId: spark.id,
+        sparkName: spark.name,
+        message: `Power on requested for ${spark.name || spark.id}`,
+      });
+      return res.json({
+        success: true,
+        method: "power",
+        message: `Power on requested for ${spark.name || spark.id}`,
+      });
+    }
+
     if (spark.kind !== "host") {
       return res.status(400).json({
-        error: "DGX Spark does not support Wake-on-LAN. The onboard NIC does not wake from a magic packet.",
+        error:
+          "No power endpoint configured, and DGX Spark does not support Wake-on-LAN. The onboard NIC does not wake from a magic packet.",
       });
     }
 
@@ -2640,6 +2787,318 @@ app.post("/api/sparks/:id/wake", async (req, res) => {
   }
 });
 
+// ─── Recipe registry / switching ──────────────────────────
+// Live-inferred list of deployment recipes plus which one (if any) is actually running.
+// See RecipeRegistry.js — active state is never trusted from a stored flag.
+app.get("/api/recipes", async (_req, res) => {
+  try {
+    const observedAt = Date.now();
+    const snapshot = await recipeRegistry.list({
+      getOnline: (id) => Boolean(monitors.get(id)?.online),
+    });
+    rememberUniqueActiveRecipe(snapshot, observedAt);
+    res.json({ ...snapshot, session: recipeSessions.summary(), lastActiveRecipe: lastActiveRecipeInfo() });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get("/api/recipes/sessions", (_req, res) => {
+  res.set("Cache-Control", "no-store").json({ sessions: recipeSessions.list() });
+});
+
+app.get("/api/recipes/sessions/current", (_req, res) => {
+  res.set("Cache-Control", "no-store").json({ session: recipeSessions.current() });
+});
+
+app.get("/api/recipes/sessions/:id", (req, res) => {
+  if (!isValidRecipeSessionId(req.params.id)) {
+    return res.status(400).json({ error: "Invalid Apply session ID" });
+  }
+  const raw = req.query.afterSeq;
+  let afterSeq;
+  if (raw !== undefined) {
+    if (typeof raw !== "string" || !/^[0-9]+$/.test(raw) || !Number.isSafeInteger(Number(raw))) {
+      return res.status(400).json({ error: "afterSeq must be a non-negative integer" });
+    }
+    afterSeq = Number(raw);
+  }
+  const session = recipeSessions.get(req.params.id, { afterSeq });
+  if (!session) return res.status(404).json({ error: "Apply session not found" });
+  res.set("Cache-Control", "no-store").json({ session });
+});
+
+let recipeApply = null;
+
+app.post("/api/recipes/sessions/:id/cancel", async (req, res) => {
+  if (!isValidRecipeSessionId(req.params.id)) {
+    return res.status(400).json({ error: "Invalid Apply session ID" });
+  }
+  const session = recipeSessions.get(req.params.id);
+  if (!session) return res.status(404).json({ error: "Apply session not found" });
+  if (session.status !== "running") {
+    return res.set("Cache-Control", "no-store").json({ session });
+  }
+  // Capture the exact operation: a historical/stale request must never abort its successor.
+  const operation = recipeApply;
+  if (!operation || operation.id !== session.id) {
+    return res.status(409).json({ error: "Apply session is not cancellable" });
+  }
+  recipeSessions.recordProgress(session.id, { phase: "cancelling" });
+  operation.controller.abort();
+  await operation.settled;
+  return res.set("Cache-Control", "no-store").json({ session: recipeSessions.get(session.id) });
+});
+
+/**
+ * Switch the cluster to a different recipe. Responds immediately once the switch has started;
+ * the operation itself (wake required nodes → wait online → stop current → start → health-check) can take
+ * many minutes and is reported through persisted Apply sessions and WS `recipeSession`,
+ * not in this response.
+ */
+async function startRecipeApply(recipeId, preparedPlan = null) {
+  if (isSwitchInFlight() || recipeApply) {
+    throw Object.assign(new RecipeSwitchError("An Apply is already in progress"), { status: 409 });
+  }
+  if (powerOrchestrator.isInFlight()) {
+    throw Object.assign(new RecipeSwitchError("A power action is already in progress"), { status: 409 });
+  }
+  const input = preparedPlan?.input ?? { ...(deploymentPlanner.state.active ?? deploymentPlanner.state.draft), recipeId };
+  const plan = deploymentPlanner.compile(input);
+  if (preparedPlan && (plan.revision !== preparedPlan.revision || deploymentPlanner.compile(deploymentPlanner.state.draft).revision !== plan.revision)) {
+    throw Object.assign(new RecipeSwitchError("Plan configuration changed; build the plan again"), { status: 409 });
+  }
+  if (isSwitchInFlight() || recipeApply || powerOrchestrator.isInFlight()) {
+    throw Object.assign(new RecipeSwitchError("Another deployment or power action started"), { status: 409 });
+  }
+  const recipe = plan.target;
+  const secrets = registry.sparks.flatMap((spark) => [
+    spark.ssh?.password, spark.powerToken, ...Object.values(spark.llmApiKeys || {}),
+  ]).filter(Boolean);
+  if (process.env.SPARKDASH_TOKEN) secrets.push(process.env.SPARKDASH_TOKEN);
+  const session = recipeSessions.start({
+    targetId: recipe.id, label: recipe.label, tp: recipe.tp,
+    requiredNodes: plan.requiredNodes.map((spark) => ({ id: spark.id, name: spark.name || spark.id })),
+  }, { secrets });
+  const onLog = (line) => recipeSessions.appendLog(session.id, line);
+  const onProgress = (state) => {
+    const updated = recipeSessions.recordProgress(session.id, state);
+    if (state.phase === "done" && updated?.status === "succeeded") lastActiveRecipe.remember(recipe.id);
+  };
+  const operation = { id: session.id, controller: new AbortController(), settled: null };
+  recipeApply = operation;
+  const applying = switchRecipe(recipeRegistry, modelRegistry, recipe.id, onProgress, {
+    plan,
+    ownedContainers: [...deploymentPlanner.services.map((service) => service.id), "drama-tts", "semif"],
+    cleanupHostIds: [...(deploymentPlanner.state.active?.placements.map((item) => item.sparkId) || []), modelRegistry.getRegistryConfig().hostId].filter(Boolean),
+    commitPlan: () => deploymentPlanner.commit(plan),
+    validatePlan: async () => {
+      const preview = await deploymentPlanner.preview(plan.input, { signal: operation.controller.signal });
+      if (!preview.valid || preview.revision !== plan.revision) {
+        throw new RecipeSwitchError(preview.errors.join("; ") || "Plan definitions changed before deployment");
+      }
+    },
+    signal: operation.controller.signal,
+    getOnline: (id) => Boolean(monitors.get(id)?.online),
+    checkOnlineNow: async (id) => {
+      const monitor = monitors.get(id);
+      return monitor ? monitor.checkOnlineNow() : false;
+    },
+    wakeNodes: (sparks) => wakeRecipeNodes(sparks, onLog, operation.controller.signal),
+    isPowerActionInFlight: () => Boolean(powerOrchestrator.isInFlight()),
+    onLog,
+  });
+  operation.settled = applying.catch((err) => {
+    if (recipeSessions.get(session.id)?.status === "running") {
+      onProgress(operation.controller.signal.aborted
+        ? { phase: "cancelled", message: "Apply cancelled; already-started services and staged weights were left in place." }
+        : { phase: "failed", error: err.message });
+    }
+    if (!operation.controller.signal.aborted) console.warn(`[deployment] ${recipe.id}: ${err.message}`);
+  }).finally(() => {
+    if (recipeApply === operation) recipeApply = null;
+  });
+  return { started: true, targetId: recipe.id, sessionId: session.id };
+}
+
+app.post("/api/deployment/images/prepare", (_req, res) => {
+  if (isSwitchInFlight() || recipeApply || powerOrchestrator.isInFlight()) {
+    return res.status(409).json({ error: "Another deployment, image preparation, or power action is running" });
+  }
+  const source = modelRegistry.registryHost();
+  if (!source || !modelRegistry.getRegistryConfig().directory) {
+    return res.status(400).json({ error: "Configure Atom as the canonical Model Registry first" });
+  }
+  const secrets = registry.sparks.flatMap((spark) => [
+    spark.ssh?.password, spark.powerToken, ...Object.values(spark.llmApiKeys || {}),
+  ]).filter(Boolean);
+  if (process.env.SPARKDASH_TOKEN) secrets.push(process.env.SPARKDASH_TOKEN);
+  const session = recipeSessions.start({
+    targetId: "model-images", label: "Prepare all recipe and service images on Atom", tp: 1,
+    requiredNodes: [{ id: source.id, name: source.name || source.id }],
+  }, { secrets });
+  recipeSessions.recordProgress(session.id, { phase: "preparing", message: "Preparing all images on Atom, independent of model placement; no model containers are stopped or started" });
+  const operation = { id: session.id, controller: new AbortController(), settled: null };
+  recipeApply = operation;
+  operation.settled = prepareAllImages(modelRegistry, {
+    signal: operation.controller.signal, onLog: (line) => recipeSessions.appendLog(session.id, line),
+  }).then(() => {
+    recipeSessions.recordProgress(session.id, { phase: "done" });
+  }).catch((error) => {
+    recipeSessions.recordProgress(session.id, operation.controller.signal.aborted
+      ? { phase: "cancelled", message: "Image preparation cancelled; published images were retained" }
+      : { phase: "failed", error: error.message });
+  }).finally(() => {
+    if (recipeApply === operation) recipeApply = null;
+  });
+  res.json({ started: true, targetId: "model-images", sessionId: session.id });
+});
+
+deploymentPlanner.register(app, startRecipeApply);
+
+// ─── Model Registry (generic model tracking/sync) ─────────
+// Which tracked host holds canonical model files, and where. No default is
+// assumed — both fields are empty until the operator sets them.
+app.get("/api/model-registry", (_req, res) => {
+  res.json(modelRegistry.getRegistryConfig());
+});
+
+/**
+ * Setting or changing the registry host/directory immediately reconciles the
+ * tracked model list against what's actually on disk there (see
+ * ModelRegistry.reconcileWithDisk) — an operator pointing this at an
+ * existing directory shouldn't have to retype every subfolder already
+ * sitting on it. A scan failure (host unreachable, etc.) does not fail the
+ * whole request — the config is saved regardless — it's reported separately
+ * via scanError so the UI can show it without losing the save.
+ */
+app.put("/api/model-registry", async (req, res) => {
+  let config;
+  try {
+    config = modelRegistry.setRegistryConfig(req.body || {});
+  } catch (err) {
+    return res.status(400).json({ error: err.message });
+  }
+  let discovered = [];
+  let scanError = null;
+  try {
+    ({ discovered } = await modelRegistry.reconcileWithDisk());
+  } catch (err) {
+    scanError = err.message;
+  }
+  res.json({ ...config, discovered, scanError });
+});
+
+/** Re-scan the registry directory on demand (no config change) — for files added on disk after the registry was already configured. */
+app.post("/api/model-registry/rescan", async (_req, res) => {
+  try {
+    res.json(await modelRegistry.reconcileWithDisk());
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+/** Live-probed Hugging Face login state on the registry host (never a stored flag — see ModelRegistry.probeHfToken). */
+app.get("/api/model-registry/hf-token", async (_req, res) => {
+  res.json(await modelRegistry.probeHfToken());
+});
+
+/** Set or replace the Hugging Face login on the registry host. hf auth login validates the token itself. */
+app.put("/api/model-registry/hf-token", async (req, res) => {
+  if (!allowGlobalDestructive(principalKey(req))) {
+    return rejectLimited(res, "Too many requests — try again shortly");
+  }
+  try {
+    await modelRegistry.setHfToken(req.body?.token);
+    res.json(await modelRegistry.probeHfToken());
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+/** Tracked models plus a live availability probe per model (never a stored flag). */
+app.get("/api/models", async (_req, res) => {
+  const models = modelRegistry.all();
+  const statuses = await modelRegistry.statuses();
+  res.json({ registry: modelRegistry.getRegistryConfig(), models, statuses });
+});
+
+app.post("/api/models", (req, res) => {
+  if (!allowGlobalDestructive(principalKey(req))) {
+    return rejectLimited(res, "Too many requests — try again shortly");
+  }
+  try {
+    res.status(201).json(modelRegistry.addModel(req.body || {}));
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+/** Edit an existing tracked model's label/repo/revision/includePattern — e.g. attaching a source repo to a disk-discovered entry. */
+app.patch("/api/models/:id", (req, res) => {
+  if (!allowGlobalDestructive(principalKey(req))) {
+    return rejectLimited(res, "Too many requests — try again shortly");
+  }
+  try {
+    res.json(modelRegistry.updateModel(req.params.id, req.body || {}));
+  } catch (err) {
+    res.status(404).json({ error: err.message });
+  }
+});
+
+/** Remove a tracked model entry (metadata only — does not touch downloaded files). */
+app.delete("/api/models/:id", (req, res) => {
+  if (!allowGlobalDestructive(principalKey(req))) {
+    return rejectLimited(res, "Too many requests — try again shortly");
+  }
+  try {
+    res.json(modelRegistry.removeModel(req.params.id));
+  } catch (err) {
+    res.status(404).json({ error: err.message });
+  }
+});
+
+/** Delete a model's downloaded files from the registry host. Entry stays tracked. */
+app.delete("/api/models/:id/files", (req, res) => {
+  if (!allowGlobalDestructive(principalKey(req))) {
+    return rejectLimited(res, "Too many requests — try again shortly");
+  }
+  if (!modelRegistry.getModel(req.params.id)) {
+    return res.status(404).json({ error: "Model not tracked" });
+  }
+  res.json({ started: true });
+  modelRegistry
+    .deleteModelFiles(req.params.id)
+    .catch((err) => console.warn(`[models] delete ${req.params.id} failed: ${err.message}`));
+});
+
+/**
+ * Kick off an async download + checksum verification from Hugging Face onto
+ * the registry host. Responds immediately; poll GET /api/models/:id/job for
+ * progress, same shape as the recipe-switch WS-vs-poll split but simpler
+ * (single-model, no multi-node fan-out to broadcast).
+ */
+app.post("/api/models/:id/download", (req, res) => {
+  if (!allowGlobalDestructive(principalKey(req))) {
+    return rejectLimited(res, "Too many requests — try again shortly");
+  }
+  if (!modelRegistry.getModel(req.params.id)) {
+    return res.status(404).json({ error: "Model not tracked" });
+  }
+  const existingJob = modelRegistry.getJobState(req.params.id);
+  if (existingJob && existingJob.phase !== "done" && existingJob.phase !== "failed") {
+    return res.status(409).json({ error: "A job is already in progress for this model" });
+  }
+  res.json({ started: true });
+  modelRegistry
+    .downloadModel(req.params.id)
+    .catch((err) => console.warn(`[models] download ${req.params.id} failed: ${err.message}`));
+});
+
+app.get("/api/models/:id/job", (req, res) => {
+  res.json(modelRegistry.getJobState(req.params.id) || { modelId: req.params.id, phase: "idle" });
+});
+
 // ─── Prometheus exposition (opt-in) ──────────────────────
 // Registered after the auth middleware (a token-protected install needs the
 // scraper's bearer token) and before the SPA fallback, which would otherwise
@@ -2652,11 +3111,10 @@ app.get("/metrics", (_req, res) => {
       .type("text")
       .send("Prometheus export is off. Enable it in Settings → Prometheus metrics.\n");
   }
-  const entries = metricsEntries(registry.sparkIds.map((id) => monitors.get(id)));
-  // res.end, not res.send: send() reorders the media type parameters; keep the
-  // header exactly as the exposition format spells it.
+  // Fork: our own formatter (collectors/metricsExport.js) so the fleet's Grafana panels keep
+  // the metric names they query; the route, auth position and Settings toggle are upstream's.
   res.setHeader("Content-Type", PROMETHEUS_CONTENT_TYPE);
-  res.end(renderPrometheusMetrics(entries) + powerMeters.renderPrometheus());
+  res.end(formatPrometheusMetrics(orderedSnapshots()) + powerMeters.renderPrometheus());
 });
 
 // ─── Static files (built frontend) ───────────────────────
@@ -2729,6 +3187,9 @@ function buildSnapshotPayload(sparks = orderedSnapshots()) {
     // A head whose engine answers on its worker carries the hint; every other snapshot is untouched.
     sparks: movedEngineHints.size ? sparks.map(withMovedEngineHint) : sparks,
     refreshInterval: getSettings().pollIntervalMs,
+    recipeSession: recipeSessions.summary(),
+    lastActiveRecipe: lastActiveRecipeInfo(),
+    powerAction: powerActionState,
   };
   // Only while alerts are on: the key's absence tells the UI to derive its own.
   const alerts = alertsRuntime.snapshotBlock();
@@ -2741,23 +3202,25 @@ function buildSnapshotPayload(sparks = orderedSnapshots()) {
  * Drops clients whose send queue is backlogged (>1 MB) to avoid unbounded
  * buffering on slow/flaky connections (e.g. phone over spotty WiFi).
  */
-function broadcastPayload(payload) {
-  wss.clients.forEach((client) => {
-    if (client.readyState !== 1) return; // OPEN only
-    if (client.bufferedAmount > 1_000_000) {
-      try {
-        client.close(1008, "client too slow");
-      } catch {
-        /* ignore */
-      }
-      return;
-    }
+function sendPayload(client, payload) {
+  if (client.readyState !== 1) return; // OPEN only
+  if (client.bufferedAmount > 1_000_000) {
     try {
-      client.send(payload);
+      client.close(1008, "client too slow");
     } catch {
-      /* per-client send failure — ignore, close handler will clean up */
+      /* ignore */
     }
-  });
+    return;
+  }
+  try {
+    client.send(payload);
+  } catch {
+    /* per-client send failure — ignore, close handler will clean up */
+  }
+}
+
+function broadcastPayload(payload) {
+  wss.clients.forEach((client) => sendPayload(client, payload));
 }
 
 /**
@@ -2993,6 +3456,13 @@ async function shutdown(signal) {
   const mqttStopped = mqttPublisher.stop().catch((err) => {
     console.error("[sparkDash] failed to stop MQTT publisher:", err.message);
   });
+  try {
+    clearTimeout(recipeSessionBroadcastTimer);
+    recipeSessions.flush();
+    lastActiveRecipe.flush();
+  } catch (err) {
+    console.error("[sparkDash] failed to flush recipe sessions:", err.message);
+  }
   try {
     unitHistoryRuntime.stop();
   } catch (err) {

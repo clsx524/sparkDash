@@ -16,6 +16,7 @@ export function ShutdownAll({ sparks, className = "" }: { sparks: SparkSnapshot[
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<
     | { kind: "result"; ok: number; fail: number; skipped: number }
+    | { kind: "text"; text: string; tone: "ok" | "err" }
     | { kind: "error"; rawMessage?: string }
     | null
   >(null);
@@ -30,10 +31,11 @@ export function ShutdownAll({ sparks, className = "" }: { sparks: SparkSnapshot[
     setMsg(null);
     try {
       const res = await shutdownAllSparks();
-      const ok = res.results.filter((r) => r.ok).length;
-      const fail = res.results.filter((r) => !r.ok && !r.skipped).length;
-      const skipped = res.results.filter((r) => r.skipped).length;
-      setMsg({ kind: "result", ok, fail, skipped });
+      setMsg({
+        kind: "text",
+        text: res.started ? "Shutdown started" : "Shutdown requested",
+        tone: "ok",
+      });
     } catch (err: unknown) {
       setMsg({ kind: "error", rawMessage: err instanceof Error ? err.message : undefined });
     } finally {
@@ -46,14 +48,16 @@ export function ShutdownAll({ sparks, className = "" }: { sparks: SparkSnapshot[
   return (
     <>
       {msg ? (
-        <span className={`ov-batchmsg ${msg.kind === "result" && msg.fail === 0 ? "is-ok" : "is-err"}`} role="status">
+        <span className={`ov-batchmsg ${msg.kind === "text" ? (msg.tone === "ok" ? "is-ok" : "is-err") : msg.kind === "result" && msg.fail === 0 ? "is-ok" : "is-err"}`} role="status">
           {msg.kind === "error"
             ? msg.rawMessage ?? t("batch.shutdownFailed")
-            : [
-                t("batch.shutdownComplete", { count: msg.ok }),
-                ...(msg.fail ? [t("batch.failed", { count: msg.fail })] : []),
-                ...(msg.skipped ? [t("batch.skipped", { count: msg.skipped })] : []),
-              ].join(", ")}
+            : msg.kind === "text"
+              ? msg.text
+              : [
+                  t("batch.shutdownComplete", { count: msg.ok }),
+                  ...(msg.fail ? [t("batch.failed", { count: msg.fail })] : []),
+                  ...(msg.skipped ? [t("batch.skipped", { count: msg.skipped })] : []),
+                ].join(", ")}
         </span>
       ) : null}
       <button
@@ -78,6 +82,7 @@ export function ShutdownAll({ sparks, className = "" }: { sparks: SparkSnapshot[
           comfyJob: (sparkName) => t("shutdown.warningComfy", { sparkName }),
           hermesUpdate: (sparkName) => t("shutdown.warningHermes", { sparkName }),
         })}
+        warningDetail="Nodes with a configured outlet power off after the graceful stop. The active recipe is remembered and re-activated on Wake all."
       />
     </>
   );

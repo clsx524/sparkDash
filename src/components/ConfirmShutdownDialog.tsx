@@ -1,13 +1,10 @@
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import { createPortal } from "react-dom";
-import { useTranslation } from "react-i18next";
 import { useModalPresence } from "../hooks/useModalPresence";
 import { useOverlayClose } from "../hooks/useOverlayClose";
 import { useFocusTrap } from "../hooks/useFocusTrap";
-import { PowerOffIcon } from "./ui/icons";
+import { PowerOffIcon, PowerOnIcon } from "./ui/icons";
 import "../styles/dialogs.css";
-
-const CONFIRM_PHRASE = "poweroff";
 
 interface ConfirmShutdownDialogProps {
   open: boolean;
@@ -16,8 +13,13 @@ interface ConfirmShutdownDialogProps {
   title: string;
   description: string;
   confirmLabel?: string;
-  /** Lines naming running work this action will stop; rendered in a danger box. */
+  /** Lines naming running work this action will stop; rendered in a warning box. */
   warnings?: string[];
+  /** "danger" for shutdown, "default" for wake/power-on. */
+  tone?: "danger" | "default";
+  warningTitle?: string;
+  warningDetail?: string;
+  disabled?: boolean;
 }
 
 function useEscape(enabled: boolean, onClose: () => void) {
@@ -31,6 +33,11 @@ function useEscape(enabled: boolean, onClose: () => void) {
   }, [enabled, onClose]);
 }
 
+/**
+ * Simple confirmation popup. No typed phrase and no acknowledgement checkbox:
+ * the operator asked for a plain confirm/cancel dialog. The warnings box still
+ * names the work a shutdown would interrupt.
+ */
 export function ConfirmShutdownDialog({
   open,
   onClose,
@@ -39,12 +46,12 @@ export function ConfirmShutdownDialog({
   description,
   confirmLabel = "Shut down",
   warnings,
+  tone = "danger",
+  warningTitle,
+  warningDetail,
+  disabled = false,
 }: ConfirmShutdownDialogProps) {
-  const { t } = useTranslation("overview");
-  const [phrase, setPhrase] = useState("");
-  const [acknowledged, setAcknowledged] = useState(false);
   const [submitting, setSubmitting] = useState(false);
-  const inputRef = useRef<HTMLInputElement>(null);
   const titleId = useId();
   const { mounted, visible } = useModalPresence(open);
   const trapRef = useFocusTrap(mounted);
@@ -54,13 +61,8 @@ export function ConfirmShutdownDialog({
 
   useEffect(() => {
     if (!open) {
-      setPhrase("");
-      setAcknowledged(false);
       setSubmitting(false);
-      return;
     }
-    const t = window.setTimeout(() => inputRef.current?.focus(), 50);
-    return () => window.clearTimeout(t);
   }, [open]);
 
   useEffect(() => {
@@ -72,8 +74,9 @@ export function ConfirmShutdownDialog({
     };
   }, [mounted]);
 
-  const phraseOk = phrase.trim().toLowerCase() === CONFIRM_PHRASE;
-  const canConfirm = phraseOk && acknowledged && !submitting;
+  const canConfirm = !submitting && !disabled;
+  const danger = tone === "danger";
+  const Icon = danger ? PowerOffIcon : PowerOnIcon;
 
   const handleConfirm = async () => {
     if (!canConfirm) return;
@@ -89,10 +92,7 @@ export function ConfirmShutdownDialog({
   if (!mounted) return null;
 
   return createPortal(
-    <div
-      className={`modal-overlay${visible ? " is-open" : ""}`}
-      {...overlayClose}
-    >
+    <div className={`modal-overlay${visible ? " is-open" : ""}`} {...overlayClose}>
       <div
         ref={trapRef}
         className="modal-sheet modal-sheet--narrow"
@@ -100,10 +100,13 @@ export function ConfirmShutdownDialog({
         aria-modal="true"
         aria-labelledby={titleId}
       >
-        <div className="modal-sheet__header modal-sheet__header--danger">
-          <PowerOffIcon className="h-4 w-4 shrink-0" />
+        <div
+          className={`modal-sheet__header${danger ? " modal-sheet__header--danger" : ""}`}
+        >
+          <Icon className="h-4 w-4 shrink-0" />
           <h2 className="modal-sheet__title" id={titleId}>
-            {t("shutdown.dangerZone", { title })}
+            {danger ? "Danger zone — " : ""}
+            {title}
           </h2>
         </div>
 
@@ -112,9 +115,8 @@ export function ConfirmShutdownDialog({
 
           <div className="danger-box" role="alert">
             <b>
-              {warnings && warnings.length > 0
-                ? t("shutdown.stopsWork")
-                : t("shutdown.powersOffHardware")}
+              {warningTitle ||
+                (danger ? "This powers off hardware." : "This powers on hardware.")}
             </b>
             {warnings && warnings.length > 0 ? (
               <ul>
@@ -123,57 +125,28 @@ export function ConfirmShutdownDialog({
                 ))}
               </ul>
             ) : null}
-            <span>{t("shutdown.runningWorkStops")}</span>
-          </div>
-
-          <label className="check-row">
-            <input
-              type="checkbox"
-              checked={acknowledged}
-              disabled={submitting}
-              onChange={(e) => setAcknowledged(e.target.checked)}
-            />
-            <span>{t("shutdown.acknowledgment")}</span>
-          </label>
-
-          <div className="field">
-            <label htmlFor={`${titleId}-phrase`}>
-              {t("shutdown.typeToConfirmPrefix")} <b className="mono">{CONFIRM_PHRASE}</b> {t("shutdown.typeToConfirmSuffix")}
-            </label>
-            <input
-              id={`${titleId}-phrase`}
-              ref={inputRef}
-              type="text"
-              autoComplete="off"
-              spellCheck={false}
-              value={phrase}
-              disabled={submitting}
-              onChange={(e) => setPhrase(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") {
-                  e.preventDefault();
-                  void handleConfirm();
-                }
-              }}
-              className="field-input field-input--mono"
-              placeholder={CONFIRM_PHRASE}
-            />
+            <span>
+              {warningDetail ||
+                (danger
+                  ? "Running containers and sessions will stop. The host powers off after a graceful stop."
+                  : "Nodes will boot. No recipes are applied or restored.")}
+            </span>
           </div>
         </div>
 
         <div className="modal-sheet__footer">
           <div className="modal-sheet__footer-actions">
             <button type="button" onClick={onClose} disabled={submitting} className="btn btn--ghost">
-              {t("shutdown.cancel")}
+              Cancel
             </button>
             <button
               type="button"
               onClick={() => void handleConfirm()}
               disabled={!canConfirm}
-              className="btn btn--danger"
+              className={`btn ${danger ? "btn--danger" : "btn--primary"}`}
             >
-              <PowerOffIcon className="h-3.5 w-3.5" />
-              {submitting ? t("shutdown.submitting") : confirmLabel}
+              <Icon className="h-3.5 w-3.5" />
+              {submitting ? "Working…" : confirmLabel}
             </button>
           </div>
         </div>

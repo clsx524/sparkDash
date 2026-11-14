@@ -6,6 +6,7 @@ import { spawn, execFile } from "child_process";
 import { HOST_PATHS } from "../config.js";
 import { sshCommandSpec, sshExec } from "../collectors/ssh.js";
 import { chooseLocalInvocation } from "../collectors/HermesProbe.js";
+import { LineSplitter } from "../util/commandOutput.js";
 import {
   exitPrefix,
   buildAttachCommand,
@@ -19,61 +20,6 @@ const START_WATCH_MAX_MS = 6 * 60 * 60 * 1000;
 const STOP_MAX_MS = 15 * 60 * 1000;
 const KILL_GRACE_MS = 3000;
 
-// CSI sequences (colors, cursor moves, erase) and OSC (window titles).
-// eslint-disable-next-line no-control-regex
-const ANSI_RE = /\u001b\[[0-9;?]*[ -/]*[@-~]|\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)|\u001b[()][A-Za-z0-9]/g;
-
-export function stripAnsi(text) {
-  return text.replace(ANSI_RE, "");
-}
-
-/**
- * Turns a byte stream into lines. A lone "\r" means "redraw this line" (progress
- * bars), so the text typed so far is dropped; "\r\n" is an ordinary newline. The
- * unfinished last line is exposed as `partial` so live progress stays visible.
- */
-export class LineSplitter {
-  constructor() {
-    this.buf = "";
-    this.cr = false;
-  }
-
-  /** @returns {string[]} completed lines */
-  feed(chunk) {
-    const out = [];
-    for (const ch of stripAnsi(chunk)) {
-      if (this.cr) {
-        this.cr = false;
-        if (ch === "\n") {
-          out.push(this.buf);
-          this.buf = "";
-          continue;
-        }
-        this.buf = "";
-      }
-      if (ch === "\n") {
-        out.push(this.buf);
-        this.buf = "";
-      } else if (ch === "\r") {
-        this.cr = true;
-      } else {
-        this.buf += ch;
-      }
-    }
-    return out;
-  }
-
-  get partial() {
-    return this.buf;
-  }
-
-  flush() {
-    const rest = this.buf;
-    this.buf = "";
-    this.cr = false;
-    return rest;
-  }
-}
 
 function resolveLocalInvocation(spark, cmd) {
   const mntNs = fs.existsSync(path.join(HOST_PATHS.PROC, "1", "ns", "mnt"))
