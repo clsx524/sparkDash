@@ -51,6 +51,7 @@ import path from "node:path";
 import { sshExec, copyToSpark } from "./ssh.js";
 import { settleAll } from "../util/abort.js";
 import { fetchHfManifest, filterManifestToIncluded } from "./ModelRegistry.js";
+import { assertSafeModelFolder, assertSafeSubfolder } from "./modelPaths.js";
 
 const PREFLIGHT_TIMEOUT_MS = 15_000;
 const DEFAULT_SYNC_TIMEOUT_MS = 21_600_000;
@@ -60,7 +61,7 @@ const FAST_CIPHER = "aes128-gcm@openssh.com";
  *  before probabilistic rejection) on both the target and registry host. */
 const MAX_SYNC_SHARDS = 6;
 
-function shQuote(value) {
+export function shQuote(value) {
   return "'" + String(value).replace(/'/g, "'\\''") + "'";
 }
 
@@ -74,8 +75,14 @@ function shQuote(value) {
 export function shQuotePath(value) {
   const str = String(value);
   if (str === "~") return "~";
-  if (str.startsWith("~/")) return "~/" + shQuote(str.slice(2));
-  return shQuote(str);
+  // Simple path segments need no quoting; anything with whitespace, globs,
+  // variables, or other shell metacharacters is single-quoted.
+  const safe = /^[A-Za-z0-9._/-]+$/;
+  if (str.startsWith("~/")) {
+    const rest = str.slice(2);
+    return "~/" + (safe.test(rest) ? rest : shQuote(rest));
+  }
+  return safe.test(str) ? str : shQuote(str);
 }
 
 export function joinRemotePath(dir, subfolder) {
@@ -185,12 +192,13 @@ export async function syncModelToSpark(modelRegistry, model, targetSpark, option
     model = { ...model, manifest: filterManifestToIncluded(model.manifest || [], options.includePattern) };
   }
   if (options.requireVerified && !model.manifest?.length) throw new Error(`No verified artifact hashes for ${model.id}`);
+  const subfolder = assertSafeSubfolder(model.subfolder);
   // The Model Registry host already holds the canonical files at
   // registryConfig.directory — "syncing" a model onto itself is a no-op by
   // definition. Skip the modelFolder requirement, route selection, and
   // rsync entirely; just confirm what's already there is still intact.
   if (targetSpark.id === registryHost.id) {
-    const destDir = joinRemotePath(registryConfig.directory, model.subfolder);
+    const destDir = joinRemotePath(registryConfig.directory, subfolder);
     if (verify && Array.isArray(model.manifest) && model.manifest.length > 0) {
       const mismatches = await modelRegistry.verifyFilesOnHost(targetSpark, destDir, model.manifest, { signal });
       if (mismatches.length > 0) {
@@ -213,15 +221,12 @@ export async function syncModelToSpark(modelRegistry, model, targetSpark, option
   if (!targetSpark.modelFolder) {
     throw new Error(`${targetSpark.id} has no model folder configured (Edit host → Model folder)`);
   }
+  const modelFolder = assertSafeModelFolder(targetSpark.modelFolder);
   const mount = registryConfig.nfsMounts && Object.hasOwn(registryConfig.nfsMounts, targetSpark.id)
     ? registryConfig.nfsMounts[targetSpark.id] : null;
-  if (mount && (typeof model.subfolder !== "string" || !model.subfolder ||
-      path.posix.isAbsolute(model.subfolder) || model.subfolder.split("/").includes(".."))) {
-    throw new Error(`${targetSpark.id} NFS Model Registry mount ${mount.path}: model path escapes the configured root; refusing transfer (no SSH fallback)`);
-  }
 
-  let sourceDir = joinRemotePath(registryConfig.directory, model.subfolder);
-  const destDir = joinRemotePath(targetSpark.modelFolder, model.subfolder);
+  let sourceDir = joinRemotePath(registryConfig.directory, subfolder);
+  const destDir = joinRemotePath(modelFolder, subfolder);
 
   if (!options.preflightOnly && !verify && Array.isArray(model.manifest) && model.manifest.length > 0) {
     const checks = model.manifest.map((entry) => Number.isSafeInteger(entry.size)
@@ -254,7 +259,7 @@ export async function syncModelToSpark(modelRegistry, model, targetSpark, option
   let rsyncTransport;
   let sourceSpec;
   if (mount) {
-    sourceDir = await nfsSourceDirectory(targetSpark, mount, model.subfolder, commandOptions);
+    sourceDir = await nfsSourceDirectory(targetSpark, mount, subfolder, commandOptions);
     sourceHost = targetSpark;
     rsyncTransport = "";
     sourceSpec = shQuotePath(sourceDir + "/");
@@ -262,7 +267,11 @@ export async function syncModelToSpark(modelRegistry, model, targetSpark, option
   } else {
     const registryAddr = registryHost.ssh.host || registryHost.lanIp;
     if (!registryAddr) throw new Error(`Model Registry host ${registryHost.id} has no reachable address configured`);
-    const rsyncSsh = "ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes -o ConnectTimeout=10";
+    // `accept-new` preserves existing deployments whose target has not yet
+    // pinned the registry host key. Set MODEL_SYNC_STRICT_HOST_KEY=1 to require
+    // a pre-provisioned known_hosts entry (recommended once trust is seeded).
+    const hostKeyPolicy = process.env.MODEL_SYNC_STRICT_HOST_KEY === "1" ? "yes" : "accept-new";
+    const rsyncSsh = `ssh -o StrictHostKeyChecking=${hostKeyPolicy} -o BatchMode=yes -o ConnectTimeout=10`;
     try {
       await sshExec(
         targetSpark,

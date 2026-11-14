@@ -380,6 +380,7 @@ function queueRecipeSessionBroadcast() {
 }
 /** Latest shutdown-all / wake-all progress, broadcast to every WS client. */
 let powerActionState = null;
+let powerActionController = null;
 const fleetEnergyTracker = new FleetEnergyTracker({
   nodeIds: registry.sparkIds,
   filePath: FLEET_ENERGY_JSON_PATH,
@@ -2450,7 +2451,7 @@ function isBenignShutdownSshError(msg) {
  * gets a real JSON response instead of "Failed to fetch" when the SSH session
  * drops as the host powers off.
  */
-function initiateSparkShutdown(spark) {
+function initiateSparkShutdown(spark, { signal } = {}) {
   const noteShutdown = () => {
     recordEvent({
       type: "power.shutdown",
@@ -2467,7 +2468,7 @@ function initiateSparkShutdown(spark) {
   }
 
   const shutdownCmd = spark.platform === "windows" ? "shutdown.exe /s /t 5 /c sparkDash" : SHUTDOWN_REMOTE_CMD;
-  return sshExec(spark, shutdownCmd, { timeoutMs: 8000 })
+  return sshExec(spark, shutdownCmd, { timeoutMs: 8000, signal, cancelRemote: true })
     .then(() => {
       noteShutdown();
       return "Shutdown initiated";
@@ -2577,8 +2578,12 @@ app.post("/api/sparks/shutdown-all", (req, res) => {
     return res.status(409).json({ error: "A model deployment or image preparation is in progress" });
   }
   res.json({ success: true, started: true });
-  powerOrchestrator.shutdownAll().catch((err) => {
+  const controller = new AbortController();
+  powerActionController = controller;
+  powerOrchestrator.shutdownAll(controller.signal).catch((err) => {
     console.error("[shutdown-all]", err.message);
+  }).finally(() => {
+    if (powerActionController === controller) powerActionController = null;
   });
 });
 
@@ -2616,8 +2621,12 @@ app.post("/api/sparks/wake-all", async (req, res) => {
     }
   }
   res.json({ success: true, started: true });
-  powerOrchestrator.wakeAll().catch((err) => {
+  const controller = new AbortController();
+  powerActionController = controller;
+  powerOrchestrator.wakeAll(controller.signal).catch((err) => {
     console.error("[wake-all]", err.message);
+  }).finally(() => {
+    if (powerActionController === controller) powerActionController = null;
   });
 });
 
@@ -2625,7 +2634,21 @@ app.get("/api/power/state", (_req, res) => {
   res.json({ action: powerActionState });
 });
 
+app.post("/api/power/cancel", (req, res) => {
+  if (!allowDestructive(principalKey(req))) {
+    return rejectLimited(res, "Too many power requests; try again shortly");
+  }
+  if (!powerActionController) {
+    return res.status(409).json({ error: "No power action is in progress" });
+  }
+  powerActionController.abort(new Error("Power action cancelled"));
+  res.json({ success: true, cancelled: true });
+});
+
 app.post("/api/sparks/:id/shutdown", async (req, res) => {
+  if (!allowDestructive(principalKey(req)) || !allowGlobalDestructive(clientKey(req))) {
+    return rejectLimited(res, "Too many power requests; try again shortly");
+  }
   try {
     const spark = registry.getSpark(req.params.id);
     if (!spark) return res.status(404).json({ error: "Spark not found" });
@@ -2723,6 +2746,9 @@ registerStorageRoutes(app, {
 });
 
 app.post("/api/sparks/:id/wake", async (req, res) => {
+  if (!allowDestructive(principalKey(req)) || !allowGlobalDestructive(clientKey(req))) {
+    return rejectLimited(res, "Too many power requests; try again shortly");
+  }
   try {
     const spark = registry.getSpark(req.params.id);
     if (!spark) return res.status(404).json({ error: "Spark not found" });
@@ -2831,6 +2857,9 @@ app.get("/api/recipes/sessions/:id", (req, res) => {
 let recipeApply = null;
 
 app.post("/api/recipes/sessions/:id/cancel", async (req, res) => {
+  if (!allowDestructive(principalKey(req)) || !allowGlobalDestructive(clientKey(req))) {
+    return rejectLimited(res, "Too many requests; try again shortly");
+  }
   if (!isValidRecipeSessionId(req.params.id)) {
     return res.status(400).json({ error: "Invalid Apply session ID" });
   }
@@ -2883,7 +2912,7 @@ async function startRecipeApply(recipeId, preparedPlan = null) {
   const onLog = (line) => recipeSessions.appendLog(session.id, line);
   const onProgress = (state) => {
     const updated = recipeSessions.recordProgress(session.id, state);
-    if (state.phase === "done" && updated?.status === "succeeded") lastActiveRecipe.remember(recipe.id);
+    if (state.phase === "done" && updated?.status === "succeeded" && recipe.id !== "services-only") lastActiveRecipe.remember(recipe.id);
   };
   const operation = { id: session.id, controller: new AbortController(), settled: null };
   recipeApply = operation;
@@ -2921,7 +2950,10 @@ async function startRecipeApply(recipeId, preparedPlan = null) {
   return { started: true, targetId: recipe.id, sessionId: session.id };
 }
 
-app.post("/api/deployment/images/prepare", (_req, res) => {
+app.post("/api/deployment/images/prepare", (req, res) => {
+  if (!allowDestructive(principalKey(req)) || !allowGlobalDestructive(clientKey(req))) {
+    return rejectLimited(res, "Too many requests; try again shortly");
+  }
   if (isSwitchInFlight() || recipeApply || powerOrchestrator.isInFlight()) {
     return res.status(409).json({ error: "Another deployment, image preparation, or power action is running" });
   }
@@ -2973,6 +3005,9 @@ app.get("/api/model-registry", (_req, res) => {
  * via scanError so the UI can show it without losing the save.
  */
 app.put("/api/model-registry", async (req, res) => {
+  if (!allowDestructive(principalKey(req)) || !allowGlobalDestructive(clientKey(req))) {
+    return rejectLimited(res, "Too many requests; try again shortly");
+  }
   let config;
   try {
     config = modelRegistry.setRegistryConfig(req.body || {});
@@ -2990,7 +3025,10 @@ app.put("/api/model-registry", async (req, res) => {
 });
 
 /** Re-scan the registry directory on demand (no config change) — for files added on disk after the registry was already configured. */
-app.post("/api/model-registry/rescan", async (_req, res) => {
+app.post("/api/model-registry/rescan", async (req, res) => {
+  if (!allowDestructive(principalKey(req)) || !allowGlobalDestructive(clientKey(req))) {
+    return rejectLimited(res, "Too many requests; try again shortly");
+  }
   try {
     res.json(await modelRegistry.reconcileWithDisk());
   } catch (err) {
@@ -3005,8 +3043,8 @@ app.get("/api/model-registry/hf-token", async (_req, res) => {
 
 /** Set or replace the Hugging Face login on the registry host. hf auth login validates the token itself. */
 app.put("/api/model-registry/hf-token", async (req, res) => {
-  if (!allowGlobalDestructive(principalKey(req))) {
-    return rejectLimited(res, "Too many requests — try again shortly");
+  if (!allowDestructive(principalKey(req)) || !allowGlobalDestructive(clientKey(req))) {
+    return rejectLimited(res, "Too many requests; try again shortly");
   }
   try {
     await modelRegistry.setHfToken(req.body?.token);
@@ -3024,8 +3062,8 @@ app.get("/api/models", async (_req, res) => {
 });
 
 app.post("/api/models", (req, res) => {
-  if (!allowGlobalDestructive(principalKey(req))) {
-    return rejectLimited(res, "Too many requests — try again shortly");
+  if (!allowDestructive(principalKey(req)) || !allowGlobalDestructive(clientKey(req))) {
+    return rejectLimited(res, "Too many requests; try again shortly");
   }
   try {
     res.status(201).json(modelRegistry.addModel(req.body || {}));
@@ -3048,8 +3086,8 @@ app.patch("/api/models/:id", (req, res) => {
 
 /** Remove a tracked model entry (metadata only — does not touch downloaded files). */
 app.delete("/api/models/:id", (req, res) => {
-  if (!allowGlobalDestructive(principalKey(req))) {
-    return rejectLimited(res, "Too many requests — try again shortly");
+  if (!allowDestructive(principalKey(req)) || !allowGlobalDestructive(clientKey(req))) {
+    return rejectLimited(res, "Too many requests; try again shortly");
   }
   try {
     res.json(modelRegistry.removeModel(req.params.id));
@@ -3060,11 +3098,15 @@ app.delete("/api/models/:id", (req, res) => {
 
 /** Delete a model's downloaded files from the registry host. Entry stays tracked. */
 app.delete("/api/models/:id/files", (req, res) => {
-  if (!allowGlobalDestructive(principalKey(req))) {
-    return rejectLimited(res, "Too many requests — try again shortly");
+  if (!allowDestructive(principalKey(req)) || !allowGlobalDestructive(clientKey(req))) {
+    return rejectLimited(res, "Too many requests; try again shortly");
   }
   if (!modelRegistry.getModel(req.params.id)) {
     return res.status(404).json({ error: "Model not tracked" });
+  }
+  const job = modelRegistry.getJobState(req.params.id);
+  if (job && job.phase !== "done" && job.phase !== "failed") {
+    return res.status(409).json({ error: "A job is already in progress for this model" });
   }
   res.json({ started: true });
   modelRegistry
@@ -3079,8 +3121,8 @@ app.delete("/api/models/:id/files", (req, res) => {
  * (single-model, no multi-node fan-out to broadcast).
  */
 app.post("/api/models/:id/download", (req, res) => {
-  if (!allowGlobalDestructive(principalKey(req))) {
-    return rejectLimited(res, "Too many requests — try again shortly");
+  if (!allowDestructive(principalKey(req)) || !allowGlobalDestructive(clientKey(req))) {
+    return rejectLimited(res, "Too many requests; try again shortly");
   }
   if (!modelRegistry.getModel(req.params.id)) {
     return res.status(404).json({ error: "Model not tracked" });
@@ -3097,6 +3139,16 @@ app.post("/api/models/:id/download", (req, res) => {
 
 app.get("/api/models/:id/job", (req, res) => {
   res.json(modelRegistry.getJobState(req.params.id) || { modelId: req.params.id, phase: "idle" });
+});
+
+app.post("/api/models/:id/job/cancel", (req, res) => {
+  if (!allowDestructive(principalKey(req)) || !allowGlobalDestructive(clientKey(req))) {
+    return rejectLimited(res, "Too many requests; try again shortly");
+  }
+  if (!modelRegistry.cancelJob(req.params.id)) {
+    return res.status(409).json({ error: "No job is in progress for this model" });
+  }
+  res.json({ success: true, cancelled: true });
 });
 
 // ─── Prometheus exposition (opt-in) ──────────────────────

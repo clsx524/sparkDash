@@ -232,7 +232,7 @@ for (const subfolder of ["../outside", "nested/../../outside", "/absolute/outsid
   test(`NFS refuses escaping model path ${subfolder}`, async (t) => {
     const h = nfsFixture(t);
     h.model.subfolder = subfolder;
-    await assert.rejects(h.sync({ verify: false }), /model path escapes/);
+    await assert.rejects(h.sync({ verify: false }), /model path escapes|subfolder must be relative|subfolder must not contain/);
     assert.equal(fs.existsSync(h.targetFolder), false);
     assert.equal(h.commands.length, 0);
   });

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { buildDeploymentPlan, fetchDeploymentCatalog } from '../api/client';
 import type { DeploymentCatalog, DeploymentInput, DeploymentPreview } from '../api/deploymentTypes';
+import { ConfirmShutdownDialog } from './ConfirmShutdownDialog';
 
 interface Props {
   disabled: boolean;
@@ -15,6 +16,8 @@ export function DeploymentPlanner({ disabled, applying, onApply, onPrepareImages
   const [preview, setPreview] = useState<DeploymentPreview | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [building, setBuilding] = useState(false);
+  const [confirmRevision, setConfirmRevision] = useState<string | null>(null);
+  const plannerDisabled = disabled || confirmRevision !== null;
   const epoch = useRef(0);
   const [reload, setReload] = useState(0);
   useEffect(() => {
@@ -32,7 +35,7 @@ export function DeploymentPlanner({ disabled, applying, onApply, onPrepareImages
     setPreview(null);
   }
   function place(serviceId: string, sparkId: string) {
-    if (!input || disabled || !catalog?.services.some((service) => service.id === serviceId)) return;
+    if (!input || plannerDisabled || !catalog?.services.some((service) => service.id === serviceId)) return;
     const placements = input.placements.filter((placement) => placement.serviceId !== serviceId);
     if (sparkId) placements.push({ serviceId, sparkId });
     change({ ...input, placements });
@@ -53,13 +56,13 @@ export function DeploymentPlanner({ disabled, applying, onApply, onPrepareImages
   }
   function card(service: DeploymentCatalog['services'][number]) {
     const host = input?.placements.find((placement) => placement.serviceId === service.id)?.sparkId || '';
-    return <article key={service.id} draggable={!disabled}
+    return <article key={service.id} draggable={!plannerDisabled}
       onDragStart={(event) => { event.dataTransfer.setData('text/plain', service.id); event.dataTransfer.effectAllowed = 'move'; }}
       className="rounded border border-border bg-surface-elevated p-3">
       <h4 className="text-xs font-semibold text-text-strong">{service.label}</h4>
       <p className="my-1 text-[10px] text-muted">{service.memoryGiB} GiB runtime estimate · {service.startupGiB} GiB startup estimate</p>
       <label className="block text-[10px] text-muted">Placement
-        <select aria-label={`${service.label} placement`} value={host} disabled={disabled}
+        <select aria-label={`${service.label} placement`} value={host} disabled={plannerDisabled}
           onChange={(event) => place(service.id, event.target.value)}
           className="mt-1 w-full rounded border border-border bg-surface p-1.5 text-xs text-text-strong">
           <option value="">Not deployed</option>
@@ -75,12 +78,12 @@ export function DeploymentPlanner({ disabled, applying, onApply, onPrepareImages
   return <section aria-label="Deployment topology planner" className="mt-4 space-y-3 border-t border-border pt-4">
     <h3 className="text-sm font-semibold text-text-strong">Deployment topology planner</h3>
     <p className="text-[10px] text-muted">Prepare all recipe and service images once on Atom, independently of placement. Apply imports only the selected images and stages their required weights over RDMA.</p>
-    <button type="button" disabled={disabled} onClick={() => { void onPrepareImages(); }}
+    <button type="button" disabled={plannerDisabled} onClick={() => { void onPrepareImages(); }}
       className="rounded border border-border bg-surface-elevated px-3 py-2 text-xs font-medium text-text-strong disabled:opacity-50">Prepare all images on Atom</button>
     {error && <p role="alert" className="text-xs text-danger">{error} <button type="button" className="underline" onClick={() => setReload((value) => value + 1)}>Reload planner</button></p>}
     {!catalog || !input ? <p className="text-xs text-muted">Loading model definitions and saved placement…</p> : <>
       <label className="block text-xs text-muted">Large model recipe
-        <select aria-label="Large model recipe" value={input.recipeId || ''} disabled={disabled}
+        <select aria-label="Large model recipe" value={input.recipeId || ''} disabled={plannerDisabled}
           onChange={(event) => change({ ...input, recipeId: event.target.value || null })}
           className="ml-2 max-w-full rounded border border-border bg-surface p-2 text-xs text-text-strong">
           <option value="">Small services only</option>
@@ -111,11 +114,26 @@ export function DeploymentPlanner({ disabled, applying, onApply, onPrepareImages
       </section>
       <p className="text-[10px] text-muted">{catalog.budgetBasis}</p>
       <div className="flex flex-wrap gap-2">
-        <button type="button" disabled={disabled || building} onClick={() => { void build(); }}
+        <button type="button" disabled={plannerDisabled || building} onClick={() => { void build(); }}
           className="rounded border border-border bg-surface-elevated px-3 py-2 text-xs font-medium text-text-strong disabled:opacity-50">{building ? 'Checking hosts…' : 'Build plan'}</button>
-        <button type="button" disabled={disabled || building || !preview?.valid} onClick={() => { if (preview) void onApply(preview.revision); }}
+        <button type="button" disabled={plannerDisabled || building || !preview?.valid} onClick={() => { if (preview) setConfirmRevision(preview.revision); }}
           className="rounded bg-accent px-3 py-2 text-xs font-semibold text-white disabled:opacity-50">{applying ? 'Applying…' : 'Apply plan'}</button>
       </div>
+      <ConfirmShutdownDialog
+        open={confirmRevision !== null}
+        onClose={() => setConfirmRevision(null)}
+        onConfirm={async () => {
+          if (confirmRevision) await onApply(confirmRevision);
+          setConfirmRevision(null);
+        }}
+        title="Apply deployment plan"
+        description="This stops the current deployment and starts the selected services and model."
+        confirmLabel="Apply plan"
+        tone="default"
+        warningTitle="Running work will be interrupted"
+        warningDetail="Small services start first; the large model starts after they are healthy. Completed changes are not rolled back on cancel."
+        disabled={disabled || applying}
+      />
       {preview && <section aria-label="Plan preview" className="rounded border border-border p-3 text-xs">
         <h4 className={preview.valid ? 'text-accent' : 'text-danger'}>{preview.valid ? 'Plan ready; memory estimates are not enforced' : 'Plan blocked'}</h4>
         {preview.errors.length > 0 && <ul role="alert" className="my-2 list-disc pl-4 text-danger">{preview.errors.map((message) => <li key={message}>{message}</li>)}</ul>}

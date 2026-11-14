@@ -1,5 +1,6 @@
 import dns from "node:dns/promises";
 import net from "node:net";
+import { assertSafeModelFolder } from "./collectors/modelPaths.js";
 
 /**
  * Input validation for Spark targets (host / user / lanIp).
@@ -389,6 +390,13 @@ export function validateSparkTarget(body) {
     const raw = body.ssh.port;
     if (raw != null && raw !== "" && normalizeSshPort(raw) == null) {
       return "SSH port must be an integer from 1 to 65535";
+    }
+  }
+  if (body?.modelFolder != null && body.modelFolder !== "") {
+    try {
+      assertSafeModelFolder(body.modelFolder);
+    } catch (error) {
+      return error.message;
     }
   }
   const powerError = validatePowerControl(body?.powerControl);

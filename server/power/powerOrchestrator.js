@@ -14,6 +14,8 @@
  * and the online predicate, so tests need no SSH or real outlets.
  */
 
+import { abortable } from "../util/abort.js";
+
 const DEFAULT_ONLINE_TIMEOUT_MS = 5 * 60_000;
 const DEFAULT_OFFLINE_TIMEOUT_MS = 3 * 60_000;
 const DEFAULT_POLL_MS = 2_000;
@@ -70,27 +72,32 @@ export function createPowerOrchestrator({
     emit({ results: [...state.results, result] });
   }
 
-  async function waitFor(predicate, timeoutMs, forceCheck) {
+  async function waitFor(predicate, timeoutMs, forceCheck, signal) {
     const deadline = now() + timeoutMs;
     while (now() < deadline) {
+      signal?.throwIfAborted();
       if (forceCheck) await forceCheck();
       if (predicate()) return true;
-      await sleep(pollMs);
+      await abortable(() => sleep(pollMs), signal);
     }
+    signal?.throwIfAborted();
     if (forceCheck) await forceCheck();
     return predicate();
   }
 
-  async function shutdownAll() {
+  async function shutdownAll(signal) {
     if (inFlight) throw new Error("A power action is already in progress");
     if (isSwitchInFlight?.()) throw new Error("A recipe switch is in progress");
     inFlight = "shutdown-all";
     const state = makeState("shutdown-all");
     const emit = makeEmitter(state);
+    let failed = false;
 
     try {
+      signal?.throwIfAborted();
       emit({ phase: "starting" });
       await beforeShutdown?.();
+      signal?.throwIfAborted();
       const sparks = registry.sparks;
       const remotes = sparks.filter((s) => !s.isLocal);
       const local = sparks.find((s) => s.isLocal) || null;
@@ -114,7 +121,7 @@ export function createPowerOrchestrator({
         const outcomes = await Promise.allSettled(onlineRemotes.map(async (spark) => {
           const name = spark.name || spark.id;
           try {
-            await shutdownSpark(spark);
+            await shutdownSpark(spark, { signal });
           } finally {
             pendingShutdowns -= 1;
             if (pendingShutdowns === 0) {
@@ -126,9 +133,11 @@ export function createPowerOrchestrator({
           const offline = await waitFor(
             () => !getOnline(spark.id),
             offlineTimeoutMs,
-            checkOnlineNow ? () => checkOnlineNow(spark.id) : null
+            checkOnlineNow ? () => checkOnlineNow(spark.id) : null,
+            signal
           );
           if (!offline) {
+            failed = true;
             addResult(emit, state, {
               id: spark.id,
               name,
@@ -143,10 +152,12 @@ export function createPowerOrchestrator({
         }));
 
         // Join every workflow, including polling failures, before cutting power.
+        signal?.throwIfAborted();
         for (let i = 0; i < outcomes.length; i += 1) {
           const spark = onlineRemotes[i];
           const outcome = outcomes[i];
           if (outcome.status === "rejected") {
+            failed = true;
             addResult(emit, state, {
               id: spark.id,
               name: spark.name || spark.id,
@@ -179,15 +190,17 @@ export function createPowerOrchestrator({
         }
       }
 
+      signal?.throwIfAborted();
       const toPowerOff = remotes.filter((spark) => readyToPowerOff.has(spark.id));
 
       // One batch request per distinct endpoint, not one request per node.
       if (toPowerOff.length > 0) {
         emit({ phase: "powering-off" });
-        const results = await powerClient.powerOff(toPowerOff);
+        const results = await powerClient.powerOff(toPowerOff, { signal });
         for (const result of results) {
           const spark = toPowerOff.find((s) => s.id === result.id);
           const name = spark?.name || result.id;
+          if (!result.ok) failed = true;
           addResult(emit, state, {
             id: result.id,
             name,
@@ -210,6 +223,7 @@ export function createPowerOrchestrator({
 
       // Local dashboard host last: graceful shutdown only. Cutting its own
       // outlet would kill the controller before the request could complete.
+      signal?.throwIfAborted();
       if (local) {
         const name = local.name || local.id;
         if (!getOnline(local.id)) {
@@ -224,7 +238,7 @@ export function createPowerOrchestrator({
         } else {
           emit({ phase: "shutting-down", current: name });
           try {
-            await shutdownSpark(local);
+            await shutdownSpark(local, { signal });
             addResult(emit, state, {
               id: local.id,
               name,
@@ -232,6 +246,7 @@ export function createPowerOrchestrator({
               message: "Shutdown initiated (power-off skipped for the dashboard host)",
             });
           } catch (err) {
+            failed = true;
             addResult(emit, state, {
               id: local.id,
               name,
@@ -243,8 +258,16 @@ export function createPowerOrchestrator({
         }
       }
 
+      if (failed) {
+        emit({ phase: "failed", error: "One or more nodes could not be shut down" });
+        return;
+      }
       emit({ phase: "done" });
     } catch (err) {
+      if (signal?.aborted) {
+        emit({ phase: "failed", error: "Power action cancelled" });
+        return;
+      }
       emit({ phase: "failed", error: err?.message || String(err) });
       throw err;
     } finally {
@@ -252,7 +275,7 @@ export function createPowerOrchestrator({
     }
   }
 
-  async function wakeAll() {
+  async function wakeAll(signal) {
     if (inFlight) throw new Error("A power action is already in progress");
     if (isSwitchInFlight?.()) throw new Error("A recipe switch is in progress");
     inFlight = "wake-all";
@@ -260,6 +283,7 @@ export function createPowerOrchestrator({
     const emit = makeEmitter(state);
 
     try {
+      signal?.throwIfAborted();
       const offline = registry.sparks.filter((s) => !getOnline(s.id));
       emit({ total: offline.length });
 
@@ -275,7 +299,7 @@ export function createPowerOrchestrator({
 
       if (powerSparks.length > 0) {
         emit({ phase: "powering-on" });
-        const results = await powerClient.powerOn(powerSparks);
+        const results = await powerClient.powerOn(powerSparks, { signal });
         for (const result of results) {
           const spark = powerSparks.find((s) => s.id === result.id);
           const name = spark?.name || result.id;
@@ -304,7 +328,7 @@ export function createPowerOrchestrator({
         const name = spark.name || spark.id;
         emit({ phase: "powering-on", current: name });
         try {
-          await wakeSpark(spark);
+          await wakeSpark(spark, { signal });
           addResult(emit, state, { id: spark.id, name, ok: true, message: "Wake-on-LAN sent" });
         } catch (err) {
           failed = true;
@@ -346,7 +370,8 @@ export function createPowerOrchestrator({
             ? async () => {
                 await Promise.all(toWait.map((s) => checkOnlineNow(s.id)));
               }
-            : null
+            : null,
+          signal
         );
         if (!allOnline) {
           const offlineAfter = toWait.filter((s) => !getOnline(s.id));
@@ -362,6 +387,10 @@ export function createPowerOrchestrator({
 
       emit({ phase: "done" });
     } catch (err) {
+      if (signal?.aborted) {
+        emit({ phase: "failed", error: "Power action cancelled" });
+        return;
+      }
       emit({ phase: "failed", error: err?.message || String(err) });
       throw err;
     } finally {

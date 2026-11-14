@@ -1,4 +1,4 @@
-import { useEffect, useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useModalPresence } from "../hooks/useModalPresence";
 import { useOverlayClose } from "../hooks/useOverlayClose";
@@ -52,6 +52,7 @@ export function ConfirmShutdownDialog({
   disabled = false,
 }: ConfirmShutdownDialogProps) {
   const [submitting, setSubmitting] = useState(false);
+  const submittingRef = useRef(false);
   const titleId = useId();
   const { mounted, visible } = useModalPresence(open);
   const trapRef = useFocusTrap(mounted);
@@ -79,13 +80,16 @@ export function ConfirmShutdownDialog({
   const Icon = danger ? PowerOffIcon : PowerOnIcon;
 
   const handleConfirm = async () => {
-    if (!canConfirm) return;
+    if (!canConfirm || submittingRef.current) return;
+    submittingRef.current = true;
     setSubmitting(true);
     try {
       await onConfirm();
       onClose();
     } catch {
       setSubmitting(false);
+    } finally {
+      submittingRef.current = false;
     }
   };
 

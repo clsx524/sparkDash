@@ -36,8 +36,9 @@ import {
   MODELS_JSON_PATH,
   MODEL_DOWNLOAD_TIMEOUT_MS,
 } from "../config.js";
-import { atomicWrite } from "../util/atomicWrite.js";
+import { atomicWrite, quarantineCorrupt } from "../util/atomicWrite.js";
 import { sshExec } from "./ssh.js";
+import { assertSafeRepo, assertSafeSubfolder } from "./modelPaths.js";
 
 const PROBE_TIMEOUT_MS = 15_000;
 const VERIFY_TIMEOUT_MS = 1_800_000; // sha256sum over many large files can be slow
@@ -177,13 +178,19 @@ export function filterManifestToIncluded(manifest, includePattern) {
  * (config.json, README.md, tokenizer files) are typically plain-tracked and
  * are silently excluded from the manifest rather than compared incorrectly.
  */
-export async function fetchHfManifest(repo, revision) {
+export async function fetchHfManifest(repo, revision, { signal } = {}) {
+  const safeRepo = assertSafeRepo(repo);
+  if (!revision) throw new Error("revision is required");
+  const encodedRepo = safeRepo.split("/").map(encodeURIComponent).join("/");
   const manifest = [];
-  let url = `https://huggingface.co/api/models/${repo}/tree/${encodeURIComponent(revision)}?recursive=true`;
+  let url = `https://huggingface.co/api/models/${encodedRepo}/tree/${encodeURIComponent(revision)}?recursive=true`;
   for (let page = 0; page < 100 && url; page++) {
-    const res = await fetch(url, { headers: { Accept: "application/json" } });
+    const res = await fetch(url, {
+      headers: { Accept: "application/json" },
+      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(30_000)]) : AbortSignal.timeout(30_000),
+    });
     if (!res.ok) {
-      throw new Error(`Hugging Face tree fetch failed for ${repo}@${revision}: HTTP ${res.status}`);
+      throw new Error(`Hugging Face tree fetch failed for ${safeRepo}@${revision}: HTTP ${res.status}`);
     }
     const entries = await res.json();
     if (!Array.isArray(entries)) break;
@@ -194,10 +201,21 @@ export async function fetchHfManifest(repo, revision) {
       }
     }
     // RFC5988 Link header pagination, same convention HF uses elsewhere.
+    // Only follow same-origin links: a compromised or malformed response must
+    // not redirect the registry's fetch to an arbitrary host.
     const link = res.headers.get("link") || res.headers.get("Link");
     const next = link?.split(",").find((part) => part.includes('rel="next"'));
     const match = next?.match(/<([^>]+)>/);
-    url = match ? match[1] : null;
+    if (match) {
+      try {
+        const nextUrl = new URL(match[1], url);
+        url = nextUrl.origin === "https://huggingface.co" ? nextUrl.toString() : null;
+      } catch {
+        url = null;
+      }
+    } else {
+      url = null;
+    }
   }
   return manifest;
 }
@@ -210,6 +228,7 @@ export class ModelRegistry {
     this._models = [];
     /** @type {Map<string, {kind: "download"|"delete", phase: string, message?: string, error?: string, updatedAt: string}>} */
     this._jobs = new Map();
+    this._jobControllers = new Map();
     this._load();
   }
 
@@ -217,8 +236,11 @@ export class ModelRegistry {
     let data;
     try {
       data = JSON.parse(fs.readFileSync(MODEL_REGISTRY_JSON_PATH, "utf-8"));
-    } catch {
+    } catch (error) {
       // No config yet — stays at the empty default. Never assume a host/path.
+      // A corrupt file is quarantined so the next save does not silently
+      // overwrite the operator's only copy.
+      if (error?.code !== "ENOENT") quarantineCorrupt(MODEL_REGISTRY_JSON_PATH, "model-registry", error);
     }
     if (data) {
       this._registryConfig = {
@@ -235,8 +257,9 @@ export class ModelRegistry {
       const raw = fs.readFileSync(MODELS_JSON_PATH, "utf-8");
       const data = JSON.parse(raw);
       this._models = Array.isArray(data.models) ? data.models : [];
-    } catch {
+    } catch (error) {
       this._models = [];
+      if (error?.code !== "ENOENT") quarantineCorrupt(MODELS_JSON_PATH, "models", error);
     }
   }
 
@@ -296,10 +319,8 @@ export class ModelRegistry {
       );
     }
     if (this.getModel(id)) throw new Error(`Model ${id} is already tracked`);
-    const subfolder = typeof input?.subfolder === "string" ? input.subfolder.trim() : "";
-    if (!subfolder) throw new Error("subfolder is required");
-    const repo = typeof input?.repo === "string" ? input.repo.trim() : "";
-    if (!repo) throw new Error("repo is required");
+    const subfolder = assertSafeSubfolder(input?.subfolder);
+    const repo = assertSafeRepo(input?.repo);
     const model = {
       id,
       label: typeof input?.label === "string" && input.label.trim() ? input.label.trim() : id,
@@ -342,7 +363,7 @@ export class ModelRegistry {
     }
     if (patch.repo !== undefined) {
       const repo = typeof patch.repo === "string" ? patch.repo.trim() : "";
-      next.repo = repo || null;
+      next.repo = repo ? assertSafeRepo(repo) : null;
     }
     if (patch.revision !== undefined) {
       const revision = typeof patch.revision === "string" ? patch.revision.trim() : "";
@@ -435,6 +456,7 @@ export class ModelRegistry {
     for (const name of names) {
       if (name === ".sparkdash-images") continue; // Runtime image artifacts are not model weights.
       if (trackedSubfolders.has(name)) continue;
+      try { assertSafeSubfolder(name); } catch { continue; }
       const id = this._uniqueDiscoveredId(name);
       if (!id) continue; // nothing usable left after sanitizing — skip rather than guess
       this._models = [
@@ -517,8 +539,18 @@ export class ModelRegistry {
     if (!value) throw new Error("Token is required");
     const host = this.registryHost();
     if (!host) throw new Error("No Model Registry host configured");
-    await sshExec(host, `hf auth login --token ${shQuote(value)} --force`, {
-      timeoutMs: PROBE_TIMEOUT_MS
+    // The token travels on stdin, never in argv: `ps` on the registry host must
+    // not expose it. Use the interpreter behind the installed `hf` CLI so the
+    // huggingface_hub package is the same one the CLI uses; fall back to
+    // python3 when the shebang cannot be resolved.
+    const loginCmd = [
+      'python_bin=$(head -n 1 "$(command -v hf)" 2>/dev/null | sed \'s/^#!//\')',
+      '[ -n "$python_bin" ] || python_bin=python3',
+      '"$python_bin" -c \'import sys; from huggingface_hub import login; login(token=sys.stdin.read().strip())\'',
+    ].join('; ');
+    await sshExec(host, loginCmd, {
+      timeoutMs: PROBE_TIMEOUT_MS,
+      input: value,
     });
   }
 
@@ -532,7 +564,12 @@ export class ModelRegistry {
     if (!this._registryConfig.directory) {
       return { id: model.id, available: false, sizeBytes: null, error: "No Model Registry directory configured" };
     }
-    const dir = joinRemotePath(this._registryConfig.directory, model.subfolder);
+    let dir;
+    try {
+      dir = joinRemotePath(this._registryConfig.directory, assertSafeSubfolder(model.subfolder));
+    } catch (error) {
+      return { id: model.id, available: false, sizeBytes: null, error: error.message };
+    }
     try {
       const out = await sshExec(
         host,
@@ -558,7 +595,19 @@ export class ModelRegistry {
   }
 
   async statuses() {
-    const results = await Promise.all(this._models.map((m) => this.probeStatus(m)));
+    // Bound concurrent SSH probes: a large registry must not open one session
+    // per model on every GET /api/models.
+    const models = this._models;
+    const limit = 4;
+    const results = new Array(models.length);
+    let next = 0;
+    const worker = async () => {
+      while (next < models.length) {
+        const index = next++;
+        results[index] = await this.probeStatus(models[index]);
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(limit, models.length) }, worker));
     return Object.fromEntries(results.map((r) => [r.id, r]));
   }
 
@@ -571,34 +620,50 @@ export class ModelRegistry {
   async verifyFilesOnHost(host, dir, manifest, { signal } = {}) {
     signal?.throwIfAborted();
     if (!manifest || manifest.length === 0) return [];
-    const fileArgs = manifest.map((m) => shQuote(m.path)).join(" ");
-    let out;
-    try {
-      out = await sshExec(
-        host,
-        `cd ${shQuotePath(dir)} && sha256sum -- ${fileArgs} 2>&1`,
-        { timeoutMs: VERIFY_TIMEOUT_MS, signal, cancelRemote: true }
-      );
-    } catch (err) {
+    // Keep each remote command well below ARG_MAX. A large repo can carry
+    // thousands of files; one sha256sum invocation with every path would fail
+    // with E2BIG and report the whole model as unverified.
+    const CHUNK_SIZE = 500;
+    const mismatches = [];
+    for (let offset = 0; offset < manifest.length; offset += CHUNK_SIZE) {
       signal?.throwIfAborted();
-      // sshExec throws on non-zero exit too (e.g. a missing file) — the
-      // partial stdout is folded into the error message by sshExec's
-      // stderr/message handling, so fall back to treating everything as
-      // unverified rather than silently reporting a clean pass.
-      return manifest.map((m) => m.path);
+      const chunk = manifest.slice(offset, offset + CHUNK_SIZE);
+      const fileArgs = chunk.map((m) => shQuote(m.path)).join(" ");
+      let out;
+      try {
+        out = await sshExec(
+          host,
+          `cd ${shQuotePath(dir)} && sha256sum -- ${fileArgs} 2>&1`,
+          { timeoutMs: VERIFY_TIMEOUT_MS, signal, cancelRemote: true }
+        );
+      } catch (err) {
+        signal?.throwIfAborted();
+        // sshExec throws on non-zero exit too (e.g. a missing file) — the
+        // partial stdout is folded into the error message by sshExec's
+        // stderr/message handling, so fall back to treating everything in
+        // this chunk as unverified rather than silently reporting a clean pass.
+        mismatches.push(...chunk.map((m) => m.path));
+        continue;
+      }
+      const actual = new Map();
+      for (const line of out.split("\n")) {
+        const match = line.match(/^([0-9a-f]{64})\s+\*?(.+)$/);
+        if (match) actual.set(match[2], match[1]);
+      }
+      for (const entry of chunk) {
+        if ((actual.get(entry.path) || "").toLowerCase() !== entry.sha256) {
+          mismatches.push(entry.path);
+        }
+      }
     }
-    const actual = new Map();
-    for (const line of out.split("\n")) {
-      const match = line.match(/^([0-9a-f]{64})\s+\*?(.+)$/);
-      if (match) actual.set(match[2], match[1]);
-    }
-    return manifest
-      .filter((entry) => (actual.get(entry.path) || "").toLowerCase() !== entry.sha256)
-      .map((entry) => entry.path);
+    return mismatches;
   }
 
   // ─── Download (SSH to registry host, then verify) ────────
-  async downloadModel(modelId) {
+  async downloadModel(modelId, { signal } = {}) {
+    const controller = new AbortController();
+    this._jobControllers.set(modelId, controller);
+    const jobSignal = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
     this._setJob(modelId, {
       kind: "download",
       phase: "running",
@@ -614,11 +679,12 @@ export class ModelRegistry {
       if (!model.repo) {
         throw new Error(`${modelId} has no source repo set — edit it to add one before downloading`);
       }
+      assertSafeRepo(model.repo);
       const host = this.registryHost();
       if (!host) throw new Error("No Model Registry host configured");
       if (!this._registryConfig.directory) throw new Error("No Model Registry directory configured");
 
-      const dir = joinRemotePath(this._registryConfig.directory, model.subfolder);
+      const dir = joinRemotePath(this._registryConfig.directory, assertSafeSubfolder(model.subfolder));
       const includeArgs = splitIncludePatterns(model.includePattern)
         .map((pattern) => ` --include ${shQuote(pattern)}`)
         .join("");
@@ -635,10 +701,14 @@ export class ModelRegistry {
       // best-effort only (du failing here must never abort the real download in progress).
       let lastBytes = 0;
       let lastAt = Date.now();
+      let polling = false;
       progressTimer = setInterval(async () => {
+        if (polling) return;
+        polling = true;
         try {
           const out = await sshExec(host, `du -sb ${shQuotePath(dir)} 2>/dev/null | cut -f1`, {
-            timeoutMs: PROBE_TIMEOUT_MS
+            timeoutMs: PROBE_TIMEOUT_MS,
+            signal: jobSignal,
           });
           const bytes = parseInt(out, 10);
           if (!Number.isFinite(bytes)) return;
@@ -654,7 +724,7 @@ export class ModelRegistry {
       }, DOWNLOAD_PROGRESS_POLL_MS);
 
       try {
-        await sshExec(host, downloadCmd, { timeoutMs: MODEL_DOWNLOAD_TIMEOUT_MS});
+        await sshExec(host, downloadCmd, { timeoutMs: MODEL_DOWNLOAD_TIMEOUT_MS, signal: jobSignal, cancelRemote: true });
       } finally {
         clearInterval(progressTimer);
       }
@@ -664,10 +734,10 @@ export class ModelRegistry {
         message: "Verifying checksums against Hugging Face",
         bytesPerSecond: null,
       });
-      const fullManifest = await fetchHfManifest(model.repo, model.revision);
+      const fullManifest = await fetchHfManifest(model.repo, model.revision, { signal: jobSignal });
       const manifest = filterManifestToIncluded(fullManifest, model.includePattern);
 
-      const mismatches = await this.verifyFilesOnHost(host, dir, manifest);
+      const mismatches = await this.verifyFilesOnHost(host, dir, manifest, { signal: jobSignal });
       if (mismatches.length > 0) {
         throw new Error(
           `Checksum verification failed for ${mismatches.length} file(s): ${mismatches.slice(0, 5).join(", ")}${mismatches.length > 5 ? ", …" : ""}`
@@ -681,13 +751,18 @@ export class ModelRegistry {
       });
       this._setJob(modelId, { phase: "done", message: "Downloaded and verified" });
     } catch (err) {
-      this._setJob(modelId, { phase: "failed", error: err.message });
+      this._setJob(modelId, { phase: "failed", error: jobSignal.aborted ? "Job cancelled" : err.message });
       throw err;
+    } finally {
+      this._jobControllers.delete(modelId);
     }
   }
 
   // ─── Delete downloaded files (registry host only; entry stays tracked) ───
-  async deleteModelFiles(modelId) {
+  async deleteModelFiles(modelId, { signal } = {}) {
+    const controller = new AbortController();
+    this._jobControllers.set(modelId, controller);
+    const jobSignal = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
     this._setJob(modelId, { kind: "delete", phase: "running", message: "Deleting files", error: undefined });
     try {
       const model = this.getModel(modelId);
@@ -696,13 +771,23 @@ export class ModelRegistry {
       if (!host) throw new Error("No Model Registry host configured");
       if (!this._registryConfig.directory) throw new Error("No Model Registry directory configured");
 
-      const dir = joinRemotePath(this._registryConfig.directory, model.subfolder);
-      await sshExec(host, `rm -rf -- ${shQuotePath(dir)}`, { timeoutMs: DELETE_TIMEOUT_MS});
+      const dir = joinRemotePath(this._registryConfig.directory, assertSafeSubfolder(model.subfolder));
+      await sshExec(host, `rm -rf -- ${shQuotePath(dir)}`, { timeoutMs: DELETE_TIMEOUT_MS, signal: jobSignal, cancelRemote: true });
       this._updateModel(modelId, { manifest: null, verifiedAt: null });
       this._setJob(modelId, { phase: "done", message: "Deleted" });
     } catch (err) {
-      this._setJob(modelId, { phase: "failed", error: err.message });
+      this._setJob(modelId, { phase: "failed", error: jobSignal.aborted ? "Job cancelled" : err.message });
       throw err;
+    } finally {
+      this._jobControllers.delete(modelId);
     }
+  }
+
+  /** Abort the running download/delete job for a model. */
+  cancelJob(modelId) {
+    const controller = this._jobControllers.get(modelId);
+    if (!controller) return false;
+    controller.abort(new Error("Job cancelled"));
+    return true;
   }
 }

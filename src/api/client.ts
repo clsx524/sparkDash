@@ -1313,3 +1313,8 @@ export function downloadModel(id: string): Promise<{ started: boolean }> {
 export function fetchModelJob(id: string): Promise<ModelJobStateOrIdle> {
   return apiFetch(`/api/models/${encodeURIComponent(id)}/job`);
 }
+
+/** Abort the running download/delete job for a model. */
+export function cancelModelJob(id: string): Promise<{ success: boolean; cancelled: boolean }> {
+  return apiFetch(`/api/models/${encodeURIComponent(id)}/job/cancel`, { method: "POST" });
+}

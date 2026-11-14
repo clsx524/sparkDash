@@ -1,5 +1,6 @@
 import type { LlmMetrics, RdmaPortMetrics, SparkSnapshot } from "../../api/types";
 import { resolveSparkRole } from "../../api/sparkRole";
+import { mainFilesystem, metricsView } from "../../shared/mainFilesystem";
 
 /**
  * Pure derivations behind the cluster overview.
@@ -46,11 +47,7 @@ function meanOrNull(values: Array<number | null | undefined>): number | null {
 
 /** The root filesystem, matching the per-node card's own resolution order. */
 export function rootDisk(spark: SparkSnapshot) {
-  return (
-    spark.metrics.storage?.find((d) => d.label === "/") ??
-    spark.metrics.storage?.find((d) => d.device === "nvme0n1p2") ??
-    null
-  );
+  return mainFilesystem(spark.metrics.storage, metricsView);
 }
 
 /** First available LLM endpoint on a Spark, or null. Workers never host one. */
@@ -197,11 +194,22 @@ export function primaryProcess(spark: SparkSnapshot): string | null {
   return procs.slice().sort((a, b) => b.vramMB - a.vramMB)[0]?.name ?? null;
 }
 
-/** Interface carrying the cluster (RoCE) address, by convention 192.168.10.x on this cluster. */
+/**
+ * Interface carrying the cluster (RoCE) address. Prefer the RDMA port's
+ * backing netdev/IP; fall back to the historical 192.168.10.x convention only
+ * when the node has not reported RDMA metrics yet.
+ */
 export function clusterInterface(spark: SparkSnapshot) {
   const ifaces = spark.metrics.network?.interfaces;
   if (!Array.isArray(ifaces)) return null;
   const up = ifaces.filter((i) => i.operstate === "up" && i.ip);
+  const rdma = clusterRdmaPort(spark);
+  if (rdma) {
+    const byName = rdma.netdev ? up.find((i) => i.name === rdma.netdev) : null;
+    if (byName) return byName;
+    const byIp = rdma.ip ? up.find((i) => i.ip === rdma.ip) : null;
+    if (byIp) return byIp;
+  }
   return up.find((i) => i.ip?.startsWith("192.168.10.")) ?? null;
 }
 
@@ -210,6 +218,8 @@ export function lanInterface(spark: SparkSnapshot) {
   const ifaces = spark.metrics.network?.interfaces;
   if (!Array.isArray(ifaces)) return null;
   const up = ifaces.filter((i) => i.operstate === "up" && i.ip);
+  const cluster = clusterInterface(spark);
+  if (cluster) return up.find((i) => i.name !== cluster.name) ?? null;
   return up.find((i) => !i.ip?.startsWith("192.168.10.")) ?? null;
 }
 

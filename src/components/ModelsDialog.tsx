@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import {
   addModel,
+  cancelModelJob,
   deleteModelFiles,
   downloadModel,
   fetchHfTokenStatus,
@@ -29,14 +30,15 @@ interface ModelsDialogProps {
   onClose: () => void;
 }
 
-function useEscape(onClose: () => void) {
+function useEscape(onClose: () => void, enabled: boolean) {
   useEffect(() => {
+    if (!enabled) return;
     const handler = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [onClose]);
+  }, [onClose, enabled]);
 }
 
 const MODEL_ID_PATTERN = /^[a-zA-Z0-9._-]{1,128}$/;
@@ -128,6 +130,7 @@ export function ModelsDialog({ open, onClose }: ModelsDialogProps) {
   const [adding, setAdding] = useState(false);
 
   const [jobs, setJobs] = useState<Record<string, ModelJobStateOrIdle>>({});
+  const [cancelling, setCancelling] = useState<Record<string, boolean>>({});
   const [confirmingId, setConfirmingId] = useState<string | null>(null);
 
   const [scanMessage, setScanMessage] = useState<string | null>(null);
@@ -139,8 +142,15 @@ export function ModelsDialog({ open, onClose }: ModelsDialogProps) {
   const [editIncludePattern, setEditIncludePattern] = useState("");
   const [editSaving, setEditSaving] = useState(false);
 
-  useEscape(onClose);
+  useEscape(onClose, open);
   const { mounted, visible } = useModalPresence(open);
+
+  function cancelJob(id: string) {
+    setCancelling((prev) => ({ ...prev, [id]: true }));
+    cancelModelJob(id)
+      .catch(() => {})
+      .finally(() => setCancelling((prev) => ({ ...prev, [id]: false })));
+  }
 
   const load = () => {
     setLoading(true);
@@ -669,6 +679,16 @@ export function ModelsDialog({ open, onClose }: ModelsDialogProps) {
                           {formatBytes(job.bytesDownloaded)}
                           {job.bytesPerSecond ? ` (${formatRate(job.bytesPerSecond)})` : ""}
                         </span>
+                      )}
+                      {(job.phase === "running" || job.phase === "verifying") && (
+                        <button
+                          type="button"
+                          disabled={cancelling[model.id]}
+                          onClick={() => cancelJob(model.id)}
+                          className="ml-2 underline disabled:opacity-50"
+                        >
+                          {cancelling[model.id] ? "Cancelling…" : "Cancel"}
+                        </button>
                       )}
                     </div>
                   )}

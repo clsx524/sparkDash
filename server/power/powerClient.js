@@ -165,7 +165,7 @@ async function sendBatch(group, action, fetchFn, signal) {
     parsed.searchParams.set("targets", group.targets.join(","));
     url = parsed.toString();
   } else if (typeof pc.body === "string") {
-    body = pc.body.replace("{{targets}}", JSON.stringify(group.targets));
+    body = pc.body.replaceAll("{{targets}}", JSON.stringify(group.targets));
   } else {
     body = JSON.stringify({ ...(pc.body || {}), targets: group.targets });
   }
@@ -190,6 +190,24 @@ async function sendBatch(group, action, fetchFn, signal) {
 }
 
 async function readLimited(res) {
-  const text = await res.text();
-  return text.length > MAX_RESPONSE_BYTES ? text.slice(0, MAX_RESPONSE_BYTES) : text;
+  if (!res.body) return "";
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let text = "";
+  let bytes = 0;
+  try {
+    while (bytes < MAX_RESPONSE_BYTES) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const remaining = MAX_RESPONSE_BYTES - bytes;
+      const chunk = value.byteLength > remaining ? value.subarray(0, remaining) : value;
+      text += decoder.decode(chunk, { stream: true });
+      bytes += chunk.byteLength;
+      if (chunk.byteLength < value.byteLength) break;
+    }
+    text += decoder.decode();
+  } finally {
+    await reader.cancel().catch(() => {});
+  }
+  return text;
 }

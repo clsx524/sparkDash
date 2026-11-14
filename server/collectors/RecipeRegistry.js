@@ -27,6 +27,7 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import { sshExec } from "./ssh.js";
+import { shQuotePath } from "./modelSync.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const RECIPES_JSON_PATH =
@@ -135,7 +136,7 @@ export class RecipeRegistry {
       return { role: node.role, running: false, detail: "node offline" };
     }
     try {
-      const out = await sshExec(spark, `cd ${node.workdir} && ${node.statusCmd}`, {
+      const out = await sshExec(spark, `cd ${shQuotePath(node.workdir)} && ${node.statusCmd}`, {
         timeoutMs: STATUS_TIMEOUT_MS, signal,
       });
       const running = new RegExp(node.runningPattern).test(out);

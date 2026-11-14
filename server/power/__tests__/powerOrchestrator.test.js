@@ -259,7 +259,7 @@ test("shutdown-all excludes SSH failures and offline timeouts from the single po
       "failed and still-online nodes are never power-cut");
     assert.equal(calls.shutdown.at(-1), "nas");
     const final = calls.progress.at(-1);
-    assert.equal(final.phase, "done");
+    assert.equal(final.phase, "failed");
     assert.equal(final.completed, 5);
     assert.ok(final.results.some((result) =>
       result.id === "failed" && !result.ok && /SSH refused/.test(result.error)));
@@ -354,4 +354,23 @@ test("wake-all reports a node that never comes online", async () => {
 
   assert.equal(calls.progress.at(-1).phase, "failed");
   assert.match(calls.progress.at(-1).error, /did not come online/);
+});
+
+test("shutdown-all can be cancelled while waiting for nodes to go offline", async () => {
+  const { orchestrator, calls } = makeHarness({
+    sparks: [remote("a")],
+    online: { a: true },
+    shutdown: async () => {},
+    sleep: () => new Promise(() => {}),
+  });
+  const controller = new AbortController();
+  const running = orchestrator.shutdownAll(controller.signal);
+  await nextTurn();
+  assert.equal(orchestrator.isInFlight(), "shutdown-all");
+  controller.abort(new Error("Power action cancelled"));
+  await running;
+  const final = calls.progress.at(-1);
+  assert.equal(final.phase, "failed");
+  assert.match(final.error, /cancelled/i);
+  assert.equal(orchestrator.isInFlight(), null);
 });

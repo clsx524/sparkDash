@@ -12,7 +12,7 @@
 import { isAllowedTargetHost } from "../validate.js";
 import { llmProbeHost } from "./llmHost.js";
 import { sshExec } from "./ssh.js";
-import { syncModelToSpark, shQuotePath } from "./modelSync.js";
+import { syncModelToSpark, shQuote, shQuotePath } from "./modelSync.js";
 import { stageRecipeImages } from "./modelImages.js";
 import {
   probeNodeShardProgress,
@@ -77,7 +77,7 @@ async function runNodeCommand(recipeRegistry, node, cmd, timeoutMs, options, act
   if (!spark) throw new RecipeSwitchError(`no Spark configured for role ${node.role}`);
   report(options, spark, `${action} from ${node.workdir}`);
   try {
-    const result = await sshExec(spark, `cd ${node.workdir} && ${cmd}`, {
+    const result = await sshExec(spark, `cd ${shQuotePath(node.workdir)} && ${cmd}`, {
       timeoutMs,
       signal: options.signal, cancelRemote: true,
       onOutput: options.onLog ? (line) => report(options, spark, line.text, line.stream) : undefined,
@@ -462,7 +462,7 @@ export async function switchRecipe(recipeRegistry, modelRegistry, targetId, onPr
     if (options.plan?.input.recipeId?.startsWith("deepseek-")) {
       emit("preparing", { message: "Retaining only the selected DeepSeek deployment cache" });
       for (const spark of requiredNodes.filter((spark) => spark.id !== modelRegistry?.getRegistryConfig().hostId)) {
-        await sshExec(spark, `SPARKDASH_MODEL_ROOT=${shQuotePath(spark.modelFolder)} python3 ~/.local/share/sparkdash-models/model-runtime.py evict ${target.id}`, {
+        await sshExec(spark, `SPARKDASH_MODEL_ROOT=${shQuotePath(spark.modelFolder)} python3 ~/.local/share/sparkdash-models/model-runtime.py evict ${shQuote(target.id)}`, {
           timeoutMs: 300_000, signal: options.signal, cancelRemote: true,
           onOutput: options.onLog ? (line) => report(options, spark, line.text, line.stream) : undefined,
         });

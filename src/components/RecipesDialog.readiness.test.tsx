@@ -4,7 +4,7 @@ import {
   applyDeploymentPlan, buildDeploymentPlan, fetchDeploymentCatalog, cancelRecipeSession, fetchCurrentRecipeSession, fetchRecipeSession, fetchRecipeSessions, fetchRecipes,
 } from "../api/client";
 import type { RecipeActivateResponse, RecipeInfo, RecipeSessionDetail, RecipeSessionStage } from "../api/types";
-import { flush, render } from "../testing/render";
+import { cleanupRenders, flush, render } from "../testing/render";
 import { RecipesDialog } from "./RecipesDialog";
 
 vi.mock("../api/client", () => ({
@@ -65,12 +65,21 @@ beforeEach(() => {
   vi.mocked(fetchRecipeSession).mockImplementation(async (id) => ({ session: session(id) }));
   vi.mocked(applyDeploymentPlan).mockResolvedValue({ started: true, targetId: glm.id, sessionId: "new" });
 });
-afterEach(() => vi.useRealTimers());
+afterEach(() => { cleanupRenders(); vi.useRealTimers(); });
 
 const onClose = () => {};
 function cancelButton(container: HTMLElement): HTMLButtonElement | undefined {
   return [...container.querySelectorAll<HTMLButtonElement>('[aria-label="Current Apply"] button')]
     .find((button) => button.textContent === "Cancel Apply" || button.textContent === "Cancelling…");
+}
+
+function confirmApply(): void {
+  const dialog = [...document.querySelectorAll('[role="dialog"]')]
+    .find((entry) => entry.textContent?.includes("Apply deployment plan"));
+  const button = [...(dialog?.querySelectorAll<HTMLButtonElement>('button') ?? [])]
+    .find((entry) => entry.textContent === "Apply plan");
+  if (!button) throw new Error("Apply confirmation dialog not found");
+  act(() => button.click());
 }
 
 describe("persistent recipe Apply views", () => {
@@ -87,6 +96,10 @@ describe("persistent recipe Apply views", () => {
     await flush();
     expect(apply.disabled).toBe(false);
     act(() => { apply.click(); apply.click(); });
+    await flush();
+    expect(applyDeploymentPlan).not.toHaveBeenCalled();
+    confirmApply();
+    await flush();
     expect(applyDeploymentPlan).toHaveBeenCalledTimes(1);
     expect(applyDeploymentPlan).toHaveBeenCalledWith("plan-v1");
     expect(buttons.every((button) => button.disabled)).toBe(true);
@@ -342,12 +355,15 @@ describe("persistent recipe Apply views", () => {
     await flush();
     const button = buttons.find((entry) => entry.textContent === "Apply plan")!;
     act(() => button.click());
+    await flush();
+    confirmApply();
     const done = session("quick", { status: "succeeded", finishedAt: 2000 });
     vi.mocked(fetchCurrentRecipeSession).mockResolvedValue({ session: done });
     vi.mocked(fetchRecipeSession).mockResolvedValue({ session: done });
     act(() => root.render(<RecipesDialog open onClose={onClose} recipeSession={done} />));
     await flush();
     post.resolve({ started: true, targetId: "glm", sessionId: "quick" });
+    await flush();
     await flush();
     expect(container.querySelector('[aria-label="Current Apply"] [role="status"]')?.textContent).toBe("succeeded");
     expect(button.disabled).toBe(false);

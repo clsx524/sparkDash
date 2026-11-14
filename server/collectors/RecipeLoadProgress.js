@@ -29,6 +29,7 @@ import fs from "fs";
 import path from "path";
 import { randomUUID } from "crypto";
 import { sshExec } from "./ssh.js";
+import { shQuote } from "./modelSync.js";
 
 /** Matches both example formats above: percent, then a `current/total` shard count. */
 const SHARD_PROGRESS_RE = /(\d+)%.*?(\d+)\/(\d+)/g;
@@ -75,7 +76,7 @@ export function parseShardProgress(logText) {
 export async function probeNodeShardProgress(spark, node, { signal } = {}) {
   if (!node?.containerName) return null;
   try {
-    const out = await sshExec(spark, `docker logs --tail ${LOG_TAIL_LINES} ${node.containerName} 2>&1`, {
+    const out = await sshExec(spark, `docker logs --tail ${LOG_TAIL_LINES} ${shQuote(node.containerName)} 2>&1`, {
       timeoutMs: 8000, signal,
     });
     return parseShardProgress(out);

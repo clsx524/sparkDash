@@ -187,6 +187,11 @@ export class DeploymentPlanner {
     });
     const routes = { embeddings: 'qwen3-embedding', tts: 'qwen3-tts', asr: 'qwen3-asr', images: 'qwen-image' };
     app.use('/inference/:service', (req, res) => {
+      const maxBodyBytes = 32 * 1024 * 1024;
+      const declaredLength = Number(req.headers['content-length']);
+      if (Number.isFinite(declaredLength) && declaredLength > maxBodyBytes) {
+        return res.status(413).json({ error: 'Request body too large' });
+      }
       const serviceId = routes[req.params.service];
       const placement = this.state.active?.placements.find((item) => item.serviceId === serviceId);
       const service = this.services.find((item) => item.id === serviceId);
@@ -196,6 +201,7 @@ export class DeploymentPlanner {
       if (!isAllowedTargetHost(host)) return res.status(503).json({ error: 'Invalid model host' });
       const headers = { ...req.headers, host: `${host}:${service.port}` };
       delete headers.authorization;
+      delete headers.cookie;
       const body = req.body === undefined ? null : Buffer.from(JSON.stringify(req.body));
       if (body) { headers['content-length'] = String(body.length); delete headers['transfer-encoding']; }
       const upstream = http.request({ hostname: host, port: service.port, path: req.url, method: req.method, headers }, (response) => {
