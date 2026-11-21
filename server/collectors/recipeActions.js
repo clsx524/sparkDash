@@ -160,19 +160,22 @@ export async function syncModelsForRecipe(recipeRegistry, modelRegistry, recipe,
 async function waitForNodeHealth(recipeRegistry, node, options) {
   const spark = recipeRegistry._sparkForNode(node);
   if (!spark) throw new RecipeSwitchError(`no Spark configured for role ${node.role}`);
-  const host = llmProbeHost(spark);
-  if (!isAllowedTargetHost(host)) {
-    throw new RecipeSwitchError(`Invalid or disallowed health-check host: ${host}`);
-  }
   if (node.llmPort == null) {
-    const deadline = Date.now() + HEALTH_TIMEOUT_MS;
+    const deadline = Date.now() + (node.healthTimeoutMs || HEALTH_TIMEOUT_MS);
     while (Date.now() < deadline) {
       options.signal?.throwIfAborted();
       const status = await recipeRegistry._probeNode(node, options);
       if (status.running) return;
+      if (node.containerHealth && ['stopped', 'unhealthy'].includes(status.detail.trim())) {
+        throw new RecipeSwitchError(`${node.role} container reported ${status.detail.trim()}; inspect its Docker logs`);
+      }
       await sleep(HEALTH_POLL_MS, options.signal);
     }
     throw new RecipeSwitchError(`${node.role} rank did not become running`);
+  }
+  const host = llmProbeHost(spark);
+  if (!isAllowedTargetHost(host)) {
+    throw new RecipeSwitchError(`Invalid or disallowed health-check host: ${host}`);
   }
   const url = `http://${host}:${node.llmPort}${node.healthPath || "/health"}`;
   const deadline = Date.now() + (node.healthTimeoutMs || HEALTH_TIMEOUT_MS);

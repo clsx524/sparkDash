@@ -88,6 +88,26 @@ test('Apply rejects stale preview revisions without starting a deployment', asyn
   assert.equal(started, 0);
 });
 
+test('Drama is optional, restricted to Atom, and never exposed by the shared speech proxy', async (t) => {
+  const { planner, registry, file, probes } = fixture(t);
+  const liveCatalog = new DeploymentPlanner(registry, planner.models, { file });
+  const catalog = liveCatalog.catalog();
+  assert.equal(catalog.draft.placements.some(({ serviceId }) => serviceId === 'drama-tts'), false);
+  assert.equal(catalog.services.find(({ id }) => id === 'drama-tts')?.onlyHost, 'atom');
+  const draft = (sparkId) => ({ recipeId: null, placements: [{ serviceId: 'drama-tts', sparkId }] });
+  assert.throws(() => liveCatalog.compile(draft('one')), /only be deployed on Atom/);
+  assert.equal(probes(), 0);
+  const plan = liveCatalog.compile(draft('atom'));
+  assert.deepEqual(plan.target.nodes.map(({ imageId, modelIds }) => ({ imageId, modelIds })), [
+    { imageId: 'drama-tts', modelIds: ['drama-3'] },
+  ]);
+  liveCatalog.commit(plan);
+  const app = express();
+  liveCatalog.register(app, () => { throw new Error('Not an Apply test'); });
+  const front = await listen(t, app);
+  assert.equal((await fetch(front + '/inference/tts/v1/audio/speech', { method: 'POST' })).status, 503);
+});
+
 test('stable inference route streams binary uploads and follows only committed placements', async (t) => {
   const { planner, services } = fixture(t);
   const received = [];

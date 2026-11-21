@@ -1550,8 +1550,10 @@ selectors and launcher `nodes[].sparkId` in the recipe definition. Overrides via
   `/inference/{embeddings,tts,asr,images}` use only committed placements and return
   503 when unassigned. A draft never changes serving routes.
 - The default includes Qwen ASR on Spark 1 and Qwen TTS/embedding on Spark 2.
-  Qwen Image is available but unassigned. Drama is disabled. Canonical weights
-  stay on Atom; only the selected DeepSeek cache is kept on Spark 1/2.
+  Qwen Image and Fish Audio Drama 3 are unassigned by default. Drama uses the
+  official unpruned FP8 checkpoint and can be placed on Atom only. Its API
+  listens on Atom's private Tailscale port 8894, not the shared speech proxy.
+  Canonical weights stay on Atom.
   TTS uses a 6% talker and 2% audio-decoder GPU allocation, keeping 4096 talker
   tokens and four concurrent sequences. Its planner budgets are 11 GiB running
   and 12 GiB startup. Provision the TTS runtime YAML and redeploy the updated

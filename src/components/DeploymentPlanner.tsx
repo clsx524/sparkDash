@@ -35,7 +35,8 @@ export function DeploymentPlanner({ disabled, applying, onApply, onPrepareImages
     setPreview(null);
   }
   function place(serviceId: string, sparkId: string) {
-    if (!input || plannerDisabled || !catalog?.services.some((service) => service.id === serviceId)) return;
+    const service = catalog?.services.find((item) => item.id === serviceId);
+    if (!input || plannerDisabled || !service || (sparkId && service.onlyHost && sparkId !== service.onlyHost)) return;
     const placements = input.placements.filter((placement) => placement.serviceId !== serviceId);
     if (sparkId) placements.push({ serviceId, sparkId });
     change({ ...input, placements });
@@ -66,7 +67,8 @@ export function DeploymentPlanner({ disabled, applying, onApply, onPrepareImages
           onChange={(event) => place(service.id, event.target.value)}
           className="mt-1 w-full rounded border border-border bg-surface p-1.5 text-xs text-text-strong">
           <option value="">Not deployed</option>
-          {catalog?.hosts.map((item) => <option key={item.id} value={item.id}>{item.name || item.id}</option>)}
+          {catalog?.hosts.filter((item) => !service.onlyHost || item.id === service.onlyHost)
+            .map((item) => <option key={item.id} value={item.id}>{item.name || item.id}</option>)}
         </select>
       </label>
     </article>;

@@ -45,7 +45,7 @@ export class DeploymentPlanner {
   catalog() {
     return {
       recipes: this.recipes.all().map(({ id, label, tp, requiredNodes, resources }) => ({ id, label, tp, requiredNodes, resources })),
-      services: this.services.map(({ id, label, memoryGiB, startupGiB }) => ({ id, label, memoryGiB, startupGiB })),
+      services: this.services.map(({ id, label, memoryGiB, startupGiB, onlyHost }) => ({ id, label, memoryGiB, startupGiB, onlyHost })),
       hosts: this.recipes.sparkRegistry.sparks.filter((host) => host.platform !== 'darwin' && host.platform !== 'windows' && host.modelFolder).map(({ id, name, modelFolder }) => ({ id, name, modelFolder })),
       draft: this.state.draft, active: this.state.active,
       budgetBasis: 'Disk counts files still to stage, prepared images still to import, runtime headroom and a 10 GiB reserve. RAM estimates are not enforced.',
@@ -73,6 +73,7 @@ export class DeploymentPlanner {
       const service = this.services.find((item) => item.id === placement.serviceId);
       const host = this.recipes.sparkRegistry.getSpark(placement.sparkId);
       if (!service || !host || host.platform === 'darwin' || host.platform === 'windows' || !host.modelFolder) throw new Error('Unknown service or incompatible host');
+      if (service.onlyHost && service.onlyHost !== host.id) throw new Error(`${service.label} can only be deployed on ${service.onlyHost === 'atom' ? 'Atom' : service.onlyHost}`);
       if (seen.has(service.id)) throw new Error(`Duplicate placement: ${service.id}`);
       seen.add(service.id);
       if (!required.some((item) => item.id === host.id)) required.push(host);
@@ -82,8 +83,12 @@ export class DeploymentPlanner {
       const cmd = `SPARKDASH_MODEL_ROOT=${shQuotePath(modelRoot)} python3 ${RUNTIME}/model-runtime.py`;
       target.nodes.push({ role: service.id, sparkId: host.id, serviceId: service.id, imageId: service.imageId || service.id, workdir: RUNTIME,
         prepareCmd: `${cmd} prepare ${service.id}`, startCmd: `${cmd} start ${service.id}`, stopCmd: `${cmd} stop ${service.id}`,
-        statusCmd: `${cmd} status ${service.id}`, runningPattern: '^running$', containerName: service.id,
-        llmPort: service.port, healthPath: service.healthPath, modelIds: service.modelIds,
+        statusCmd: service.containerHealth
+          ? `docker inspect --format '{{if .State.Running}}{{.State.Health.Status}}{{else}}stopped{{end}}' ${quote(service.id)}`
+          : `${cmd} status ${service.id}`,
+        runningPattern: service.containerHealth ? '^healthy$' : '^running$', containerName: service.id,
+        llmPort: service.containerHealth ? undefined : service.port, healthPath: service.healthPath,
+        containerHealth: service.containerHealth, healthTimeoutMs: service.healthTimeoutMs, modelIds: service.modelIds,
         memoryGiB: service.memoryGiB, startupGiB: service.startupGiB, startOrder: 0 });
       return { serviceId: service.id, sparkId: host.id };
     }).sort((a, b) => a.serviceId.localeCompare(b.serviceId));

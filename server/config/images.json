@@ -82,6 +82,13 @@
     "pull": "vllm/vllm-omni:v0.30.0-aarch64"
   },
   {
+    "id": "drama-tts",
+    "image": "drama-tts:local",
+    "context": "drama-tensorfold",
+    "dockerfile": "Dockerfile",
+    "inputs": ["drama-tensorfold/Dockerfile", "drama-tensorfold/entrypoint.py"]
+  },
+  {
     "id": "qwen-image",
     "image": "qwen-image-sd:local",
     "context": ".",

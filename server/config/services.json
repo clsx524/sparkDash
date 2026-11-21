@@ -94,6 +94,18 @@
     ]
   },
   {
+    "id": "drama-tts",
+    "label": "Fish Audio Drama 3 FP8 · private",
+    "defaultHost": null,
+    "onlyHost": "atom",
+    "containerHealth": true,
+    "healthTimeoutMs": 960000,
+    "memoryGiB": 54,
+    "startupGiB": 54,
+    "modelIds": ["drama-3"],
+    "args": ["--checkpoint", "/models/drama-3"]
+  },
+  {
     "id": "qwen-image",
     "label": "Qwen Image 2.1 Turbo",
     "defaultHost": null,

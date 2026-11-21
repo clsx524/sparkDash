@@ -2918,7 +2918,7 @@ async function startRecipeApply(recipeId, preparedPlan = null) {
   recipeApply = operation;
   const applying = switchRecipe(recipeRegistry, modelRegistry, recipe.id, onProgress, {
     plan,
-    ownedContainers: [...deploymentPlanner.services.map((service) => service.id), "drama-tts", "semif"],
+    ownedContainers: [...deploymentPlanner.services.map((service) => service.id), "semif"],
     cleanupHostIds: [...(deploymentPlanner.state.active?.placements.map((item) => item.sparkId) || []), modelRegistry.getRegistryConfig().hostId].filter(Boolean),
     commitPlan: () => deploymentPlanner.commit(plan),
     validatePlan: async () => {
