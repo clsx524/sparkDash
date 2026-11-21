@@ -1562,17 +1562,17 @@ selectors and launcher `nodes[].sparkId` in the recipe definition. Overrides via
 
 #### Persistent Apply sessions
 
-The recipe dialog replaces the single progress banner with two independent views:
+**Current Apply** shows the latest session and its final result. While a run
+is active, progress fills the dialog and the topology planner is hidden.
+Refreshing the browser restores the dialog and reloads the session.
 
-- **Current Apply** shows only the latest session, including its final result,
-  until another Apply starts. Refreshing the browser restores the open recipe
-  dialog and reloads the same session from the server.
-- **Apply History** lists prior succeeded, failed, interrupted, and cancelled sessions.
-  Selecting a row opens read-only stage details without replacing Current Apply.
-  The historical selection is remembered across refreshes.
+Select **Apply history** to show prior sessions alongside progress on wide
+screens or below it on narrow screens. Selecting a row shows read-only details;
+the selection survives a refresh, but the history panel opens only on request.
 
-While a session is running, **Current Apply → Cancel Apply** cancels it on the
-server, including after closing and reopening the dialog. The button changes to
+While a session is running, **Cancel Apply** in the dialog's upper-right
+corner cancels the current run on the server, even after closing and reopening
+the dialog. The button changes to
 **Cancelling…** while attached commands and transfers stop; another Apply remains
 blocked until that work has settled. The interrupted stage and session then show
 **cancelled**, retaining their logs and remaining in history after refresh.

@@ -69,8 +69,12 @@ afterEach(() => { cleanupRenders(); vi.useRealTimers(); });
 
 const onClose = () => {};
 function cancelButton(container: HTMLElement): HTMLButtonElement | undefined {
-  return [...container.querySelectorAll<HTMLButtonElement>('[aria-label="Current Apply"] button')]
+  return [...container.querySelectorAll<HTMLButtonElement>('header button')]
     .find((button) => button.textContent === "Cancel Apply" || button.textContent === "Cancelling…");
+}
+
+function historyToggle(container: HTMLElement): HTMLButtonElement {
+  return container.querySelector<HTMLButtonElement>('button[aria-controls="recipe-apply-history"]')!;
 }
 
 function confirmApply(): void {
@@ -95,6 +99,8 @@ describe("persistent recipe Apply views", () => {
     act(() => build.click());
     await flush();
     expect(apply.disabled).toBe(false);
+    act(() => historyToggle(container).click());
+    expect(historyToggle(container).getAttribute("aria-expanded")).toBe("true");
     act(() => { apply.click(); apply.click(); });
     await flush();
     expect(applyDeploymentPlan).not.toHaveBeenCalled();
@@ -103,6 +109,9 @@ describe("persistent recipe Apply views", () => {
     expect(applyDeploymentPlan).toHaveBeenCalledTimes(1);
     expect(applyDeploymentPlan).toHaveBeenCalledWith("plan-v1");
     expect(buttons.every((button) => button.disabled)).toBe(true);
+    expect(historyToggle(container).getAttribute("aria-expanded")).toBe("false");
+    expect(apply.closest("[hidden]")).not.toBeNull();
+    expect(container.querySelector('[aria-label="Current Apply"]')?.textContent).toContain("Starting Apply");
     pending.resolve({ started: true, targetId: "glm", sessionId: "new" });
     await flush();
   });
@@ -117,6 +126,10 @@ describe("persistent recipe Apply views", () => {
     const { container } = render(<RecipesDialog open onClose={onClose} recipeSession={null} />);
     await flush();
     expect(container.querySelector('[aria-label="Current Apply"] [data-session-id]')?.getAttribute("data-session-id")).toBe("current");
+    const history = container.querySelector<HTMLElement>('[aria-label="Apply History"]')!;
+    expect(history.hidden).toBe(true);
+    act(() => historyToggle(container).click());
+    expect(history.hidden).toBe(false);
     expect(container.querySelector('[data-testid="history-detail"]')?.textContent).toContain("Old model");
     expect(container.querySelector('[data-testid="history-detail"]')?.textContent).toContain("Server restarted");
     expect(container.querySelectorAll('[aria-label="Prior Apply sessions"] button')).toHaveLength(1);
@@ -131,12 +144,17 @@ describe("persistent recipe Apply views", () => {
     vi.mocked(fetchRecipeSession).mockImplementation(async (id) => ({ session: id === old.id ? old : live }));
     const { container, root } = render(<RecipesDialog open onClose={onClose} recipeSession={live} />);
     await flush();
+    act(() => historyToggle(container).click());
     act(() => container.querySelector<HTMLButtonElement>('[aria-label="Prior Apply sessions"] button')!.click());
     await flush();
     expect(localStorage.getItem("recipe-apply-history-selection")).toBe("old");
     expect(container.querySelector('[aria-label="Current Apply"]')?.textContent).toContain("Pending nodes: Spark 2");
     expect(container.querySelector('[data-testid="history-detail"]')?.textContent).toContain("Old model");
     expect([...container.querySelectorAll<HTMLButtonElement>('[aria-label="Deployment topology planner"] button')].every((button) => button.disabled)).toBe(true);
+    act(() => historyToggle(container).click());
+    expect(container.querySelector<HTMLElement>('[aria-label="Apply History"]')?.hidden).toBe(true);
+    expect(container.querySelector('[aria-label="Current Apply"]')?.textContent).toContain("Pending nodes: Spark 2");
+    act(() => historyToggle(container).click());
     const complete = { ...live, version: 2, status: "succeeded" as const, finishedAt: 4000 };
     vi.mocked(fetchRecipeSession).mockImplementation(async (id) => ({ session: id === old.id ? old : complete }));
     act(() => root.render(<RecipesDialog open onClose={onClose} recipeSession={complete} />));
@@ -157,6 +175,7 @@ describe("persistent recipe Apply views", () => {
     vi.mocked(cancelRecipeSession).mockReturnValue(post.promise);
     const { container } = render(<RecipesDialog open onClose={onClose} recipeSession={live} />);
     await flush();
+    act(() => historyToggle(container).click());
     expect(container.querySelector('[data-testid="history-detail"]')?.textContent).toContain("Old model");
     expect(container.querySelector('[aria-label="Apply History"]')?.textContent).toContain("cancelled");
     expect([...container.querySelectorAll('[aria-label="Apply History"] button')].some((button) => button.textContent === "Cancel Apply")).toBe(false);

@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { RecipeSessionSummary } from "../api/types";
 import { useModalPresence } from "../hooks/useModalPresence";
 import { useRecipeSessions } from "../hooks/useRecipeSessions";
@@ -11,11 +11,19 @@ interface RecipesDialogProps {
   recipeSession: RecipeSessionSummary | null | undefined;
 }
 
+const CANCEL_NOTE = "Cancellation stops remaining Apply work. Completed changes and already-started services are not rolled back; nodes stay powered on and downloaded weights are kept.";
 
 export function RecipesDialog({ open, onClose, recipeSession }: RecipesDialogProps) {
   const sessions = useRecipeSessions(open, recipeSession);
   const { current, history, selectedId, selected, selectionError, loading, ready, error, pendingId, running, cancelPending, cancelling, cancelError } = sessions;
   const { mounted, visible } = useModalPresence(open);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const scrollArea = useRef<HTMLDivElement>(null);
+  const applying = running || pendingId != null;
+  useLayoutEffect(() => {
+    if (!open || applying) setHistoryOpen(false);
+    if (open && applying && scrollArea.current) scrollArea.current.scrollTop = 0;
+  }, [open, applying]);
   useEffect(() => {
     if (!open) return;
     const handler = (event: KeyboardEvent) => { if (event.key === "Escape") onClose(); };
@@ -27,32 +35,42 @@ export function RecipesDialog({ open, onClose, recipeSession }: RecipesDialogPro
   return (
     <div className={`settings-overlay fixed inset-0 z-50 flex items-center justify-center bg-black/55 p-3 sm:p-4${visible ? " is-open" : ""}`}
       onClick={(event) => { if (event.target === event.currentTarget) onClose(); }}>
-      <div role="dialog" aria-modal="true" aria-labelledby="recipes-title" className="settings-panel recipes-panel w-full p-4 sm:p-6">
-        <h2 id="recipes-title" className="mb-1 shrink-0 text-sm font-semibold text-text-strong">Model deployments</h2>
-        <p className="mb-4 shrink-0 text-[10px] text-muted">
+      <div role="dialog" aria-modal="true" aria-labelledby="recipes-title"
+        className={`settings-panel recipes-panel w-full p-4 sm:p-6${applying ? " h-[min(90dvh,50rem)]" : ""}`}>
+        <header className="mb-3 flex shrink-0 flex-wrap items-center justify-between gap-x-3 gap-y-2">
+          <h2 id="recipes-title" className="text-sm font-semibold text-text-strong">Model deployments</h2>
+          <div className="ml-auto flex items-center gap-2">
+            <button type="button" aria-controls="recipe-apply-history" aria-expanded={historyOpen}
+              onClick={() => setHistoryOpen((value) => !value)}
+              className="rounded border border-border bg-surface-elevated px-3 py-1.5 text-xs text-text-strong hover:bg-surface-hover">
+              {historyOpen ? "Hide history" : "Apply history"}
+            </button>
+            {current && running && <>
+              <button type="button" onClick={() => { void sessions.cancel(current.id); }}
+                disabled={cancelPending || cancelling} aria-describedby="cancel-apply-note" title={CANCEL_NOTE}
+                className="rounded border border-danger/40 px-3 py-1.5 text-xs font-semibold text-danger hover:bg-danger/10 disabled:opacity-50">
+                {cancelling ? "Cancelling…" : "Cancel Apply"}
+              </button>
+              <span id="cancel-apply-note" className="sr-only">{CANCEL_NOTE}</span>
+            </>}
+          </div>
+        </header>
+        {!applying && <p className="mb-4 shrink-0 text-[10px] text-muted">
           Plan placements, check host capacity, then apply small services before the selected large model.
-        </p>
-        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
+        </p>}
+        <div ref={scrollArea} className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
           {error && <div role="alert" className="mb-3 rounded bg-danger/20 px-3 py-2 text-xs text-danger">
             {error} <button type="button" onClick={sessions.retry} className="underline">Retry loading</button>
           </div>}
           {loading && <p className="mb-3 text-xs text-muted">Loading persisted Apply sessions…</p>}
-          <div className="grid min-w-0 gap-4 lg:grid-cols-2">
+          <div className={`grid min-w-0 gap-3${historyOpen ? " lg:grid-cols-2" : ""}`}>
             <section aria-label="Current Apply" className="min-w-0 rounded border border-border p-3">
               <h3 className="mb-2 text-xs font-semibold text-text-strong">Current Apply</h3>
-              <p className="mb-2 text-[10px] text-muted">Latest session; stays here until the next Apply.</p>
-              {current && running && <div className="mb-3 rounded border border-danger/40 bg-danger/10 p-3">
-                <button type="button" onClick={() => { void sessions.cancel(current.id); }}
-                  disabled={cancelPending || cancelling}
-                  className="rounded bg-danger px-3 py-1.5 text-xs font-semibold text-white disabled:opacity-50">
-                  {cancelling ? "Cancelling…" : "Cancel Apply"}
-                </button>
-                <p className="mt-2 text-[10px] text-muted">Cancellation stops remaining Apply work. Completed changes and already-started services are not rolled back; nodes stay powered on and downloaded weights are kept.</p>
-              </div>}
               {cancelError && <p role="alert" className="mb-2 text-xs text-danger">Could not cancel Apply: {cancelError}. Try Cancel Apply again, or retry loading to check the server state. <button type="button" className="underline" onClick={sessions.retry}>Retry loading</button></p>}
-              {current ? <RecipeSessionDetails key={current.id} session={current} /> : <p className="text-xs text-muted">No Apply session recorded.</p>}
+              {applying && !running ? <p className="text-xs text-muted">Starting Apply…</p>
+                : current ? <RecipeSessionDetails key={current.id} session={current} /> : <p className="text-xs text-muted">No Apply session recorded.</p>}
             </section>
-            <section aria-label="Apply History" className="min-w-0 rounded border border-border p-3">
+            <section id="recipe-apply-history" aria-label="Apply History" hidden={!historyOpen} className="min-w-0 rounded border border-border p-3">
               <h3 className="mb-2 text-xs font-semibold text-text-strong">Apply History</h3>
               <p className="mb-2 text-[10px] text-muted">Prior completed, failed, interrupted, and cancelled sessions. Details are read-only.</p>
               {history.length === 0 && <p className="text-xs text-muted">No prior sessions.</p>}
@@ -71,8 +89,10 @@ export function RecipesDialog({ open, onClose, recipeSession }: RecipesDialogPro
               </div>}
             </section>
           </div>
-          <DeploymentPlanner disabled={running || cancelPending || pendingId != null || !ready}
-            applying={running || pendingId != null} onApply={sessions.apply} onPrepareImages={sessions.prepareImages} />
+          <div hidden={applying}>
+            <DeploymentPlanner disabled={applying || cancelPending || !ready}
+              applying={applying} onApply={sessions.apply} onPrepareImages={sessions.prepareImages} />
+          </div>
         </div>
         <div className="mt-3 flex shrink-0 justify-end border-t border-border pt-3">
           <button type="button" onClick={onClose} className="rounded border border-border bg-surface-elevated px-3 py-1.5 text-xs text-muted hover:bg-surface-hover">Close</button>
