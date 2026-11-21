@@ -1206,6 +1206,8 @@ export function fetchAtticInstallFlags(id: string): Promise<{ passwordAllowed: b
 
 export function fetchAtticInstallStatus(id: string): Promise<{ installed: boolean | null }> {
   return apiFetch(`/api/sparks/${encodeURIComponent(id)}/attic/status`);
+}
+
 // ─── Recipe registry / switching ──────────────────────────
 /** Live-inferred list of deployment recipes plus which one (if any) is running. */
 export function fetchRecipes(): Promise<RecipeListResponse> {
