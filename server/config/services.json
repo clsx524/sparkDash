@@ -7,7 +7,6 @@
     "healthPath": "/health",
     "memoryGiB": 3,
     "startupGiB": 4,
-    "diskGiB": 12,
     "modelIds": [
       "Qwen3-Embedding-0.6B"
     ],
@@ -28,7 +27,6 @@
     "healthPath": "/v1/models",
     "memoryGiB": 8,
     "startupGiB": 9,
-    "diskGiB": 40,
     "entrypoint": "vllm",
     "modelIds": [
       "Qwen3-ASR-1.7B-NVFP4"
@@ -58,7 +56,6 @@
     "healthPath": "/v1/audio/voices",
     "memoryGiB": 11,
     "startupGiB": 12,
-    "diskGiB": 55,
     "entrypoint": "/bin/bash",
     "modelIds": [
       "Qwen3-TTS-12Hz-1.7B-NVFP4"
@@ -76,7 +73,6 @@
     "healthPath": "/",
     "memoryGiB": 13,
     "startupGiB": 14,
-    "diskGiB": 60,
     "modelIds": [
       "Qwen-Image-2.1-Turbo-Denoiser",
       "Qwen-Image-2.1-Turbo-Encoder",

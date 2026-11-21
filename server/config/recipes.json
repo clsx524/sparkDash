@@ -18,15 +18,15 @@
     "resources": {
       "spark-1": {
         "memoryGiB": 100,
-        "diskGiB": 270
+        "runtimeDiskGiB": 70
       },
       "spark-2": {
         "memoryGiB": 92,
-        "diskGiB": 270
+        "runtimeDiskGiB": 70
       },
       "atom": {
         "memoryGiB": 92,
-        "diskGiB": 130
+        "runtimeDiskGiB": 70
       }
     },
     "nodes": [
@@ -108,15 +108,15 @@
     "resources": {
       "spark-1": {
         "memoryGiB": 100,
-        "diskGiB": 540
+        "runtimeDiskGiB": 10
       },
       "spark-2": {
         "memoryGiB": 92,
-        "diskGiB": 540
+        "runtimeDiskGiB": 10
       },
       "atom": {
         "memoryGiB": 92,
-        "diskGiB": 65
+        "runtimeDiskGiB": 10
       }
     },
     "nodes": [
@@ -217,11 +217,11 @@
     "resources": {
       "spark-1": {
         "memoryGiB": 96,
-        "diskGiB": 210
+        "runtimeDiskGiB": 10
       },
       "spark-2": {
         "memoryGiB": 96,
-        "diskGiB": 210
+        "runtimeDiskGiB": 10
       }
     }
   },
@@ -273,11 +273,11 @@
     "resources": {
       "spark-1": {
         "memoryGiB": 99,
-        "diskGiB": 170
+        "runtimeDiskGiB": 10
       },
       "spark-2": {
         "memoryGiB": 99,
-        "diskGiB": 170
+        "runtimeDiskGiB": 10
       }
     }
   },
@@ -312,7 +312,7 @@
     "resources": {
       "spark-2": {
         "memoryGiB": 104,
-        "diskGiB": 180
+        "runtimeDiskGiB": 10
       }
     }
   },
@@ -366,11 +366,11 @@
     "resources": {
       "spark-1": {
         "memoryGiB": 104,
-        "diskGiB": 535
+        "runtimeDiskGiB": 115
       },
       "spark-2": {
         "memoryGiB": 104,
-        "diskGiB": 535
+        "runtimeDiskGiB": 115
       }
     }
   }

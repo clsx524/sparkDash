@@ -15,14 +15,26 @@ function fixture(t) {
   const registry = new RecipeRegistry({ sparks, getSpark: (id) => sparks.find((spark) => spark.id === id) });
   registry._recipes = [{ id: 'distributed', label: 'Distributed', tp: 3,
     requiredNodes: sparks.map((spark) => ({ sparkId: spark.id })),
-    resources: Object.fromEntries(sparks.map((spark) => [spark.id, { memoryGiB: 90, diskGiB: 150 }])),
+    resources: Object.fromEntries(sparks.map((spark) => [spark.id, { memoryGiB: 90, runtimeDiskGiB: 10 }])),
     nodes: [{ role: 'head', sparkId: 'one', modelIds: [] }] }];
-  const services = [{ id: 'qwen3-asr', label: 'ASR', port: 8892, healthPath: '/v1/models', memoryGiB: 8, startupGiB: 10, diskGiB: 4, modelIds: ['asr'] }];
-  const measurements = new Map(sparks.map((spark) => [spark.id, { totalGiB: 112, availableGiB: 105, diskFreeGiB: 400, stagedGiB: 0, evictableGiB: 0, machine: 'aarch64' }]));
+  const services = [{ id: 'qwen3-asr', label: 'ASR', port: 8892, healthPath: '/v1/models', memoryGiB: 8, startupGiB: 10, modelIds: ['asr'] }];
+  const GiB = 2 ** 30;
+  const measurements = new Map(sparks.map((spark) => [spark.id, {
+    totalGiB: 112, availableGiB: 105, machine: 'aarch64',
+    volumes: [{ paths: { models: '/models' }, freeBytes: 400 * GiB, evictableBytes: 0, runtimeBytes: 10 * GiB }],
+  }]));
   let probes = 0;
   const models = { getRegistryConfig: () => ({ hostId: 'atom', directory: '/registry' }), getModel: (id) => ({ id, subfolder: id }) };
   const planner = new DeploymentPlanner(registry, models, { file: path.join(directory, 'plan.json'), services,
-    execute: async (spark) => { probes++; return JSON.stringify(measurements.get(spark.id)); } });
+    execute: async (spark, command) => {
+      probes++;
+      if (command.includes("' inventory '")) {
+        return JSON.stringify({ models: { asr: [{ path: 'model.safetensors', size: GiB, mtime: 1 }] },
+          images: { distributed: { bytes: 11 * GiB }, 'qwen3-asr': { bytes: 22 * GiB } } });
+      }
+      if (!measurements.has(spark.id)) throw new Error('host unavailable');
+      return JSON.stringify(measurements.get(spark.id));
+    } });
   return { planner, registry, measurements, services, probes: () => probes, file: path.join(directory, 'plan.json') };
 }
 
@@ -39,10 +51,15 @@ test('memory estimates do not block deployment; disk capacity and measurement fa
   measurements.get('one').totalGiB = 16;
   measurements.get('one').availableGiB = 0.1;
   assert.equal((await planner.preview(input)).valid, true);
-  measurements.get('one').diskFreeGiB = 160;
-  assert.match((await planner.preview(input)).errors.join(';'), /additional disk/);
-  measurements.get('one').diskFreeGiB = 164;
+  const [disk] = measurements.get('one').volumes;
+  disk.freeBytes = 19 * 2 ** 30;
+  assert.match((await planner.preview(input)).errors.join(';'), /10.0 GiB additional disk.*0.0 weights, 0.0 images, 10.0 runtime/);
+  disk.freeBytes = 20 * 2 ** 30;
   assert.equal((await planner.preview(input)).valid, true);
+  measurements.get('one').volumes.push({
+    paths: { images: '/var/lib/docker' }, freeBytes: 20 * 2 ** 30, evictableBytes: 0, imageBytes: 11 * 2 ** 30,
+  });
+  assert.match((await planner.preview(input)).errors.join(';'), /10 GiB reserve on \/var\/lib\/docker/);
   measurements.delete('one');
   assert.match((await planner.preview(input)).errors.join(';'), /Cannot measure host/);
 });

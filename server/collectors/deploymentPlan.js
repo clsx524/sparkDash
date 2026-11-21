@@ -8,11 +8,21 @@ import { sshExec } from './ssh.js';
 import { shQuotePath } from './modelSync.js';
 import { llmProbeHost } from './llmHost.js';
 import { isAllowedTargetHost } from '../validate.js';
+import { filterManifestToIncluded } from './ModelRegistry.js';
+import { assertSafeModelFolder, assertSafeSubfolder } from './modelPaths.js';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const RUNTIME = '~/.local/share/sparkdash-models';
+const DISK_PROBE = fs.readFileSync(path.join(ROOT, 'deployment_disk.py'), 'utf8');
 const quote = (value) => "'" + String(value).replaceAll("'", "'\\''") + "'";
 const hash = (value) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+const GiB = 2 ** 30;
+const DISK_RESERVE = 10 * GiB;
+
+function diskProbe(execute, host, action, request, signal) {
+  return execute(host, `PYTHONPATH="$HOME/.local/share/sparkdash-models" python3 -B -c ${quote(DISK_PROBE)} ${action} ${quote(JSON.stringify(request))}`,
+    { timeoutMs: 30_000, cancelRemote: true, signal }).then(JSON.parse);
+}
 
 /** One draft, one committed placement, and the existing Apply executor. No scheduler. */
 export class DeploymentPlanner {
@@ -35,10 +45,10 @@ export class DeploymentPlanner {
   catalog() {
     return {
       recipes: this.recipes.all().map(({ id, label, tp, requiredNodes, resources }) => ({ id, label, tp, requiredNodes, resources })),
-      services: this.services.map(({ id, label, memoryGiB, startupGiB, diskGiB }) => ({ id, label, memoryGiB, startupGiB, diskGiB })),
+      services: this.services.map(({ id, label, memoryGiB, startupGiB }) => ({ id, label, memoryGiB, startupGiB })),
       hosts: this.recipes.sparkRegistry.sparks.filter((host) => host.platform !== 'darwin' && host.platform !== 'windows' && host.modelFolder).map(({ id, name, modelFolder }) => ({ id, name, modelFolder })),
       draft: this.state.draft, active: this.state.active,
-      budgetBasis: 'Memory estimates are informational only. Apply does not reserve RAM or stop models for low memory; native allocation errors or OOM determine failure.',
+      budgetBasis: 'Disk counts files still to stage, prepared images still to import, runtime headroom and a 10 GiB reserve. RAM estimates are not enforced.',
     };
   }
 
@@ -74,7 +84,7 @@ export class DeploymentPlanner {
         prepareCmd: `${cmd} prepare ${service.id}`, startCmd: `${cmd} start ${service.id}`, stopCmd: `${cmd} stop ${service.id}`,
         statusCmd: `${cmd} status ${service.id}`, runningPattern: '^running$', containerName: service.id,
         llmPort: service.port, healthPath: service.healthPath, modelIds: service.modelIds,
-        memoryGiB: service.memoryGiB, startupGiB: service.startupGiB, diskGiB: service.diskGiB, startOrder: 0 });
+        memoryGiB: service.memoryGiB, startupGiB: service.startupGiB, startOrder: 0 });
       return { serviceId: service.id, sparkId: host.id };
     }).sort((a, b) => a.serviceId.localeCompare(b.serviceId));
     if (target.nodes.some((node) => node.modelIds?.length)) {
@@ -83,15 +93,17 @@ export class DeploymentPlanner {
       if (!required.some((host) => host.id === source.id)) required.push(source);
     }
     if (!required.length) throw new Error('Select a recipe or at least one service');
-    const resources = new Map(required.map((host) => [host.id, { memoryGiB: 0, startupExtraGiB: 0, diskGiB: 0, workloads: [] }]));
+    const resources = new Map(required.map((host) => [host.id, { memoryGiB: 0, startupExtraGiB: 0, runtimeDiskGiB: 0, workloads: [] }]));
     if (base) {
       for (const host of this.recipes.resolveRequiredNodes(base)) {
         const budget = base.resources?.[host.id];
-        if (!budget || !Number.isFinite(budget.memoryGiB) || !Number.isFinite(budget.diskGiB)) throw new Error(`Recipe ${base.id} needs an explicit resource budget for ${host.id}`);
+        if (!budget || !Number.isFinite(budget.memoryGiB) || !Number.isFinite(budget.runtimeDiskGiB) || budget.runtimeDiskGiB < 0) {
+          throw new Error(`Recipe ${base.id} needs an explicit memoryGiB and runtimeDiskGiB budget for ${host.id}`);
+        }
         const resource = resources.get(host.id);
         resource.memoryGiB += budget.memoryGiB;
         resource.startupExtraGiB = Math.max(resource.startupExtraGiB, (budget.startupGiB ?? budget.memoryGiB) - budget.memoryGiB);
-        resource.diskGiB += budget.diskGiB;
+        resource.runtimeDiskGiB += budget.runtimeDiskGiB;
         resource.workloads.push(base.label);
       }
     }
@@ -99,7 +111,6 @@ export class DeploymentPlanner {
       const resource = resources.get(node.sparkId);
       resource.memoryGiB += node.memoryGiB;
       resource.startupExtraGiB = Math.max(resource.startupExtraGiB, node.startupGiB - node.memoryGiB);
-      resource.diskGiB += node.diskGiB;
       resource.workloads.push(node.serviceId);
     }
     const normalized = { recipeId: base?.id ?? null, placements };
@@ -109,53 +120,100 @@ export class DeploymentPlanner {
 
   async preview(input, { save = false, signal } = {}) {
     const plan = this.compile(input);
-    const hosts = await Promise.all(plan.requiredNodes.map(async (host) => {
-      const budget = plan.resources.get(host.id);
-      const selected = plan.target.nodes.filter((node) => node.sparkId === host.id).flatMap((node) => node.modelIds || []);
-      const registry = this.models.getRegistryConfig();
-      const modelRoot = host.id === registry.hostId ? registry.directory : host.modelFolder;
-      const folders = [...new Set(selected)].map((id) => this.models.getModel(id)?.subfolder).filter(Boolean);
-      const otherCache = plan.input.recipeId === 'deepseek-v41-flash'
-        ? ['.cache/huggingface/DeepSeek-V4.1-Flash-1017-EXL3-3.5bpw-TensorFold', '.cache/huggingface/sparkdash-tp3']
-        : plan.input.recipeId === 'deepseek-v41-lakyfx-tp3'
-          ? ['.cache/huggingface/tensorfold-dsv41/45ee5d0f', '.cache/huggingface/DeepSeek-V4.1-Flash-1017-EXL3-EAQ-v1-2.9-bpw', '.cache/huggingface/hub/models--Mia-AiLab--DeepSeek-V4.1-Flash-1017-EXL3-EAQ-v1-2.9-bpw', '.cache/huggingface/DeepSeek-V4.1-Flash-1017-Engram-1bae0e1', '.cache/huggingface/hub/models--deepseek-ai--DeepSeek-V4.1-Flash-1017', '.cache/dsv41-tensorfold/rank-cache-45ee5d0f', '.cache/dsv41-tensorfold/engram-1bae0e10'] : [];
-      const otherModelFolders = otherCache.filter((folder) => folder.startsWith('.cache/huggingface/DeepSeek-')).map((folder) => path.posix.basename(folder));
-      const probe = [
-        'import json,os,pathlib,platform,subprocess',
-        `r=pathlib.Path(os.path.expanduser(${JSON.stringify(modelRoot)}))`,
-        'p=r',
-        'while not p.exists(): p=p.parent',
-        's=os.statvfs(p)',
-        "m={line.split(':')[0]:int(line.split()[1])/1024**2 for line in pathlib.Path('/proc/meminfo').read_text().splitlines() if line.startswith(('MemTotal:','MemAvailable:'))}",
-        `folders=[r/f for f in ${JSON.stringify(host.id === registry.hostId ? [] : folders)} if (r/f).is_dir()]`,
-        `if ${JSON.stringify(plan.input.recipeId || '')} == 'deepseek-v41-lakyfx-tp3' and (pathlib.Path.home()/'.cache/huggingface/sparkdash-tp3').is_dir(): folders.append(pathlib.Path.home()/'.cache/huggingface/sparkdash-tp3')`,
-        'def allocated(items):',
-        ' if not items: return 0',
-        " return int(subprocess.check_output(['du','-scB1',*map(str,items)],text=True).splitlines()[-1].split()[0])/2**30",
-        `evict=[pathlib.Path.home()/f for f in ${JSON.stringify(host.id === registry.hostId ? [] : otherCache)} if (pathlib.Path.home()/f).is_dir()]`,
-        `evict.extend(r/f for f in ${JSON.stringify(host.id === registry.hostId ? [] : otherModelFolders)} if (r/f).is_dir())`,
-        "print(json.dumps(dict(totalGiB=m['MemTotal'],availableGiB=m['MemAvailable'],diskFreeGiB=s.f_bavail*s.f_frsize/2**30,stagedGiB=allocated(folders),evictableGiB=allocated(evict),machine=platform.machine())))",
-      ].join('\n');
+    const registry = this.models.getRegistryConfig();
+    const requests = new Map();
+    const folders = new Set();
+    const images = new Set();
+    const errors = [];
+    for (const node of plan.target.nodes) {
+      const models = (node.modelIds || []).map((id) => {
+        const model = this.models.getModel(id);
+        if (!model) {
+          errors.push(`Register model ${id} before applying`);
+          return null;
+        }
+        const folder = assertSafeSubfolder(model.subfolder);
+        folders.add(folder);
+        return { id, folder, pattern: node.modelFiles?.[id] };
+      }).filter(Boolean);
+      images.add(node.imageId);
+      if (!requests.has(node.sparkId)) requests.set(node.sparkId, []);
+      requests.get(node.sparkId).push({ models, imageId: node.imageId });
+    }
+    let inventory = { models: {}, images: {} };
+    if (!errors.length && (folders.size || images.size)) {
+      const source = this.recipes.sparkRegistry.getSpark(registry.hostId);
       try {
-        const measured = JSON.parse(await this.execute(host, `python3 -c ${quote(probe)}`, { timeoutMs: 20_000, cancelRemote: true, signal }));
-        if (![measured.diskFreeGiB, measured.stagedGiB, measured.evictableGiB].every(Number.isFinite)) throw new Error('Invalid host disk measurement');
+        if (!source) throw new Error('Configure Atom as the canonical Model Registry');
+        inventory = await diskProbe(this.execute, source, 'inventory', {
+          root: assertSafeModelFolder(registry.directory), folders: [...folders], images: [...images],
+        }, signal);
+      } catch (error) {
+        signal?.throwIfAborted();
+        errors.push(`Cannot inventory Atom artifacts: ${error.message}`);
+      }
+    }
+    const hosts = errors.length ? [] : await Promise.all(plan.requiredNodes.map(async (host) => {
+      const budget = plan.resources.get(host.id);
+      const modelRoot = host.id === registry.hostId ? registry.directory : host.modelFolder;
+      const files = new Map();
+      const localImages = {};
+      try {
+        for (const node of requests.get(host.id) ?? []) {
+          localImages[node.imageId] = inventory.images[node.imageId];
+          for (const { id, folder, pattern } of node.models) {
+            const selected = filterManifestToIncluded(inventory.models[folder], pattern);
+            if (!selected.length) throw new Error(`No selected model files for ${id}`);
+            if (host.id !== registry.hostId) {
+              for (const file of selected) {
+                const relative = `${folder}/${file.path}`;
+                files.set(relative, { ...file, path: relative });
+              }
+            }
+          }
+        }
+        const otherCache = plan.input.recipeId === 'deepseek-v41-flash'
+          ? ['.cache/huggingface/DeepSeek-V4.1-Flash-1017-EXL3-3.5bpw-TensorFold', '.cache/huggingface/sparkdash-tp3']
+          : plan.input.recipeId === 'deepseek-v41-lakyfx-tp3'
+            ? ['.cache/huggingface/tensorfold-dsv41/45ee5d0f', '.cache/huggingface/DeepSeek-V4.1-Flash-1017-EXL3-EAQ-v1-2.9-bpw', '.cache/huggingface/hub/models--Mia-AiLab--DeepSeek-V4.1-Flash-1017-EXL3-EAQ-v1-2.9-bpw', '.cache/huggingface/DeepSeek-V4.1-Flash-1017-Engram-1bae0e1', '.cache/huggingface/hub/models--deepseek-ai--DeepSeek-V4.1-Flash-1017', '.cache/dsv41-tensorfold/rank-cache-45ee5d0f', '.cache/dsv41-tensorfold/engram-1bae0e10'] : [];
+        const evict = host.id === registry.hostId ? [] : [
+          ...otherCache.map((folder) => `~/${folder}`),
+          ...otherCache.filter((folder) => folder.startsWith('.cache/huggingface/DeepSeek-'))
+            .map((folder) => `${modelRoot}/${path.posix.basename(folder)}`),
+        ];
+        const { volumes, ...measured } = await diskProbe(this.execute, host, 'measure', {
+          root: assertSafeModelFolder(modelRoot), files: [...files.values()], images: localImages,
+          runtimeBytes: budget.runtimeDiskGiB * GiB, evict,
+        }, signal);
         const neededGiB = budget.memoryGiB + budget.startupExtraGiB;
-        const additionalDiskGiB = Math.max(0, budget.diskGiB - measured.stagedGiB);
         const errors = [];
         if (!['aarch64', 'arm64'].includes(measured.machine)) errors.push('The supplied runtime images require ARM64');
-        if (additionalDiskGiB + 10 > measured.diskFreeGiB + measured.evictableGiB) errors.push(`Needs ${additionalDiskGiB.toFixed(1)} GiB additional disk plus 10 GiB reserve after planned cache eviction`);
-        return { id: host.id, name: host.name || host.id, ...budget, ...measured, neededGiB, additionalDiskGiB, errors };
+        let additionalDiskGiB = 0;
+        let diskFreeGiB = 0;
+        for (const { paths, freeBytes, evictableBytes, weightBytes = 0, imageBytes = 0, runtimeBytes = 0 } of volumes) {
+          if (![freeBytes, evictableBytes, weightBytes, imageBytes, runtimeBytes].every((value) => Number.isSafeInteger(value) && value >= 0)) {
+            throw new Error('Invalid host disk measurement');
+          }
+          const needed = weightBytes + imageBytes + runtimeBytes;
+          additionalDiskGiB += needed / GiB;
+          diskFreeGiB += freeBytes / GiB;
+          if (needed && needed + DISK_RESERVE > freeBytes + evictableBytes) {
+            errors.push(`Needs ${(needed / GiB).toFixed(1)} GiB additional disk plus 10 GiB reserve on ${Object.values(paths).join(', ')} ` +
+              `(${(weightBytes / GiB).toFixed(1)} weights, ${(imageBytes / GiB).toFixed(1)} images, ${(runtimeBytes / GiB).toFixed(1)} runtime)`);
+          }
+        }
+        return { id: host.id, name: host.name || host.id, ...budget, ...measured, volumes, neededGiB, additionalDiskGiB, diskFreeGiB, errors };
       } catch (error) {
         return { id: host.id, name: host.name || host.id, ...budget, errors: [`Cannot measure host: ${error.message}`] };
       }
     }));
     signal?.throwIfAborted();
-    const errors = hosts.flatMap((host) => host.errors.map((error) => `${host.name}: ${error}`));
-    for (const node of plan.target.nodes) for (const id of node.modelIds || []) if (!this.models.getModel(id)) errors.push(`Register model ${id} before applying`);
+    for (const host of hosts) errors.push(...host.errors.map((error) => `${host.name}: ${error}`));
     const steps = [
       'Verify that all selected runtime images were prepared on Atom and their RDMA sources are available',
       'Stop conflicting model containers only; unrelated containers and host NFS remain untouched',
-      ...(plan.input.recipeId?.startsWith('deepseek-') ? ['Evict the other DeepSeek deployment cache on Spark1/2 only; preserve Atom registry weights'] : []),
+      ...(['deepseek-v41-flash', 'deepseek-v41-lakyfx-tp3'].includes(plan.input.recipeId)
+        ? ['Evict the other DeepSeek deployment cache on Spark1/2 only; preserve Atom registry weights'] : []),
       'Import the selected prepared images through NFS/RDMA and stage the selected weights; no worker image builds or pulls',
       'Start and warm all selected small services concurrently',
       ...(plan.input.recipeId ? ['Start the selected large model after every small service is healthy; wait for serving readiness'] : []),

@@ -6,7 +6,7 @@ export interface DeploymentInput {
 }
 export interface DeploymentCatalog {
   recipes: Array<{ id: string; label: string; tp: number; requiredNodes: RecipeRequiredNode[] }>;
-  services: Array<{ id: string; label: string; memoryGiB: number; startupGiB: number; diskGiB: number }>;
+  services: Array<{ id: string; label: string; memoryGiB: number; startupGiB: number }>;
   hosts: Array<{ id: string; name: string; modelFolder: string }>;
   draft: DeploymentInput;
   active: DeploymentInput | null;
