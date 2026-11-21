@@ -326,6 +326,8 @@ test("persisted Apply stages include wake and boot wait only for offline depende
 
 test("failed launcher session retains node output, exit context and failed stage", async (t) => {
   const h = setup(t);
+  h.recipe.nodes.push({ role: "tts", sparkId: "spark2", serviceId: "tts",
+    workdir: "~/recipe", startCmd: "start-small", llmPort: 8891 });
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "recipe-failed-stage-"));
   const store = new RecipeSessionStore({ dir });
   const session = store.start({
@@ -358,6 +360,7 @@ test("failed launcher session retains node output, exit context and failed stage
       line.stream === "stderr" && line.nodeId === "spark1" && line.text.includes("CUDA allocation failed")));
     assert.ok(stage.logs.some((line) => line.text.includes("exit 7")));
     assert.equal(saved.stages.some((entry) => entry.phase === "health-checking"), false);
+    assert.equal(h.commands.some(({ command }) => command === "cd ~/recipe && start-small"), false);
     assert.equal(new RecipeSessionStore({ dir }).get(session.id).status, "failed");
   } finally {
     store.flush();
@@ -472,7 +475,7 @@ test("cancel aborts an in-flight serving health request rather than reporting fa
   assert.equal(isSwitchInFlight(), false);
 });
 
-test("a built plan prepares all nodes, waits for small service health, then starts the large model and waits out warmup", async (t) => {
+test("a built plan waits out large-model warmup before starting small services and rechecks before commit", { timeout: 10000 }, async (t) => {
   const h = setup(t);
   const small = { role: "tts", sparkId: "spark1", serviceId: "tts", memoryGiB: 5,
     workdir: "~/recipe", prepareCmd: "prepare-small", startCmd: "start-small",
@@ -482,6 +485,8 @@ test("a built plan prepares all nodes, waits for small service health, then star
   h.options.plan = { target, input: { recipeId: h.recipe.id }, requiredNodes: h.sparks.slice(0, 2),
     resources: new Map([["spark1", { memoryGiB: 100 }], ["spark2", { memoryGiB: 90 }]]) };
   let releaseSmall;
+  let enteredLarge;
+  const checkingLarge = new Promise((resolve) => { enteredLarge = resolve; });
   let entered;
   const checkingSmall = new Promise((resolve) => { entered = resolve; });
   const smallReady = new Promise((resolve) => { releaseSmall = resolve; });
@@ -490,23 +495,29 @@ test("a built plan prepares all nodes, waits for small service health, then star
   t.mock.method(globalThis, "fetch", async (url) => {
     if (url.includes(":8891")) { entered(); await smallReady; return { ok: true }; }
     nativeChecks++;
-    return { ok: true, json: async () => ({ warming: nativeChecks === 1 }) };
+    const warming = nativeChecks === 1;
+    if (warming) enteredLarge();
+    return { ok: true, json: async () => ({ warming }) };
   });
-  h.options.commitPlan = () => { committed = true; assert.ok(nativeChecks >= 2); };
+  h.options.commitPlan = () => { committed = true; assert.equal(nativeChecks, 3); };
   const applying = h.apply();
+  const commands = () => h.commands.map((entry) => entry.command);
+  await checkingLarge;
+  assert.ok(commands().includes("cd ~/recipe && start"));
+  assert.equal(commands().includes("cd ~/recipe && start-small"), false);
   await checkingSmall;
   assert.equal(committed, false);
-  const commands = () => h.commands.map((entry) => entry.command);
-  assert.ok(commands().indexOf("cd ~/recipe && prepare-large") < commands().indexOf("cd ~/recipe && start-small"));
-  assert.equal(commands().includes("cd ~/recipe && start"), false);
+  for (const prepare of ["prepare-small", "prepare-large"]) {
+    assert.ok(commands().indexOf(`cd ~/recipe && ${prepare}`) < commands().indexOf("cd ~/recipe && start"));
+  }
+  assert.equal(nativeChecks, 2);
   releaseSmall();
   await applying;
   assert.equal(committed, true);
-  assert.ok(commands().indexOf("cd ~/recipe && start-small") < commands().indexOf("cd ~/recipe && start"));
   assert.equal(h.phases.at(-1).phase, "done");
 });
 
-test("small services start concurrently and all must become healthy before large-model startup, regardless of free RAM", { timeout: 5000 }, async (t) => {
+test("small services warm concurrently after the large model is healthy; commit waits for all of them", { timeout: 5000 }, async (t) => {
   const h = setup(t);
   const controller = new AbortController();
   h.options.signal = controller.signal;
@@ -516,42 +527,43 @@ test("small services start concurrently and all must become healthy before large
     workdir: "~/recipe", startCmd: `start-small-${i}`, llmPort: port, startOrder: 0,
   }));
   h.options.plan = { target: { ...h.recipe, nodes: [...h.recipe.nodes, ...small] },
-    input: { recipeId: h.recipe.id }, requiredNodes: h.sparks.slice(0, 2),
-    resources: new Map(h.sparks.map((spark) => [spark.id, { memoryGiB: 1000 }])) };
+    input: { recipeId: h.recipe.id }, requiredNodes: h.sparks.slice(0, 2) };
+  let largeHealthy = false;
+  let committed = false;
+  h.options.commitPlan = () => { committed = true; };
   const original = globalThis.recipeTestSsh;
-  globalThis.recipeTestSsh = (spark, command, options) =>
-    command.includes("/proc/meminfo") ? Promise.resolve("0") : original(spark, command, options);
+  globalThis.recipeTestSsh = (spark, command, options) => {
+    if (command.includes("&& start-small-")) assert.equal(largeHealthy, true);
+    return original(spark, command, options);
+  };
   const releases = new Map();
-  const healthy = new Set();
   let entered;
   const allChecking = new Promise((resolve) => { entered = resolve; });
   t.mock.method(globalThis, "fetch", async (url, { signal }) => {
     const port = Number(new URL(url).port);
-    if (port === 8888 || healthy.has(port)) return { ok: true };
+    if (port === 8888) { largeHealthy = true; return { ok: true }; }
     await new Promise((resolve, reject) => {
       releases.set(port, resolve);
       signal.addEventListener("abort", () => reject(signal.reason), { once: true });
       if (releases.size === small.length) entered();
     });
-    healthy.add(port);
     return { ok: true };
   });
   const applying = h.apply();
   applying.catch(() => {});
   await allChecking;
-  const largeStarted = () => h.commands.some(({ command }) => command === "cd ~/recipe && start");
-  assert.equal(largeStarted(), false);
+  assert.equal(committed, false);
   releases.get(8891)();
   releases.get(8892)();
   await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(largeStarted(), false);
+  assert.equal(committed, false);
   releases.get(8889)();
   await applying;
-  assert.equal(largeStarted(), true);
+  assert.equal(committed, true);
   assert.equal(h.phases.at(-1).phase, "done");
 });
 
-test("a small-service failure cancels parallel health waits and never starts the large model", { timeout: 5000 }, async (t) => {
+test("a small-service failure after large-model readiness cancels sibling health waits without committing", { timeout: 5000 }, async (t) => {
   const h = setup(t);
   const small = [8891, 8892].map((port, i) => ({
     role: `small-${i}`, sparkId: `spark${i + 1}`, serviceId: `small-${i}`,
@@ -562,6 +574,8 @@ test("a small-service failure cancels parallel health waits and never starts the
   let siblingChecking;
   const checking = new Promise((resolve) => { siblingChecking = resolve; });
   let siblingCancelled = false;
+  let committed = false;
+  h.options.commitPlan = () => { committed = true; };
   const original = globalThis.recipeTestSsh;
   globalThis.recipeTestSsh = async (spark, command, options) => {
     if (command === "cd ~/recipe && start-small-0") {
@@ -570,7 +584,8 @@ test("a small-service failure cancels parallel health waits and never starts the
     }
     return original(spark, command, options);
   };
-  t.mock.method(globalThis, "fetch", async (_url, { signal }) => {
+  t.mock.method(globalThis, "fetch", async (url, { signal }) => {
+    if (url.includes(":8888")) return { ok: true };
     siblingChecking();
     return await new Promise((_, reject) => signal.addEventListener("abort", () => {
       siblingCancelled = true;
@@ -579,7 +594,8 @@ test("a small-service failure cancels parallel health waits and never starts the
   });
   await assert.rejects(h.apply(), /native allocation failed/);
   assert.equal(siblingCancelled, true);
-  assert.equal(h.commands.some(({ command }) => command === "cd ~/recipe && start"), false);
+  assert.ok(h.commands.some(({ command }) => command === "cd ~/recipe && start"));
+  assert.equal(committed, false);
   assert.equal(isSwitchInFlight(), false);
 });
 

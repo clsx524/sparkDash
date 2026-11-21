@@ -1537,10 +1537,10 @@ selectors and launcher `nodes[].sparkId` in the recipe definition. Overrides via
 - Apply checks canonical file sizes and transfer prerequisites before stopping
   models, removes only explicitly owned model containers, stages selected files
   without full SHA256 passes, imports prepared images and prepares runtime assets.
-  Explicit Model Registry Sync retains checksum verification. Small services start
-  concurrently, including services sharing a host; every small service must become
-  healthy before large-model startup. Followers precede the head; native TP3
-  readiness also requires `warming=false`.
+  Explicit Model Registry Sync retains checksum verification. Large-model followers
+  start before the head, and native TP3 readiness also requires `warming=false`.
+  Once the large model is ready, selected small services start concurrently, including
+  services sharing a host. Apply rechecks large-model health before committing.
   The TP3 container adapter uses upstream's launcher/helper and mirrors its NVMe
   companion service: restart a failed helper after five seconds without killing
   the native rank, and stop the helper when that rank exits. It does not add

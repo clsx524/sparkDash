@@ -3,7 +3,8 @@
  *
  * Wake dependencies, validate resources/artifacts/transport before stopping,
  * remove owned model containers, stage verified artifacts, prepare runtimes,
- * warm small services first, then start large ranks and check serving health.
+ * wait for large ranks to serve, then start and warm small services.
+ * Commit only after checking that the large ranks are still healthy.
  * Progress and attached output feed the existing persisted Apply sessions.
  *
  * Refuses to run a second switch concurrently and refuses to proceed on a detected conflict
@@ -231,20 +232,20 @@ async function waitForRecipeStopped(recipeRegistry, recipe, options) {
 /**
  * Poll every target node's shard-loading progress (falling back to a historical-average
  * estimate once the log signal is gone) and report the combined result via `onProgress`,
- * until `isStopped()` returns true. Runs alongside `waitForNodeHealth` for the same nodes —
+ * until cancelled. Runs alongside `waitForNodeHealth` for the same nodes —
  * this never decides success/failure itself, only reports how far along the load looks.
  *
  * @param {import("./RecipeRegistry.js").RecipeRegistry} recipeRegistry
- * @param {object} target - the recipe being switched to
- * @param {number} startedAt - epoch ms when the start command was issued
+ * @param {object[]} nodes - the large model's ranks
+ * @param {number} startedAt - epoch ms when health checking began
  * @param {number | null} historicalAverageMs
  * @param {(progress: object) => void} onProgress
- * @param {() => boolean} isStopped
+ * @param {AbortSignal} signal
  */
-async function pollSwitchProgress(recipeRegistry, target, startedAt, historicalAverageMs, onProgress, isStopped, signal) {
-  while (!isStopped() && !signal.aborted) {
+async function pollSwitchProgress(recipeRegistry, nodes, startedAt, historicalAverageMs, onProgress, signal) {
+  while (!signal.aborted) {
     const nodeEstimates = await Promise.all(
-      target.nodes.map(async (node) => {
+      nodes.map(async (node) => {
         const spark = recipeRegistry._sparkForNode(node);
         if (!spark) return null;
         const shardProgress = await abortable(
@@ -260,7 +261,7 @@ async function pollSwitchProgress(recipeRegistry, target, startedAt, historicalA
         });
       })
     );
-    if (isStopped() || signal.aborted) return;
+    if (signal.aborted) return;
     const combined = combineNodeProgress(nodeEstimates);
     if (combined) onProgress(combined);
     try {
@@ -509,44 +510,53 @@ export async function switchRecipe(recipeRegistry, modelRegistry, targetId, onPr
     if (dropped.length) {
       throw new RecipeSwitchError(`Required nodes went offline before start: ${dropped.map((spark) => spark.name || spark.id).join(", ")}`);
     }
-    emit("starting");
-    await Promise.all(ordered.filter((node) => node.serviceId).map((node) => bounded(async () => {
-      await runNodeCommand(recipeRegistry, node, node.startCmd, START_TIMEOUT_MS, options, "Start small service");
-      await waitForNodeHealth(recipeRegistry, node, options);
-    }, START_TIMEOUT_MS + (node.healthTimeoutMs || HEALTH_TIMEOUT_MS) + 10_000,
-    `starting ${node.role} timed out`)));
-    for (const node of ordered.filter((node) => !node.serviceId && node.startCmd)) {
-      const timeout = node.startTimeoutMs ?? START_TIMEOUT_MS;
-      await bounded(
-        () => runNodeCommand(recipeRegistry, node, node.startCmd, timeout, options, "Start large model"),
-        timeout + 10_000, `starting ${node.role} timed out`
+    const largeNodes = ordered.filter((node) => !node.serviceId);
+    const smallNodes = ordered.filter((node) => node.serviceId);
+    let largeLoadMs;
+    if (largeNodes.length) {
+      emit("starting");
+      for (const node of largeNodes) {
+        if (!node.startCmd) continue;
+        const timeout = node.startTimeoutMs ?? START_TIMEOUT_MS;
+        await bounded(
+          () => runNodeCommand(recipeRegistry, node, node.startCmd, timeout, options, "Start large model"),
+          timeout + 10_000, `starting ${node.role} timed out`
+        );
+      }
+
+      emit("health-checking", { from: current?.id ?? null });
+      const loadStartedAt = Date.now();
+      const progressStop = new AbortController();
+      const progressLoop = pollSwitchProgress(
+        recipeRegistry,
+        largeNodes,
+        loadStartedAt,
+        switchHistory.averageMs(target.id),
+        (progress) => emit("health-checking", { from: current?.id ?? null, progress }),
+        AbortSignal.any([progressStop.signal, options.signal])
       );
+      try {
+        await settleAll(largeNodes.map((node) => waitForNodeHealth(recipeRegistry, node, options)));
+        largeLoadMs = Date.now() - loadStartedAt;
+      } finally {
+        progressStop.abort();
+        await progressLoop;
+      }
     }
-
-
-    emit("health-checking", { from: current?.id ?? null });
-    const loadStartedAt = Date.now();
-    const historicalAverageMs = switchHistory.averageMs(target.id);
-    const progressStopped = { value: false };
-    const progressStop = new AbortController();
-    const progressLoop = pollSwitchProgress(
-      recipeRegistry,
-      target,
-      loadStartedAt,
-      historicalAverageMs,
-      (progress) => emit("health-checking", { from: current?.id ?? null, progress }),
-      () => progressStopped.value,
-      AbortSignal.any([progressStop.signal, options.signal])
-    );
-    try {
-      await settleAll(target.nodes.map((n) => waitForNodeHealth(recipeRegistry, n, options)));
-    } finally {
-      progressStopped.value = true;
-      progressStop.abort();
-      await progressLoop;
+    if (smallNodes.length) {
+      emit("starting", { message: "Starting and warming small services" });
+      await Promise.all(smallNodes.map((node) => bounded(async () => {
+        await runNodeCommand(recipeRegistry, node, node.startCmd, START_TIMEOUT_MS, options, "Start small service");
+        await waitForNodeHealth(recipeRegistry, node, options);
+      }, START_TIMEOUT_MS + (node.healthTimeoutMs || HEALTH_TIMEOUT_MS) + 10_000,
+      `starting ${node.role} timed out`)));
+      if (largeNodes.length) {
+        emit("health-checking", { message: "Rechecking large-model health after small-service startup" });
+        await settleAll(largeNodes.map((node) => waitForNodeHealth(recipeRegistry, node, options)));
+      }
     }
     options.signal.throwIfAborted();
-    switchHistory.record(target.id, Date.now() - loadStartedAt);
+    if (largeLoadMs !== undefined) switchHistory.record(target.id, largeLoadMs);
     options.commitPlan?.();
 
     emit("done", { from: current?.id ?? null });

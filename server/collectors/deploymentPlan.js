@@ -220,8 +220,9 @@ export class DeploymentPlanner {
       ...(['deepseek-v41-flash', 'deepseek-v41-lakyfx-tp3'].includes(plan.input.recipeId)
         ? ['Evict the other DeepSeek deployment cache on Spark1/2 only; preserve Atom registry weights'] : []),
       'Import the selected prepared images through NFS/RDMA and stage the selected weights; no worker image builds or pulls',
-      'Start and warm all selected small services concurrently',
-      ...(plan.input.recipeId ? ['Start the selected large model after every small service is healthy; wait for serving readiness'] : []),
+      ...(plan.input.recipeId ? ['Start the selected large model and wait for serving readiness'] : []),
+      ...(plan.input.placements.length ? ['Start and warm all selected small services concurrently'] : []),
+      ...(plan.input.recipeId && plan.input.placements.length ? ['Recheck large-model health after small-service startup'] : []),
       'Commit the plan and switch stable inference routes to healthy placements',
     ];
     if (save) { this.state.draft = plan.input; this.save(); }
