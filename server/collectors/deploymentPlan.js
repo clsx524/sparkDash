@@ -80,7 +80,7 @@ export class DeploymentPlanner {
       const modelRoot = host.id === registry.hostId ? registry.directory : host.modelFolder;
       if (!modelRoot) throw new Error('Configure the Atom model registry before applying');
       const cmd = `SPARKDASH_MODEL_ROOT=${shQuotePath(modelRoot)} python3 ${RUNTIME}/model-runtime.py`;
-      target.nodes.push({ role: service.id, sparkId: host.id, serviceId: service.id, imageId: service.id, workdir: RUNTIME,
+      target.nodes.push({ role: service.id, sparkId: host.id, serviceId: service.id, imageId: service.imageId || service.id, workdir: RUNTIME,
         prepareCmd: `${cmd} prepare ${service.id}`, startCmd: `${cmd} start ${service.id}`, stopCmd: `${cmd} stop ${service.id}`,
         statusCmd: `${cmd} status ${service.id}`, runningPattern: '^running$', containerName: service.id,
         llmPort: service.port, healthPath: service.healthPath, modelIds: service.modelIds,

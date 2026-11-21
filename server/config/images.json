@@ -72,11 +72,6 @@
     "inputs": ["minimax-h3-image-Dockerfile", "minimax-h3-multiproc-executor.py", "minimax-h3-diffusion-engine.py", "minimax-h3-security-common.sh"]
   },
   {
-    "id": "qwen3-embedding",
-    "image": "ghcr.io/huggingface/text-embeddings-inference:121-1.9",
-    "pull": "ghcr.io/huggingface/text-embeddings-inference:121-1.9"
-  },
-  {
     "id": "qwen3-asr",
     "image": "vllm/vllm-openai:v0.31.0-aarch64",
     "pull": "vllm/vllm-openai:v0.31.0-aarch64"
