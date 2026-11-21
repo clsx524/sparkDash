@@ -90,6 +90,75 @@
     ]
   },
   {
+    "id": "deepseek-v41-spark-ds41f-tp3",
+    "label": "DeepSeek V4.1 Flash · spark-ds41f TP3 triangle",
+    "group": "distributed-text-gen",
+    "tp": 3,
+    "requiredNodes": [
+      {
+        "sparkId": "spark-1"
+      },
+      {
+        "sparkId": "spark-2"
+      },
+      {
+        "sparkId": "atom"
+      }
+    ],
+    "resources": {
+      "spark-1": {
+        "memoryGiB": 100,
+        "diskGiB": 270
+      },
+      "spark-2": {
+        "memoryGiB": 92,
+        "diskGiB": 270
+      },
+      "atom": {
+        "memoryGiB": 92,
+        "diskGiB": 130
+      }
+    },
+    "nodes": [
+      {
+        "role": "rank-0",
+        "sparkId": "spark-1",
+        "workdir": "~/projects/spark-ds41f",
+        "prepareCmd": "bin/spark --cluster-config config/cluster.json cluster sync --apply",
+        "startCmd": "bin/spark --cluster-config config/cluster.json cluster start --apply",
+        "stopCmd": "bin/spark --cluster-config config/cluster.json cluster stop --apply",
+        "statusCmd": "bin/spark --cluster-config config/cluster.json status",
+        "runningPattern": "spark-ds41f",
+        "containerName": "spark-ds41f",
+        "modelIds": [
+          "deepseek-v4.1-flash"
+        ],
+        "startOrder": 20,
+        "llmPort": 8000,
+        "waitForWarmup": true,
+        "healthTimeoutMs": 3600000
+      },
+      {
+        "role": "rank-1",
+        "sparkId": "spark-2",
+        "workdir": "~/projects/spark-ds41f",
+        "statusCmd": "bin/spark --cluster-config config/cluster.json status",
+        "runningPattern": "spark-ds41f",
+        "containerName": "spark-ds41f",
+        "startOrder": 10
+      },
+      {
+        "role": "rank-2",
+        "sparkId": "atom",
+        "workdir": "~/projects/spark-ds41f",
+        "statusCmd": "bin/spark --cluster-config config/cluster.json status",
+        "runningPattern": "spark-ds41f",
+        "containerName": "spark-ds41f",
+        "startOrder": 10
+      }
+    ]
+  },
+  {
     "id": "glm53-exl3",
     "label": "GLM-5.3-Flash EXL3 (TP2, TensorFold)",
     "group": "dual-text-gen",
