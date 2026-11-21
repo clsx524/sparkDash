@@ -422,6 +422,9 @@ export async function switchRecipe(recipeRegistry, modelRegistry, targetId, onPr
       signal: options.signal,
       getOnline: (id) => requiredIds.has(id) || options.getOnline(id) === true,
     };
+    await settleAll(target.nodes.filter((node) => node.preflightCmd).map((node) =>
+      runNodeCommand(recipeRegistry, node, node.preflightCmd, 30_000, options, "Check host prerequisites")
+    ));
     if (options.plan && target.nodes.some((node) => node.modelIds?.length)) {
       await bounded(() => syncModelsForRecipe(recipeRegistry, modelRegistry, target, { ...options, sourceOnly: true }),
         MODEL_SYNC_PHASE_TIMEOUT_MS, "checking canonical artifacts timed out");
@@ -441,9 +444,11 @@ export async function switchRecipe(recipeRegistry, modelRegistry, targetId, onPr
 
     if (current) {
       emit("stopping", { from: current.id });
+      const stopping = current.nodes.filter((node) => node.stopCmd);
       await bounded(
-        () => settleAll(current.nodes.filter((node) => node.stopCmd).map((n) => runNodeCommand(recipeRegistry, n, n.stopCmd, STOP_TIMEOUT_MS, options, "Stop recipe"))),
-        STOP_TIMEOUT_MS + 10_000,
+        () => settleAll(stopping.map((node) => runNodeCommand(recipeRegistry, node, node.stopCmd,
+          node.stopTimeoutMs ?? STOP_TIMEOUT_MS, options, "Stop recipe"))),
+        Math.max(STOP_TIMEOUT_MS, ...stopping.map((node) => node.stopTimeoutMs ?? STOP_TIMEOUT_MS)) + 10_000,
         `stopping ${current.id} timed out`
       );
 
@@ -508,9 +513,10 @@ export async function switchRecipe(recipeRegistry, modelRegistry, targetId, onPr
     }, START_TIMEOUT_MS + (node.healthTimeoutMs || HEALTH_TIMEOUT_MS) + 10_000,
     `starting ${node.role} timed out`)));
     for (const node of ordered.filter((node) => !node.serviceId && node.startCmd)) {
+      const timeout = node.startTimeoutMs ?? START_TIMEOUT_MS;
       await bounded(
-        () => runNodeCommand(recipeRegistry, node, node.startCmd, START_TIMEOUT_MS, options, "Start large model"),
-        START_TIMEOUT_MS + 10_000, `starting ${node.role} timed out`
+        () => runNodeCommand(recipeRegistry, node, node.startCmd, timeout, options, "Start large model"),
+        timeout + 10_000, `starting ${node.role} timed out`
       );
     }
 

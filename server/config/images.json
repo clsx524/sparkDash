@@ -10,6 +10,24 @@
     "fetchBase": true
   },
   {
+    "id": "deepseek-v41-spark-ds41f-tp3",
+    "image": "spark-ds41f:1120",
+    "builder": "spark-ds41f",
+    "context": "projects/spark-ds41f",
+    "source": {
+      "repo": "https://github.com/christopherowen/spark-ds41f.git",
+      "revision": "a45b7919588ceeeb2ddd782acbcfbb05d0824e23"
+    },
+    "labels": {
+      "org.opencontainers.image.revision": "a45b7919588ceeeb2ddd782acbcfbb05d0824e23",
+      "local.spark-ds41f.vllm.tree": "8fc99ca7546c5c538f0fe64e7c82954f1d2d7ae0",
+      "local.spark-ds41f.nccl.tree": "6af10aa730a64fcee8781d62340a9c9184e79469",
+      "local.spark-ds41f.tilelang.tree": "741806c7357102130a149cdcae2a5f22678eab67",
+      "local.spark-ds41f.tile_kernels.tree": "cb2fa41c8af290204c81c547ed678ebf957cca53",
+      "local.spark-ds41f.sparknet.tree": "e06f6a0675cb66638231d2c68948a2b315b69b07"
+    }
+  },
+  {
     "id": "deepseek-v41-flash",
     "image": "tensorfold-dsv41:exl3-tp2-9d0f4a04af7f",
     "context": "image-sources/deepseek-v41-flash",

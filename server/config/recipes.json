@@ -108,15 +108,15 @@
     "resources": {
       "spark-1": {
         "memoryGiB": 100,
-        "diskGiB": 270
+        "diskGiB": 540
       },
       "spark-2": {
         "memoryGiB": 92,
-        "diskGiB": 270
+        "diskGiB": 540
       },
       "atom": {
         "memoryGiB": 92,
-        "diskGiB": 130
+        "diskGiB": 65
       }
     },
     "nodes": [
@@ -124,36 +124,45 @@
         "role": "rank-0",
         "sparkId": "spark-1",
         "workdir": "~/projects/spark-ds41f",
-        "prepareCmd": "bin/spark --cluster-config config/cluster.json cluster sync --apply",
-        "startCmd": "bin/spark --cluster-config config/cluster.json cluster start --apply",
-        "stopCmd": "bin/spark --cluster-config config/cluster.json cluster stop --apply",
-        "statusCmd": "bin/spark --cluster-config config/cluster.json status",
-        "runningPattern": "spark-ds41f",
+        "preflightCmd": "~/.local/share/sparkdash-models/spark-ds41f-preflight.sh",
+        "prepareCmd": "python3 ~/.local/share/sparkdash-models/spark-ds41f-weights.py",
+        "startCmd": "bin/spark --cluster-config config/sparkdash.local.json cluster start --apply",
+        "stopCmd": "bin/spark --cluster-config config/sparkdash.local.json cluster stop --parallel --remove --apply",
+        "statusCmd": "docker ps --filter 'name=^/spark-ds41f$' --format '{{.Status}}'",
+        "runningPattern": "^Up ",
         "containerName": "spark-ds41f",
         "modelIds": [
-          "deepseek-v4.1-flash"
+          "DeepSeek-V4.1-Flash-1017"
         ],
         "startOrder": 20,
-        "llmPort": 8000,
-        "waitForWarmup": true,
+        "llmPort": 8888,
+        "healthPath": "/v1/models",
+        "startTimeoutMs": 3900000,
+        "stopTimeoutMs": 120000,
         "healthTimeoutMs": 3600000
       },
       {
         "role": "rank-1",
         "sparkId": "spark-2",
         "workdir": "~/projects/spark-ds41f",
-        "statusCmd": "bin/spark --cluster-config config/cluster.json status",
-        "runningPattern": "spark-ds41f",
+        "preflightCmd": "~/.local/share/sparkdash-models/spark-ds41f-preflight.sh",
+        "prepareCmd": "python3 ~/.local/share/sparkdash-models/spark-ds41f-weights.py",
+        "statusCmd": "docker ps --filter 'name=^/spark-ds41f$' --format '{{.Status}}'",
+        "runningPattern": "^Up ",
         "containerName": "spark-ds41f",
+        "modelIds": ["DeepSeek-V4.1-Flash-1017"],
         "startOrder": 10
       },
       {
         "role": "rank-2",
         "sparkId": "atom",
         "workdir": "~/projects/spark-ds41f",
-        "statusCmd": "bin/spark --cluster-config config/cluster.json status",
-        "runningPattern": "spark-ds41f",
+        "preflightCmd": "~/.local/share/sparkdash-models/spark-ds41f-preflight.sh",
+        "prepareCmd": "python3 ~/.local/share/sparkdash-models/spark-ds41f-weights.py",
+        "statusCmd": "docker ps --filter 'name=^/spark-ds41f$' --format '{{.Status}}'",
+        "runningPattern": "^Up ",
         "containerName": "spark-ds41f",
+        "modelIds": ["DeepSeek-V4.1-Flash-1017"],
         "startOrder": 10
       }
     ]

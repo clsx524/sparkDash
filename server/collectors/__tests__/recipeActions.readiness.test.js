@@ -583,6 +583,24 @@ test("a small-service failure cancels parallel health waits and never starts the
   assert.equal(isSwitchInFlight(), false);
 });
 
+test("a worker failing host preflight leaves the current recipe running", async (t) => {
+  const h = setup(t, { sameTarget: true });
+  h.recipe.nodes.push({
+    role: "worker", sparkId: "spark2", workdir: "~/recipe", preflightCmd: "check-host",
+  });
+  const original = globalThis.recipeTestSsh;
+  globalThis.recipeTestSsh = (spark, command, options) => {
+    if (spark.id === "spark2" && command === "cd ~/recipe && check-host") {
+      throw new Error("Boot the provisioned 64 KiB kernel");
+    }
+    return original(spark, command, options);
+  };
+  await assert.rejects(h.apply(), /Boot the provisioned 64 KiB kernel/);
+  assert.ok(!h.commands.some(({ command }) =>
+    command.includes("&& stop") || command.includes("docker rm") || command.includes("&& start")));
+  assert.equal(h.phases.at(-1).phase, "failed");
+});
+
 test("incomplete canonical artifacts fail before stopping a running model", async (t) => {
   const h = setup(t, { sameTarget: true });
   h.recipe.nodes[0].modelIds = ["weights"];
