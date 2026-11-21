@@ -29,7 +29,7 @@
       "eager",
       "--enforce-eager",
       "--gpu-memory-utilization",
-      "0.07",
+      "0.05",
       "--max-model-len",
       "16384",
       "--max-num-batched-tokens",
