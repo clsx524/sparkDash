@@ -1562,13 +1562,14 @@ selectors and launcher `nodes[].sparkId` in the recipe definition. Overrides via
 
 #### Persistent Apply sessions
 
-**Current Apply** shows the latest session and its final result. While a run
-is active, progress fills the dialog and the topology planner is hidden.
-Refreshing the browser restores the dialog and reloads the session.
+Model planning is at the top of the recipe dialog. Below it, **Current Apply**
+shows the in-progress run or an empty state when no run is active.
 
-Select **Apply history** to show prior sessions alongside progress on wide
-screens or below it on narrow screens. Selecting a row shows read-only details;
-the selection survives a refresh, but the history panel opens only on request.
+**Apply history** replaces progress in that same panel. It lists finished runs
+on the left and shows the selected run's read-only details on the right
+(stacked on narrow screens). **Back to progress** returns to Current Apply.
+Refreshing restores an in-progress run and remembers the history selection,
+but does not open History automatically.
 
 While a session is running, **Cancel Apply** in the dialog's upper-right
 corner cancels the current run on the server, even after closing and reopening

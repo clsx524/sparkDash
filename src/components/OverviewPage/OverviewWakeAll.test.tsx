@@ -87,7 +87,7 @@ describe("Wake all recipe activation", () => {
     expect(wakeAllSparks).toHaveBeenCalledTimes(1);
     expect(applyDeploymentPlan).not.toHaveBeenCalled();
     expect(container.querySelector('[aria-label="Current Apply"] [data-session-id]')?.getAttribute("data-session-id")).toBe(current.id);
-    expect(container.querySelector<HTMLElement>('[aria-label="Apply History"]')?.hidden).toBe(true);
+    expect(container.querySelector('[aria-label="Apply History"]')).toBeNull();
     expect(container.querySelector(".ov-prog")).toBeNull();
     expect(container.querySelector(".ov-batchmsg[role=status]")).toBeNull();
   });
