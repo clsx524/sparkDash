@@ -11,6 +11,7 @@ Format: version sections are listed newest first.
 
 ### Changed
 - Install spark-attic v0.1.6 (was v0.1.4). It adds the Ubuntu firmware-console display fix from 0.1.5; the status file and the installer's `--check`/`--plain` flags are unchanged.
+- Lower Qwen3-ASR's fixed KV cache from 2 GiB to 1 GiB without changing its context limit or scheduler cap.
 
 ### Added
 - Show an Installed badge in Edit Spark when the spark-attic service is detected.

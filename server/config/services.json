@@ -63,7 +63,7 @@
       "--gpu-memory-utilization",
       "0.05",
       "--kv-cache-memory-bytes",
-      "2147483648",
+      "1073741824",
       "--safetensors-load-strategy",
       "eager",
       "--max-model-len",
