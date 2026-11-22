@@ -611,7 +611,7 @@ const app = express();
 const server = createServer(app);
 
 const jsonBody = express.json();
-app.use((req, res, next) => req.path.startsWith("/inference/") ? next() : jsonBody(req, res, next));
+app.use(jsonBody);
 // Registered ahead of the auth middleware: a remote browser holding no token
 // (or a stale one) must still be able to learn that it needs one.
 app.get("/api/auth/status", createHostGuardMiddleware(), (req, res) => {

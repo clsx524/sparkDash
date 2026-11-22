@@ -1546,9 +1546,10 @@ selectors and launcher `nodes[].sparkId` in the recipe definition. Overrides via
   the native rank, and stop the helper when that rank exits. It does not add
   independent native-rank or cluster restarts.
 - The successful draft is committed to private `config/deployment.json`
-  (`DEPLOYMENT_PLAN_JSON_PATH` overrides it). Stable streaming routes under
-  `/inference/{embeddings,tts,asr,images}` use only committed placements and return
-  503 when unassigned. A draft never changes serving routes.
+  (`DEPLOYMENT_PLAN_JSON_PATH` overrides it). `GET /api/deployment/active`
+  publishes the resolved committed placement: the chat head and each auxiliary
+  service host/port, with an ETag revision. SparkDash carries no model traffic.
+  A draft never changes the published placement.
 - The default includes Qwen ASR on Spark 1 and Qwen TTS/embedding on Spark 2.
   Qwen Image and Fish Audio Drama 3 are unassigned by default. Drama uses the
   official unpruned FP8 checkpoint and can be placed on Atom only. Its API

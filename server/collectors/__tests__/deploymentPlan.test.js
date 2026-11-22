@@ -16,7 +16,7 @@ function fixture(t) {
   registry._recipes = [{ id: 'distributed', label: 'Distributed', tp: 3,
     requiredNodes: sparks.map((spark) => ({ sparkId: spark.id })),
     resources: Object.fromEntries(sparks.map((spark) => [spark.id, { memoryGiB: 90, runtimeDiskGiB: 10 }])),
-    nodes: [{ role: 'head', sparkId: 'one', modelIds: [] }] }];
+    nodes: [{ role: 'head', sparkId: 'one', modelIds: [], llmPort: 8888, healthPath: '/v1/models' }] }];
   const services = [{ id: 'qwen3-asr', label: 'ASR', port: 8892, healthPath: '/v1/models', memoryGiB: 8, startupGiB: 10, modelIds: ['asr'] }];
   const GiB = 2 ** 30;
   const measurements = new Map(sparks.map((spark) => [spark.id, {
@@ -88,7 +88,7 @@ test('Apply rejects stale preview revisions without starting a deployment', asyn
   assert.equal(started, 0);
 });
 
-test('Drama is optional, restricted to Atom, and never exposed by the shared speech proxy', async (t) => {
+test('Drama is optional and restricted to Atom', async (t) => {
   const { planner, registry, file, probes } = fixture(t);
   const liveCatalog = new DeploymentPlanner(registry, planner.models, { file });
   const catalog = liveCatalog.catalog();
@@ -101,37 +101,77 @@ test('Drama is optional, restricted to Atom, and never exposed by the shared spe
   assert.deepEqual(plan.target.nodes.map(({ imageId, modelIds }) => ({ imageId, modelIds })), [
     { imageId: 'drama-tts', modelIds: ['drama-3'] },
   ]);
-  liveCatalog.commit(plan);
-  const app = express();
-  liveCatalog.register(app, () => { throw new Error('Not an Apply test'); });
-  const front = await listen(t, app);
-  assert.equal((await fetch(front + '/inference/tts/v1/audio/speech', { method: 'POST' })).status, 503);
 });
 
-test('stable inference route streams binary uploads and follows only committed placements', async (t) => {
-  const { planner, services } = fixture(t);
-  const received = [];
-  const upstream = await listen(t, async (request, response) => {
-    const chunks = [];
-    for await (const chunk of request) chunks.push(chunk);
-    received.push({ path: request.url, body: Buffer.concat(chunks) });
-    response.setHeader('content-type', 'application/octet-stream');
-    response.write(Buffer.from([0, 255, 1]));
-    response.end(Buffer.from([2, 0, 254]));
-  });
-  services[0].port = Number(new URL(upstream).port);
+async function registered(t, planner) {
   const app = express();
+  app.use(express.json());
   planner.register(app, () => { throw new Error('Not an Apply test'); });
-  const front = await listen(t, app);
-  const bytes = Buffer.from([1, 0, 255, 128, 2]);
-  const send = () => fetch(front + '/inference/asr/v1/audio/transcriptions?format=json', { method: 'POST', headers: { 'content-type': 'multipart/form-data; boundary=sample' }, body: bytes });
-  assert.equal((await send()).status, 503);
-  await planner.preview({ recipeId: null, placements: [{ serviceId: 'qwen3-asr', sparkId: 'one' }] }, { save: true });
-  assert.equal((await send()).status, 503); // Building a draft never changes serving routes.
-  planner.commit(planner.compile(planner.state.draft));
-  const response = await send();
+  return listen(t, app);
+}
+
+const commitDistributed = (planner, sparkId) =>
+  planner.commit(planner.compile({ recipeId: 'distributed', placements: [{ serviceId: 'qwen3-asr', sparkId }] }));
+
+test('active placements are empty until a plan is committed', async (t) => {
+  const { planner } = fixture(t);
+  const base = await registered(t, planner);
+  const response = await fetch(base + '/api/deployment/active');
   assert.equal(response.status, 200);
-  assert.deepEqual(Buffer.from(await response.arrayBuffer()), Buffer.from([0, 255, 1, 2, 0, 254]));
-  assert.equal(received[0].path, '/v1/audio/transcriptions?format=json');
-  assert.deepEqual(received[0].body, bytes);
+  assert.deepEqual(await response.json(), { revision: null, recipe: null, services: [] });
 });
+
+test('active placements follow the committed recipe and service hosts', async (t) => {
+  const { planner } = fixture(t);
+  const base = await registered(t, planner);
+  commitDistributed(planner, 'one');
+  const first = await (await fetch(base + '/api/deployment/active')).json();
+  assert.equal(typeof first.revision, 'string');
+  assert.deepEqual(first.recipe, {
+    id: 'distributed', label: 'Distributed', modelIds: [], host: '127.0.0.1', port: 8888, healthPath: '/v1/models',
+  });
+  assert.deepEqual(first.services, [
+    { id: 'qwen3-asr', modelIds: ['asr'], host: '127.0.0.1', port: 8892, healthPath: '/v1/models' },
+  ]);
+
+  planner.recipes.sparkRegistry.getSpark('two').lanIp = '192.0.2.2';
+  commitDistributed(planner, 'two');
+  const second = await (await fetch(base + '/api/deployment/active')).json();
+  assert.notEqual(second.revision, first.revision);
+  assert.equal(second.services[0].id, 'qwen3-asr');
+  assert.equal(second.services[0].host, '192.0.2.2');
+});
+
+test('draft previews never change active placements', async (t) => {
+  const { planner } = fixture(t);
+  const base = await registered(t, planner);
+  await planner.preview({ recipeId: null, placements: [{ serviceId: 'qwen3-asr', sparkId: 'one' }] }, { save: true });
+  assert.deepEqual(await (await fetch(base + '/api/deployment/active')).json(), { revision: null, recipe: null, services: [] });
+  commitDistributed(planner, 'one');
+  const first = await (await fetch(base + '/api/deployment/active')).json();
+  await planner.preview({ recipeId: null, placements: [{ serviceId: 'qwen3-asr', sparkId: 'two' }] }, { save: true });
+  assert.deepEqual(await (await fetch(base + '/api/deployment/active')).json(), first);
+});
+
+test('llmHost takes precedence over lanIp for recipe and service hosts', async (t) => {
+  const { planner } = fixture(t);
+  const base = await registered(t, planner);
+  commitDistributed(planner, 'one');
+  planner.recipes.sparkRegistry.getSpark('one').llmHost = ' 10.0.0.9 ';
+  const body = await (await fetch(base + '/api/deployment/active')).json();
+  assert.equal(body.recipe.host, '10.0.0.9');
+  assert.equal(body.services[0].host, '10.0.0.9');
+});
+
+test('matching If-None-Match returns 304', async (t) => {
+  const { planner } = fixture(t);
+  const base = await registered(t, planner);
+  commitDistributed(planner, 'one');
+  const first = await fetch(base + '/api/deployment/active');
+  const etag = first.headers.get('etag');
+  assert.ok(etag);
+  const second = await fetch(base + '/api/deployment/active', { headers: { 'if-none-match': etag } });
+  assert.equal(second.status, 304);
+  assert.equal(await second.text(), '');
+});
+

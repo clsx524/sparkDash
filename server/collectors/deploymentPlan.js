@@ -1,13 +1,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import http from 'node:http';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { atomicWrite } from '../util/atomicWrite.js';
 import { sshExec } from './ssh.js';
 import { shQuotePath } from './modelSync.js';
-import { llmProbeHost } from './llmHost.js';
-import { isAllowedTargetHost } from '../validate.js';
 import { filterManifestToIncluded } from './ModelRegistry.js';
 import { assertSafeModelFolder, assertSafeSubfolder } from './modelPaths.js';
 
@@ -232,6 +229,30 @@ export class DeploymentPlanner {
   save() { atomicWrite(this.file, JSON.stringify(this.state, null, 2) + '\n', 0o600); }
   commit(plan) { this.state.active = plan.input; this.state.draft = plan.input; this.save(); }
 
+  /** Direct-connect placement for the data plane; SparkDash never proxies model traffic. */
+  activePlacements() {
+    const active = this.state.active;
+    if (!active) return { revision: null, recipe: null, services: [] };
+    const hostOf = (spark) => spark?.llmHost?.trim() || spark?.lanIp?.trim() || '';
+    const recipe = this.recipes.get(active.recipeId);
+    const node = recipe?.nodes?.find((item) => Number.isFinite(item.llmPort));
+    const spark = node && this.recipes.sparkRegistry.getSpark(node.sparkId);
+    const services = [];
+    for (const placement of active.placements ?? []) {
+      const service = this.services.find((item) => item.id === placement.serviceId);
+      const target = this.recipes.sparkRegistry.getSpark(placement.sparkId);
+      if (!service || !target) continue;
+      services.push({ id: service.id, modelIds: service.modelIds ?? [], host: hostOf(target), port: service.port, healthPath: service.healthPath });
+    }
+    return {
+      revision: hash(active),
+      recipe: recipe && node && spark
+        ? { id: recipe.id, label: recipe.label, modelIds: node.modelIds ?? [], host: hostOf(spark), port: node.llmPort, healthPath: node.healthPath ?? '' }
+        : null,
+      services,
+    };
+  }
+
   register(app, startApply) {
     app.get('/api/deployment', (_req, res) => res.json(this.catalog()));
     app.post('/api/deployment/preview', async (req, res) => {
@@ -249,35 +270,14 @@ export class DeploymentPlanner {
         res.json(await startApply(plan.input.recipeId, plan));
       } catch (error) { res.status(error.status || 400).json({ error: error.message }); }
     });
-    const routes = { embeddings: 'qwen3-embedding', tts: 'qwen3-tts', asr: 'qwen3-asr', images: 'qwen-image' };
-    app.use('/inference/:service', (req, res) => {
-      const maxBodyBytes = 32 * 1024 * 1024;
-      const declaredLength = Number(req.headers['content-length']);
-      if (Number.isFinite(declaredLength) && declaredLength > maxBodyBytes) {
-        return res.status(413).json({ error: 'Request body too large' });
+    app.get('/api/deployment/active', (req, res) => {
+      const body = this.activePlacements();
+      if (body.revision) {
+        const tag = `"${body.revision}"`;
+        res.set('ETag', tag);
+        if (req.headers['if-none-match'] === tag) return res.status(304).end();
       }
-      const serviceId = routes[req.params.service];
-      const placement = this.state.active?.placements.find((item) => item.serviceId === serviceId);
-      const service = this.services.find((item) => item.id === serviceId);
-      const spark = placement && this.recipes.sparkRegistry.getSpark(placement.sparkId);
-      if (!service || !spark) return res.status(503).json({ error: 'No applied placement for this model service' });
-      const host = llmProbeHost(spark);
-      if (!isAllowedTargetHost(host)) return res.status(503).json({ error: 'Invalid model host' });
-      const headers = { ...req.headers, host: `${host}:${service.port}` };
-      delete headers.authorization;
-      delete headers.cookie;
-      const body = req.body === undefined ? null : Buffer.from(JSON.stringify(req.body));
-      if (body) { headers['content-length'] = String(body.length); delete headers['transfer-encoding']; }
-      const upstream = http.request({ hostname: host, port: service.port, path: req.url, method: req.method, headers }, (response) => {
-        res.writeHead(response.statusCode || 502, response.headers);
-        response.on('error', () => res.destroy());
-        response.pipe(res);
-      });
-      upstream.on('error', (error) => { if (!res.headersSent) res.status(503).json({ error: `Model upstream unavailable: ${error.message}` }); else res.destroy(); });
-      upstream.setTimeout(300_000, () => upstream.destroy(new Error('Model request timed out')));
-      req.on('aborted', () => upstream.destroy());
-      res.on('close', () => { if (!res.writableFinished) upstream.destroy(); });
-      if (body) upstream.end(body); else req.pipe(upstream);
+      res.json(body);
     });
   }
 }
